@@ -1,0 +1,1 @@
+from .snaive import SNaive
