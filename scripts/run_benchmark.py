@@ -6,6 +6,7 @@ import os
 import sys
 import warnings
 from typing import Dict, NoReturn
+import time
 
 import torch
 import numpy as np
@@ -18,6 +19,7 @@ from ts_benchmark.common.constant import CONFIG_PATH, THIRD_PARTY_PATH
 from ts_benchmark.pipeline import pipeline
 from ts_benchmark.utils.parallel import ParallelBackend
 
+start_time = time.time()
 
 sys.path.insert(0, THIRD_PARTY_PATH)
 
@@ -355,3 +357,11 @@ if __name__ == "__main__":
         leaderboard_file_name = "test_report" + filename
         report_config["leaderboard_file_name"] = leaderboard_file_name
     report(report_config, report_method=args.report_method)
+
+end_time = time.time()
+total_time = end_time - start_time
+
+print(f"\n===== EXECUTION TIME =====")
+print(f"Total seconds: {total_time:.2f}")
+print(f"Total minutes: {total_time/60:.2f}")
+print(f"==========================\n")
