@@ -4,23 +4,19 @@
 # MyTimesNet - Execução no SPEED
 # ==============================
 
-source /sonic_home/igor.viveiros/tfb_clean/bin/activate
+# Ativar apenas UM ambiente
+source /sonic_home/igor.viveiros/py310/bin/activate
+
 export MPLCONFIGDIR=/tmp/$USER-mpl
+
 cd /sonic_home/igor.viveiros/src/TFB || exit 1
 
 echo "Starting MY TIMES NET..."
 
-
-/sonic_home/igor.viveiros/py310/bin/python 
-# Ativar ambiente (ajuste se necessário)
-source /sonic_home/igor.viveiros/py310/bin/activate
-
-cd  /sonic_home/igor.viveiros/src/TFB
-
 python ./scripts/run_benchmark.py \
   --config-path "rolling_forecast_config.json" \
   --data-name-list "ETTh1.csv" \
-  --deterministic "efficient"\
+  --deterministic "efficient" \
   --model-name "mytimesnet.MyTimesNetAdapter" \
   --model-hyper-params '{
       "batch_size":16,
@@ -33,6 +29,6 @@ python ./scripts/run_benchmark.py \
   }' \
   --num-workers 4 \
   --timeout 60000 \
-  --save-path "results_MyTimesNet_local"
+  --save-path "results_MyTimesNet_speed"
 
 echo "Finalizado."
