@@ -3,6 +3,7 @@
 # ==============================
 # MyTimesNet - Execução Local
 # ==============================
+# 
 
 # Ativar ambiente (ajuste se necessário)
 source /home/igor/venvs/py310/bin/activate
