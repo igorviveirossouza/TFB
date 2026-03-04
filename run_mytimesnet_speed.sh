@@ -1,16 +1,21 @@
 #!/bin/bash
 
 # ==============================
-# MyTimesNet - Execução Local
+# MyTimesNet - Execução no SPEED
 # ==============================
 
+source /sonic_home/igor.viveiros/tfb_clean/bin/activate
+export MPLCONFIGDIR=/tmp/$USER-mpl
+cd /sonic_home/igor.viveiros/src/TFB || exit 1
+
+echo "Starting MY TIMES NET..."
+
+
+/sonic_home/igor.viveiros/py310/bin/python 
 # Ativar ambiente (ajuste se necessário)
-source /home/igor/venvs/py310/bin/activate
+source /sonic_home/igor.viveiros/py310/bin/activate
 
-# Ir para a pasta do projeto
-cd ~/Documentos/DCC/Dissertação/src/TFB || exit 1
-
-echo "Iniciando MyTimesNet..."
+cd  /sonic_home/igor.viveiros/src/TFB
 
 python ./scripts/run_benchmark.py \
   --config-path "rolling_forecast_config.json" \
