@@ -49,8 +49,10 @@ def FFT_for_Period(x, k=2):
         S = torch.zeros(B, C, C, dtype=torch.cfloat, device=x.device)
 
         for b in range(B):
-            vec = window_mean[b].unsqueeze(1)  # [C,1]
-            S[b] = vec @ vec.conj().T  # [C,C]
+            for w in window[b]:
+                vec = w.unsqueeze(1)
+                S[b] += vec @ vec.conj().T
+            S[b] /= window.shape[1]
 
         # média no batch
         S_mean = S.mean(dim=0)  # [C,C]
