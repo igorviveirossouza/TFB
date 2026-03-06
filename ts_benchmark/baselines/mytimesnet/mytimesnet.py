@@ -51,3 +51,19 @@ class MyTimesNetAdapter(DeepForecastingModelBase):
         )
 
         return {"output": output}
+
+class MyTimesNetOriginalAdapter(DeepForecastingModelBase):
+
+    def __init__(self, **kwargs):
+        super(MyTimesNetOriginalAdapter, self).__init__(MODEL_HYPER_PARAMS, **kwargs)
+
+    @property
+    def model_name(self):
+        return "MyTimesNetOriginal"
+
+    def _init_model(self):
+        return MyTimesNetOriginal(self.config)
+
+    def _process(self, input, target, input_mark, target_mark):
+        output = self.model(input, input_mark, target, target_mark)
+        return {"output": output}           

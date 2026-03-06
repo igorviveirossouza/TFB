@@ -12,70 +12,17 @@ warnings.filterwarnings("ignore")
 
 
 
+
 def FFT_for_Period(x, k=2):
-    """
-    x: [B, T, C]
-    """
-    B, T, C = x.shape
-
-    # -------- 1) FFT --------
-    xf = torch.fft.rfft(x, dim=1)  # [B, T/2+1, C]
-    F = xf.shape[1]
-
-    # -------- 2) bandwidth r = floor(T^(1/3)) ajustado para par --------
-    r = int(T ** (1/3))
-    if r % 2 != 0:
-        r -= 1
-    r = max(r, 2)  # garantir mínimo viável
-
-    # Frequências candidatas: r, 2r, 3r, ...
-    freq_indices = torch.arange(r, F, r, device=x.device)
-
-    det_values = []
-    valid_freqs = []
-
-    for idx in freq_indices:
-        if idx - r//2 < 0 or idx + r//2 >= F:
-            continue
-
-        # -------- 3) suavização espectral --------
-        window = xf[:, idx - r//2 : idx + r//2 + 1, :]  # [B, r+1, C]
-
-        # média local
-        window_mean = window.mean(dim=1)  # [B, C]
-
-        # -------- 4) cross-spectrum --------
-        # S(f) = E[ X(f) X(f)^H ]
-        S = torch.zeros(B, C, C, dtype=torch.cfloat, device=x.device)
-
-        for b in range(B):
-            vec = window_mean[b].unsqueeze(1)  # [C,1]
-            S[b] = vec @ vec.conj().T  # [C,C]
-
-        # média no batch
-        S_mean = S.mean(dim=0)  # [C,C]
-
-        # -------- 5) determinante --------
-        det = torch.linalg.det(S_mean).real
-        det_values.append(det)
-        valid_freqs.append(idx)
-
-    det_values = torch.stack(det_values)
-
-    # -------- 6) selecionar bottom-k --------
-    _, bottom_idx = torch.topk(det_values, k, largest=False)
-
-    selected_freqs = torch.tensor(valid_freqs, device=x.device)[bottom_idx]
-
-    # -------- 7) converter para período --------
-    periods = T // selected_freqs
-
-    # peso = inverso do determinante (quanto menor, maior peso)
-    weights = 1.0 / (det_values[bottom_idx] + 1e-8)
-    weights = weights.unsqueeze(0).repeat(B, 1)
-
-    return periods.detach().cpu().numpy(), weights
-
+    # [B, T, C]
+    xf = torch.fft.rfft(x, dim=1)
+    # find period by amplitudes
+    frequency_list = abs(xf).mean(0).mean(-1)
+    frequency_list[0] = 0
+    _, top_list = torch.topk(frequency_list, k)
+    top_list = top_list.detach().cpu().numpy()
+    period = x.shape[1] // top_list
+    return period, abs(xf).mean(-1)[:, top_list]
 
 
 class TimesBlock(nn.Module):
