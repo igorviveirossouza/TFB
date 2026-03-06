@@ -1,5 +1,6 @@
 from ts_benchmark.baselines.deep_forecasting_model_base import DeepForecastingModelBase
 from ts_benchmark.baselines.mytimesnet.mytimesnet_model import MyTimesNet
+from ts_benchmark.baselines.mytimesnet.mytimesnet_model_original import MyTimesNet as MyTimesNetOriginal
 
 # hiperparâmetros padrão
 MODEL_HYPER_PARAMS = {
