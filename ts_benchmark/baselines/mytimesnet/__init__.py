@@ -1,3 +1,6 @@
-__all__ = ["MyTimesNetAdapter"]
+__all__ = ["MyTimesNetAdapter","MyTimesNetOriginalAdapter"]
 
-from ts_benchmark.baselines.mytimesnet.mytimesnet import MyTimesNetAdapter
+from ts_benchmark.baselines.mytimesnet.mytimesnet import (
+    MyTimesNetAdapter,
+    MyTimesNetOriginalAdapter,
+)    
