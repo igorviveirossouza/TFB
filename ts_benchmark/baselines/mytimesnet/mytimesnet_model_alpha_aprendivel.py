@@ -10,75 +10,70 @@ from ts_benchmark.baselines.time_series_library.layers.Embed import DataEmbeddin
 
 warnings.filterwarnings("ignore")
 
-def FFT_for_Period(x, k=2, alpha=None):
-    """
-    x: [B, T, C]
-    alpha: parâmetro aprendível
-    """
+def FFT_for_Period(x, k=2, alpha=0.5):
+
     B, T, C = x.shape
 
-    xf = torch.fft.rfft(x, dim=1)  # [B, F, C]
-    Freq = xf.shape[1]
+    xf = torch.fft.rfft(x, dim=1)
+    F = xf.shape[1]
 
-    # -------- bandwidth aprendível --------
-    if alpha is None:
-        alpha_val = 1/3
-    else:
-        alpha_val = torch.clamp(alpha, 0.05, 0.95)
+    # frequências disponíveis
+    freqs = torch.arange(1, F, device=x.device).float()
 
-    r_float = T ** alpha_val
-    r = torch.floor(r_float).int()
+    # escala espectral aprendível
+    r = T ** alpha
 
-    if r % 2 != 0:
-        r = r - 1
+    sigma = r / 2
 
-    r = torch.clamp(r, min=2, max=Freq//2)
-    r = int(r.item())
+    # kernel espectral contínuo
+    weights_freq = torch.exp(-(freqs - r)**2 / (2 * sigma**2))
 
-    freq_indices = torch.arange(r, Freq, r, device=x.device)
+    weights_freq = weights_freq / weights_freq.sum()
 
-    det_values = []
-    valid_freqs = []
+    # aplica peso no espectro
+    xf_band = xf[:,1:,:] * weights_freq.unsqueeze(0).unsqueeze(-1)
 
-    for idx in freq_indices:
-        if idx - r//2 < 0 or idx + r//2 >= Freq:
-            continue
+    # matriz espectral
+    S = torch.matmul(
+        xf_band.transpose(1,2).conj(),
+        xf_band
+    ) / xf_band.shape[1]
 
-        window = xf[:, idx - r//2 : idx + r//2 + 1, :]  # [B, r+1, C]
+    S_mean = S.mean(dim=0)
 
-        # -------- matriz espectral correta --------
-        S = torch.zeros(B, C, C, dtype=torch.cfloat, device=x.device)
+    eps = 1e-6
+    eye = torch.eye(C, device=x.device, dtype=torch.cfloat)
 
-        for b in range(B):
-            for w in window[b]:
-                vec = w.unsqueeze(1)
-                S[b] += vec @ vec.conj().T
-            S[b] /= window.shape[1]
+    S_mean = S_mean + eps * eye
 
-        S_mean = S.mean(dim=0)
+    # determinante estável
+    eigvals = torch.linalg.eigvalsh(S_mean).real
+    eigvals = torch.clamp(eigvals, min=1e-8)
 
-        det = torch.linalg.det(S_mean).real
-        det = torch.clamp(det, min=1e-8)
+    logdet = torch.sum(torch.log(eigvals))
 
-        det_values.append(det)
-        valid_freqs.append(idx)
+    # energia espectral
+    power = torch.mean(torch.abs(xf)**2, dim=(0,2))
 
-    if len(det_values) == 0:
-        return [T], torch.ones(B, 1, device=x.device)
+    power = power[1:] * weights_freq
 
-    det_values = torch.stack(det_values)
+    # top-k frequências
+    k_eff = min(k, len(power))
 
-    k_eff = min(k, len(det_values))
-    _, bottom_idx = torch.topk(det_values, k_eff, largest=False)
+    _, idx = torch.topk(power, k_eff)
 
-    selected_freqs = torch.tensor(valid_freqs, device=x.device)[bottom_idx]
+    freqs_selected = idx + 1
 
-    periods = T // selected_freqs
+    periods = T // freqs_selected
 
-    weights = 1.0 / det_values[bottom_idx]
-    weights = weights.unsqueeze(0).repeat(B, 1)
+    periods = torch.clamp(periods, min=3, max=T//2)
 
-    return periods.detach().cpu().numpy(), weights
+    # pesos das convoluções
+    weights = torch.softmax(power[idx], dim=0)
+
+    weights = weights.unsqueeze(0).repeat(B,1)
+
+    return periods, weights, freqs_selected
 
 class TimesBlock(nn.Module):
     def __init__(self, configs):
@@ -96,45 +91,69 @@ class TimesBlock(nn.Module):
                 configs.d_ff, configs.d_model, num_kernels=configs.num_kernels
             ),
         )
-        self.alpha = nn.Parameter(torch.tensor(1/3))
-
+        self.alpha = nn.Parameter(torch.tensor(0.5))
+        
     def forward(self, x):
+
         B, T, N = x.size()
-        period_list, period_weight = FFT_for_Period(x, self.k,self.alpha)
+
+        alpha = torch.sigmoid(self.alpha) * 0.6 + 0.2
+
+        period_list, period_weight, freqs = FFT_for_Period(
+            x,
+            self.k,
+            alpha
+        )
 
         res = []
-        for i in range(self.k):
-            period = period_list[i]
-            # padding
+
+        for i in range(len(period_list)):
+
+            period = int(period_list[i].item())
+
             if (self.seq_len + self.pred_len) % period != 0:
+
                 length = (((self.seq_len + self.pred_len) // period) + 1) * period
+
                 padding = torch.zeros(
-                    [x.shape[0], (length - (self.seq_len + self.pred_len)), x.shape[2]]
-                ).to(x.device)
+                    [x.shape[0], length - (self.seq_len + self.pred_len), x.shape[2]],
+                    device=x.device
+                )
+
                 out = torch.cat([x, padding], dim=1)
+
             else:
+
                 length = self.seq_len + self.pred_len
                 out = x
-            # reshape
+
             out = (
                 out.reshape(B, length // period, period, N)
-                .permute(0, 3, 1, 2)
+                .permute(0,3,1,2)
                 .contiguous()
             )
-            # 2D conv: from 1d Variation to 2d Variation
-            out = self.conv(out)
-            # reshape back
-            out = out.permute(0, 2, 3, 1).reshape(B, -1, N)
-            res.append(out[:, : (self.seq_len + self.pred_len), :])
-        res = torch.stack(res, dim=-1)
-        # adaptive aggregation
-        period_weight = F.softmax(period_weight, dim=1)
-        period_weight = period_weight.unsqueeze(1).unsqueeze(1).repeat(1, T, N, 1)
-        res = torch.sum(res * period_weight, -1)
-        # residual connection
-        res = res + x
-        return res
 
+            out = self.conv(out)
+
+            out = out.permute(0,2,3,1).reshape(B,-1,N)
+
+            res.append(out[:, :(self.seq_len + self.pred_len), :])
+
+        res = torch.stack(res, dim=-1)
+
+        period_weight = F.softmax(period_weight, dim=1)
+
+        period_weight = period_weight.unsqueeze(1).unsqueeze(1).repeat(1, T, N, 1)
+
+        res = torch.sum(res * period_weight, -1)
+
+        res = res + x
+
+        print("alpha:", alpha.detach().cpu().item())
+        print("selected freqs:", freqs.detach().cpu())
+        print("periods:", period_list.detach().cpu())
+
+        return res
 
 class MyTimesNet(nn.Module):
     """

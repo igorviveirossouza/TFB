@@ -1,5 +1,7 @@
 from ts_benchmark.baselines.deep_forecasting_model_base import DeepForecastingModelBase
 from ts_benchmark.baselines.mytimesnet.mytimesnet_model import MyTimesNet
+from ts_benchmark.baselines.mytimesnet.mytimesnet_model_autovalor import MyTimesNet as MyTimesNetAutovalor
+from ts_benchmark.baselines.mytimesnet.mytimesnet_model_alpha_aprendivel import MyTimesNet as MyTimesNetAlpha
 from ts_benchmark.baselines.mytimesnet.mytimesnet_model_original import MyTimesNet as MyTimesNetOriginal
 
 # hiperparâmetros padrão
@@ -68,3 +70,36 @@ class MyTimesNetOriginalAdapter(DeepForecastingModelBase):
     def _process(self, input, target, input_mark, target_mark):
         output = self.model(input, input_mark, target, target_mark)
         return {"output": output}           
+
+
+class MyTimesNetAutovalorAdapter(DeepForecastingModelBase):
+
+    def __init__(self, **kwargs):
+        super(MyTimesNetAutovalorAdapter, self).__init__(MODEL_HYPER_PARAMS, **kwargs)
+
+    @property
+    def model_name(self):
+        return "MyTimesNetAutovalor"
+
+    def _init_model(self):
+        return MyTimesNetAutovalor(self.config)
+
+    def _process(self, input, target, input_mark, target_mark):
+        output = self.model(input, input_mark, target, target_mark)
+        return {"output": output}                  
+
+class MyTimesNetAlphaAdapter(DeepForecastingModelBase):
+
+    def __init__(self, **kwargs):
+        super(MyTimesNetAlphaAdapter, self).__init__(MODEL_HYPER_PARAMS, **kwargs)
+
+    @property
+    def model_name(self):
+        return "MyTimesNetAlpha"
+
+    def _init_model(self):
+        return MyTimesNetAlpha(self.config)
+
+    def _process(self, input, target, input_mark, target_mark):
+        output = self.model(input, input_mark, target, target_mark)
+        return {"output": output}                          

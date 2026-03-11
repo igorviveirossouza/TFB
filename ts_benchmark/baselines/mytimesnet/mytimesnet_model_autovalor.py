@@ -10,14 +10,16 @@ from ts_benchmark.baselines.time_series_library.layers.Embed import DataEmbeddin
 
 warnings.filterwarnings("ignore")
 
-def FFT_for_Period(x, k=2, alpha=0.4):
+
+def FFT_for_Period(x, k=2):
 
     B, T, C = x.shape
 
     xf = torch.fft.rfft(x, dim=1)
     F = xf.shape[1]
 
-    r = int(T ** alpha)
+    # regra r = floor(T^(1/3))
+    r = int(T ** (1/3))
     if r % 2 != 0:
         r -= 1
     r = max(r, 2)
@@ -27,16 +29,17 @@ def FFT_for_Period(x, k=2, alpha=0.4):
     scores = []
     valid_freqs = []
 
-    eps = 1e-6
+    eps = 1e-5
     eye = torch.eye(C, device=x.device, dtype=torch.cfloat)
 
-    for idx in freq_indices:
+    for f in freq_indices:
 
-        if idx - r//2 < 0 or idx + r//2 >= F:
+        if f - r//2 < 0 or f + r//2 >= F:
             continue
 
-        window = xf[:, idx-r//2:idx+r//2+1, :]
+        window = xf[:, f-r//2:f+r//2+1, :]
 
+        # normalização energética
         window = window / (window.shape[1] ** 0.5)
 
         X = window
@@ -46,54 +49,61 @@ def FFT_for_Period(x, k=2, alpha=0.4):
             X
         ) / X.shape[1]
 
+        # média no batch
         S_mean = S.mean(dim=0)
 
+        # regularização
         S_mean = S_mean + eps * eye
 
-        # ---------- versão estável do determinante ----------
-
+        # autovalores da matriz espectral
         eigvals = torch.linalg.eigvalsh(S_mean).real
 
-        eigvals = torch.clamp(eigvals, min=1e-8)
-
-        logdet = torch.sum(torch.log(eigvals))
-
-        # ----------------------------------------------------
-
-        if torch.isnan(logdet) or torch.isinf(logdet):
+        if torch.isnan(eigvals).any() or torch.isinf(eigvals).any():
             continue
 
-        scores.append(logdet)
-        valid_freqs.append(idx)
+        lambda_max = eigvals.max()
+        trace = eigvals.sum()
 
+        if trace <= 0:
+            continue
+
+        score = lambda_max / trace
+
+        scores.append(score)
+        valid_freqs.append(f)
+
+    # fallback se nenhuma frequência válida
     if len(scores) == 0:
 
-        periods = torch.tensor([max(3, T//2)], device=x.device)
-        weights = torch.ones(B, 1, device=x.device)
         freqs = torch.tensor([1], device=x.device)
 
+        periods = torch.tensor([max(3, T//2)], device=x.device)
+
+        weights = torch.ones(B,1, device=x.device)
+
         return periods, weights, freqs
+
 
     scores = torch.stack(scores)
 
     k_eff = min(k, len(scores))
 
-    # menor logdet = maior coerência espectral
-    _, idx = torch.topk(scores, k_eff, largest=False)
+    _, idx = torch.topk(scores, k_eff, largest=True)
 
     freqs = torch.tensor(valid_freqs, device=x.device)[idx]
 
     periods = T // freqs
 
-    periods = torch.clamp(periods, min=3, max=T//2)
+    periods = torch.clamp(periods, min=6, max=T//2)
 
     selected_scores = scores[idx]
 
-    weights = torch.softmax(-selected_scores, dim=0)
+    weights = torch.softmax(5 * selected_scores, dim=0)
 
     weights = weights.unsqueeze(0).repeat(B,1)
 
     return periods, weights, freqs
+
 
 class TimesBlock(nn.Module):
 
@@ -124,6 +134,7 @@ class TimesBlock(nn.Module):
         B, T, N = x.size()
 
         period_list, period_weight, freqs = FFT_for_Period(x, self.k)
+
         print("DEBUG FFT RESULT")
         print("T:", x.shape[1])
         print("selected freqs:", freqs.detach().cpu())
