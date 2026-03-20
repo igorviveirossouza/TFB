@@ -26,7 +26,7 @@ df = pd.read_csv(path,sep=";",header=None,names=colunas)
 
 df["datahora"] = pd.to_datetime(df["datahora"], format="%Y%m%d%H%M", errors="coerce")
 
-## %%
+# %%
 
 # Converter para float (evita overflow de int64)
 numericas_float = [
@@ -72,21 +72,25 @@ df = df[df['flag']==0]
 
 df = df.sort_values(["ticker","datahora"])
 
-df.set_index(["datahora"], inplace=True)
+#df.set_index(["datahora"], inplace=True)
+
+df = df.set_index("datahora")
 
 df = df.between_time("10:00", "18:00")
 
-df = df[df["datahora"].dt.hour != 10 & df["datahora"].dt.minute != 00]
+# %%
 
-df_hour = (
+#df = df[df["datahora"].dt.hour != 10 & df["datahora"].dt.minute != 00]
+
+df_daily = (
     df
     .groupby("ticker")
     .resample(
-        "1H",
-        label="right",
+        "1D",
+        label="left",
         closed="right",
-        origin="start_day",
-        offset="10H"
+        #origin="start_day",
+        #offset="10H"
      )
     .agg({
         "abertura": "first",
@@ -101,6 +105,42 @@ df_hour = (
     .reset_index()
 )
 
+# %%
 
+
+OUTPUT_DIR = "/media/igor/KINGSTON1/GitHub/FinancialMarket/candles-daily-jan2013-a-jun2025"
+
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+output_path = os.path.join(OUTPUT_DIR, "b3_daily.csv")
+
+df_daily.to_csv(output_path, index=False)
+
+print("Arquivo salvo em:")
+print(output_path)
+print(df_daily.head())
+# %%
+
+
+selecao = ["ticker","datahora","fechamento"]
+
+to_tfb = df_daily[selecao].rename(
+        columns={
+            "ticker": "cols",
+            "datahora": "date",
+            "fechamento": "data"
+        }
+    )[['date', 'data', 'cols']]
+
+
+#to_tfb = to_tfb.set_index("date")
+
+output_path = os.path.join(OUTPUT_DIR, "b3_daily_tfb.csv")
+
+to_tfb.to_csv(output_path, index=False)
+
+print("Arquivo salvo em:")
+print(output_path)
+print(to_tfb.head())
 
 # %%
