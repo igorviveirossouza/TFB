@@ -1,4 +1,9 @@
 #!/bin/bash
+#SBATCH -p gorgonas
+#SBATCH --cpus-per-task=8
+#SBATCH --output=/sonic_home/igor.viveiros/logs/slurm-%j.out
+
+
 
 # ==============================
 # MyTimesNet - Execução no SPEED
@@ -13,12 +18,6 @@ cd /sonic_home/igor.viveiros/src/TFB || exit 1
 
 echo "Starting MY TIMES NET..."
 
-# echo "Rolling Forecast - ETTh1"
-
-#python ./scripts/run_benchmark.py --config-path "rolling_forecast_config.json" --data-name-list "ETTh1.csv" --deterministic "efficient" --model-name "mytimesnet.MyTimesNetAdapter" --model-hyper-params '{"batch_size":16, "num_epochs":2, "seq_len":96, "pred_len":336, "d_model":128, "d_ff":256, "top_k":2}' --num-workers 2 --timeout 60000 --save-path "results_MyTimesNet_modificado_autovalor"
-#python ./scripts/run_benchmark.py --config-path "rolling_forecast_config.json" --data-name-list "ETTh1.csv" --deterministic "efficient" --model-name "mytimesnet.MyTimesNetOriginalAdapter" --model-hyper-params '{"batch_size":16, "num_epochs":2, "seq_len":96, "pred_len":336, "d_model":128, "d_ff":256, "top_k":2}' --num-workers 4 --timeout 60000 --save-path "results_MyTimesNetOriginal"
-
-
 #echo "Rolling Forecast - Exchange"
 
 #python ./scripts/run_benchmark.py --config-path "rolling_forecast_config.json" --data-name-list "Exchange.csv" --deterministic "efficient" --model-name "mytimesnet.MyTimesNetAdapter" --model-hyper-params '{"batch_size":16, "num_epochs":2, "seq_len":96, "pred_len":96, "d_model":128, "d_ff":256, "top_k":5}' --num-workers 4 --timeout 60000 --save-path "results_Exchange1"
@@ -26,56 +25,75 @@ echo "Starting MY TIMES NET..."
 #python ./scripts/run_benchmark.py --config-path "rolling_forecast_config.json" --data-name-list "Exchange.csv" --deterministic "efficient" --model-name "mytimesnet.MyTimesNetAutovalorAdapter" --model-hyper-params '{"batch_size":16, "num_epochs":2, "seq_len":96, "pred_len":96, "d_model":128, "d_ff":256, "top_k":5}' --num-workers 4 --timeout 60000 --save-path "results_Exchange1"
 #python ./scripts/run_benchmark.py --config-path "rolling_forecast_config.json" --data-name-list "Exchange.csv" --deterministic "efficient" --model-name "mytimesnet.MyTimesNetAlphaAdapter" --model-hyper-params '{"batch_size":16, "num_epochs":2, "seq_len":96, "pred_len":96, "d_model":128, "d_ff":256, "top_k":5}' --num-workers 4 --timeout 60000 --save-path "results_Exchange1"
 
-#echo "Fixed Forecast - Electricity - topk_2"
 
-#python ./scripts/run_benchmark.py --config-path "fixed_forecast_config.json" --data-name-list "Electricity.csv" --deterministic "efficient" --model-name "mytimesnet.MyTimesNetAdapter" --model-hyper-params '{"batch_size":16,"num_epochs":2,"seq_len":96,"pred_len":96,"d_model":128,"d_ff":256,"top_k":2}' --num-workers 4 --timeout 60000 --save-path "results_MyTimesNetAlphaAprendivel_Electricity_topk2"
-#python ./scripts/run_benchmark.py --config-path "fixed_forecast_config.json" --data-name-list "Electricity.csv" --deterministic "efficient" --model-name "mytimesnet.MyTimesNetOriginalAdapter" --model-hyper-params '{"batch_size":16,"num_epochs":2,"seq_len":96,"pred_len":96,"d_model":128,"d_ff":256,"top_k":2}' --num-workers 4 --timeout 60000 --save-path "results_MyTimesNetAlphaAprendivel_Electricity_topk2"
-#python ./scripts/run_benchmark.py --config-path "fixed_forecast_config.json" --data-name-list "Electricity.csv" --deterministic "efficient" --model-name "mytimesnet.MyTimesNetAutovalorAdapter" --model-hyper-params '{"batch_size":16,"num_epochs":2,"seq_len":96,"pred_len":96,"d_model":128,"d_ff":256,"top_k":2}' --num-workers 4 --timeout 60000 --save-path "results_MyTimesNetAlphaAprendivel_Electricity_topk2"
-#python ./scripts/run_benchmark.py --config-path "fixed_forecast_config.json" --data-name-list "Electricity.csv" --deterministic "efficient" --model-name "mytimesnet.MyTimesNetAlphaAdapter" --model-hyper-params '{"batch_size":16,"num_epochs":2,"seq_len":96,"pred_len":96,"d_model":128,"d_ff":256,"top_k":2}' --num-workers 4 --timeout 60000 --save-path "results_MyTimesNetAlphaAprendivel_Electricity_topk2"
+# ------------------------------
+# Adapters
+# ------------------------------
 
-#echo "Fixed Forecast - Electricity - topk_5"
+adapters=(
+"MyTimesNetAdapter"
+#"MyTimesNetOriginalAdapter"
+#"MyTimesNetAutovalorAdapter"
+#"MyTimesNetAlphaAdapter"
+)
 
-#python ./scripts/run_benchmark.py --config-path "fixed_forecast_config.json" --data-name-list "Electricity.csv" --deterministic "efficient" --model-name "mytimesnet.MyTimesNetAdapter" --model-hyper-params '{"batch_size":16,"num_epochs":2,"seq_len":96,"pred_len":96,"d_model":128,"d_ff":256,"top_k":5}' --num-workers 4 --timeout 60000 --save-path "results_MyTimesNetAlphaAprendivel_Electricity_topk5"
-#python ./scripts/run_benchmark.py --config-path "fixed_forecast_config.json" --data-name-list "Electricity.csv" --deterministic "efficient" --model-name "mytimesnet.MyTimesNetOriginalAdapter" --model-hyper-params '{"batch_size":16,"num_epochs":2,"seq_len":96,"pred_len":96,"d_model":128,"d_ff":256,"top_k":5}' --num-workers 4 --timeout 60000 --save-path "results_MyTimesNetAlphaAprendivel_Electricity_topk5"
-#python ./scripts/run_benchmark.py --config-path "fixed_forecast_config.json" --data-name-list "Electricity.csv" --deterministic "efficient" --model-name "mytimesnet.MyTimesNetAutovalorAdapter" --model-hyper-params '{"batch_size":16,"num_epochs":2,"seq_len":96,"pred_len":96,"d_model":128,"d_ff":256,"top_k":5}' --num-workers 4 --timeout 60000 --save-path "results_MyTimesNetAlphaAprendivel_Electricity_topk5"
-#python ./scripts/run_benchmark.py --config-path "fixed_forecast_config.json" --data-name-list "Electricity.csv" --deterministic "efficient" --model-name "mytimesnet.MyTimesNetAlphaAdapter" --model-hyper-params '{"batch_size":16,"num_epochs":2,"seq_len":96,"pred_len":96,"d_model":128,"d_ff":256,"top_k":5}' --num-workers 4 --timeout 60000 --save-path "results_MyTimesNetAlphaAprendivel_Electricity_topk5"
+# ------------------------------
+# Datasets
+# ------------------------------
 
-#echo "Fixed Forecast - Traffic - topk_2"
+datasets=(
+"Electricity"
+"Traffic"
+)
 
-#python ./scripts/run_benchmark.py --config-path "fixed_forecast_config.json" --data-name-list "Traffic.csv" --deterministic "efficient" --model-name "mytimesnet.MyTimesNetAdapter" --model-hyper-params '{"batch_size":16,"num_epochs":2,"seq_len":96,"pred_len":96,"d_model":128,"d_ff":256,"top_k":2}' --num-workers 4 --timeout 60000 --save-path "results_MyTimesNetAlphaAprendivel_Traffic_topk2"
-#python ./scripts/run_benchmark.py --config-path "fixed_forecast_config.json" --data-name-list "Traffic.csv" --deterministic "efficient" --model-name "mytimesnet.MyTimesNetOriginalAdapter" --model-hyper-params '{"batch_size":16,"num_epochs":2,"seq_len":96,"pred_len":96,"d_model":128,"d_ff":256,"top_k":2}' --num-workers 4 --timeout 60000 --save-path "results_MyTimesNetAlphaAprendivel_Traffic_topk2"
-#python ./scripts/run_benchmark.py --config-path "fixed_forecast_config.json" --data-name-list "Traffic.csv" --deterministic "efficient" --model-name "mytimesnet.MyTimesNetAutovalorAdapter" --model-hyper-params '{"batch_size":16,"num_epochs":2,"seq_len":96,"pred_len":96,"d_model":128,"d_ff":256,"top_k":2}' --num-workers 4 --timeout 60000 --save-path "results_MyTimesNetAlphaAprendivel_Traffic_topk2"
-#python ./scripts/run_benchmark.py --config-path "fixed_forecast_config.json" --data-name-list "Traffic.csv" --deterministic "efficient" --model-name "mytimesnet.MyTimesNetAlphaAdapter" --model-hyper-params '{"batch_size":16,"num_epochs":2,"seq_len":96,"pred_len":96,"d_model":128,"d_ff":256,"top_k":2}' --num-workers 4 --timeout 60000 --save-path "results_MyTimesNetAlphaAprendivel_Traffic_topk2"
+# ------------------------------
+# Rodar Electricity e Traffic
+# ------------------------------
 
-#echo "Fixed Forecast - Traffic - topk_5"
+for dataset in "${datasets[@]}"; do
+  for topk in 2 5; do
+    echo "Fixed Forecast - ${dataset} - topk_${topk}"
 
-#python ./scripts/run_benchmark.py --config-path "fixed_forecast_config.json" --data-name-list "Traffic.csv" --deterministic "efficient" --model-name "mytimesnet.MyTimesNetAdapter" --model-hyper-params '{"batch_size":16,"num_epochs":2,"seq_len":96,"pred_len":96,"d_model":128,"d_ff":256,"top_k":5}' --num-workers 4 --timeout 60000 --save-path "results_MyTimesNetAlphaAprendivel_Traffic_topk5"
-#python ./scripts/run_benchmark.py --config-path "fixed_forecast_config.json" --data-name-list "Traffic.csv" --deterministic "efficient" --model-name "mytimesnet.MyTimesNetOriginalAdapter" --model-hyper-params '{"batch_size":16,"num_epochs":2,"seq_len":96,"pred_len":96,"d_model":128,"d_ff":256,"top_k":5}' --num-workers 4 --timeout 60000 --save-path "results_MyTimesNetAlphaAprendivel_Traffic_topk5"
-#python ./scripts/run_benchmark.py --config-path "fixed_forecast_config.json" --data-name-list "Traffic.csv" --deterministic "efficient" --model-name "mytimesnet.MyTimesNetAutovalorAdapter" --model-hyper-params '{"batch_size":16,"num_epochs":2,"seq_len":96,"pred_len":96,"d_model":128,"d_ff":256,"top_k":5}' --num-workers 4 --timeout 60000 --save-path "results_MyTimesNetAlphaAprendivel_Traffic_topk5"
-#python ./scripts/run_benchmark.py --config-path "fixed_forecast_config.json" --data-name-list "Traffic.csv" --deterministic "efficient" --model-name "mytimesnet.MyTimesNetAlphaAdapter" --model-hyper-params '{"batch_size":16,"num_epochs":2,"seq_len":96,"pred_len":96,"d_model":128,"d_ff":256,"top_k":5}' --num-workers 4 --timeout 60000 --save-path "results_MyTimesNetAlphaAprendivel_Traffic_topk5"
+    for adapter in "${adapters[@]}"; do
 
+      python ./scripts/run_benchmark.py \
+        --config-path "fixed_forecast_config_hourly.json" \
+        --data-name-list "${dataset}.csv" \
+        --deterministic "efficient" \
+        --model-name "mytimesnet.${adapter}" \
+        --model-hyper-params "{\"batch_size\":16,\"num_epochs\":2,\"seq_len\":96,\"pred_len\":96,\"d_model\":128,\"d_ff\":256,\"top_k\":${topk}}"\
+        --gpus 1 \
+        --num-workers 4 \
+        --timeout 60000 \
+        --save-path "results_${dataset}_topk${topk}"
 
-echo "Fixed Forecast - Weather - topk_2"
-
-python ./scripts/run_benchmark.py --config-path "fixed_forecast_config.json" --data-name-list "Weather.csv" --deterministic "efficient" --model-name "mytimesnet.MyTimesNetAdapter" --model-hyper-params '{"batch_size":16,"num_epochs":2,"seq_len":96,"pred_len":96,"d_model":128,"d_ff":256,"top_k":2}' --num-workers 4 --timeout 60000 --save-path "results_MyTimesNetAlphaAprendivel_Weather_topk2"
-python ./scripts/run_benchmark.py --config-path "fixed_forecast_config.json" --data-name-list "Weather.csv" --deterministic "efficient" --model-name "mytimesnet.MyTimesNetOriginalAdapter" --model-hyper-params '{"batch_size":16,"num_epochs":2,"seq_len":96,"pred_len":96,"d_model":128,"d_ff":256,"top_k":2}' --num-workers 4 --timeout 60000 --save-path "results_MyTimesNetAlphaAprendivel_Weather_topk2"
-python ./scripts/run_benchmark.py --config-path "fixed_forecast_config.json" --data-name-list "Weather.csv" --deterministic "efficient" --model-name "mytimesnet.MyTimesNetAutovalorAdapter" --model-hyper-params '{"batch_size":16,"num_epochs":2,"seq_len":96,"pred_len":96,"d_model":128,"d_ff":256,"top_k":2}' --num-workers 4 --timeout 60000 --save-path "results_MyTimesNetAlphaAprendivel_Weather_topk2"
-python ./scripts/run_benchmark.py --config-path "fixed_forecast_config.json" --data-name-list "Weather.csv" --deterministic "efficient" --model-name "mytimesnet.MyTimesNetAlphaAdapter" --model-hyper-params '{"batch_size":16,"num_epochs":2,"seq_len":96,"pred_len":96,"d_model":128,"d_ff":256,"top_k":2}' --num-workers 4 --timeout 60000 --save-path "results_MyTimesNetAlphaAprendivel_Weather_topk2"
-
-echo "Fixed Forecast - Weather - topk_5"
-
-python ./scripts/run_benchmark.py --config-path "fixed_forecast_config.json" --data-name-list "Weather.csv" --deterministic "efficient" --model-name "mytimesnet.MyTimesNetAdapter" --model-hyper-params '{"batch_size":16,"num_epochs":2,"seq_len":96,"pred_len":96,"d_model":128,"d_ff":256,"top_k":5}' --num-workers 4 --timeout 60000 --save-path "results_MyTimesNetAlphaAprendivel_Weather_topk5"
-python ./scripts/run_benchmark.py --config-path "fixed_forecast_config.json" --data-name-list "Weather.csv" --deterministic "efficient" --model-name "mytimesnet.MyTimesNetOriginalAdapter" --model-hyper-params '{"batch_size":16,"num_epochs":2,"seq_len":96,"pred_len":96,"d_model":128,"d_ff":256,"top_k":5}' --num-workers 4 --timeout 60000 --save-path "results_MyTimesNetAlphaAprendivel_Weather_topk5"
-python ./scripts/run_benchmark.py --config-path "fixed_forecast_config.json" --data-name-list "Weather.csv" --deterministic "efficient" --model-name "mytimesnet.MyTimesNetAutovalorAdapter" --model-hyper-params '{"batch_size":16,"num_epochs":2,"seq_len":96,"pred_len":96,"d_model":128,"d_ff":256,"top_k":5}' --num-workers 4 --timeout 60000 --save-path "results_MyTimesNetAlphaAprendivel_Weather_topk5"
-python ./scripts/run_benchmark.py --config-path "fixed_forecast_config.json" --data-name-list "Weather.csv" --deterministic "efficient" --model-name "mytimesnet.MyTimesNetAlphaAdapter" --model-hyper-params '{"batch_size":16,"num_epochs":2,"seq_len":96,"pred_len":96,"d_model":128,"d_ff":256,"top_k":5}' --num-workers 4 --timeout 60000 --save-path "results_MyTimesNetAlphaAprendivel_Weather_topk5"
+    done
+  done
+done
 
 
+# ------------------------------
+# Weather (config diferente)
+# ------------------------------
 
-#python ./scripts/run_benchmark.py --config-path "rolling_forecast_config.json" --deterministic "efficient" --model-name "mytimesnet.MyTimesNetAdapter" --model-hyper-params '{"batch_size":16, "num_epochs":2, "seq_len":96, "pred_len":336, "d_model":128, "d_ff":256, "top_k":2}' --num-workers 4 --timeout 60000 --save-path "results_MyTimesNet_modificado"
-#python ./scripts/run_benchmark.py --config-path "rolling_forecast_config.json" --deterministic "efficient" --model-name "mytimesnet.MyTimesOriginalNetAdapter" --model-hyper-params '{"batch_size":16, "num_epochs":2, "seq_len":96, "pred_len":336, "d_model":128, "d_ff":256, "top_k":2}' --num-workers 4 --timeout 60000 --save-path "results_MyTimesNetOriginal"
+for topk in 2 5; do
+  echo "Fixed Forecast - Weather - topk_${topk}"
 
-#python ./scripts/run_benchmark.py --config-path "rolling_forecast_config.json" --data-name-list "ETTh1.csv" --deterministic "efficient" --model-name "mytimesnet.MyTimesNetAdapter" --model-hyper-params '{"batch_size":16, "num_epochs":2, "seq_len":96, "pred_len":336, "d_model":128, "d_ff":256, "top_k":2}' --num-workers 4 --timeout 60000 --save-path "results_MyTimesNet_local"
-#python ./scripts/run_benchmark.py --config-path "rolling_forecast_config.json" --data-name-list "ETTh1.csv" --deterministic "efficient" --model-name "mytimesnet.MyTimesOriginalNetAdapter" --model-hyper-params '{"batch_size":16, "num_epochs":2, "seq_len":96, "pred_len":336, "d_model":128, "d_ff":256, "top_k":2}' --num-workers 4 --timeout 60000 --save-path "results_MyTimesNet_local"
+  for adapter in "${adapters[@]}"; do
+
+    python ./scripts/run_benchmark.py \
+      --config-path "fixed_forecast_config_hourly.json" \
+      --data-name-list "Weather.csv" \
+      --deterministic "efficient" \
+      --model-name "mytimesnet.${adapter}" \
+      --model-hyper-params "{\"batch_size\":16,\"num_epochs\":2,\"seq_len\":96,\"pred_len\":96,\"d_model\":128,\"d_ff\":256,\"top_k\":${topk}}" \
+      --gpus 1 \
+      --num-workers 4 \
+      --timeout 60000 \
+      --save-path "results_Weather_topk${topk}"
+
+  done
+done
 
 
 # echo "Iniciando MyTimesNet - FIXED FORECAST ILI"
@@ -85,6 +103,6 @@ python ./scripts/run_benchmark.py --config-path "fixed_forecast_config.json" --d
 #python ./scripts/run_benchmark.py --config-path "fixed_forecast_config_weekly.json" --data-name-list "ILI.csv" --deterministic "efficient" --strategy-args '{"horizon":24}' --model-name "mytimesnet.MyTimesNetOriginalAdapter" --model-hyper-params '{"batch_size":16,"num_epochs":2,"seq_len":104,"pred_len":24,"d_model":128,"d_ff":256,"top_k":2}' --num-workers 1 --timeout 60000 --save-path "results_MyTimesNet_fixed3"
 
 
-
-
 echo "Finalizado."
+
+

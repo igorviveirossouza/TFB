@@ -9,7 +9,7 @@ MODEL_HYPER_PARAMS = {
     "enc_in": 1,
     "dec_in": 1,
     "c_out": 1,
-    "e_layers": 2,
+    "e_layers": 2, # Número de Times Blocks
     "d_layers": 1,
     "d_model": 512,
     "d_ff": 2048,

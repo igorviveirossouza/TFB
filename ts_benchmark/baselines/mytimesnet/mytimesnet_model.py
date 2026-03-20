@@ -56,7 +56,7 @@ def FFT_for_Period(x, k=2, alpha=0.4):
 
         eigvals = torch.clamp(eigvals, min=1e-8)
 
-        logdet = torch.sum(torch.log(eigvals))
+        logdet = -torch.sum(torch.log(eigvals))
 
         # ----------------------------------------------------
 
@@ -79,7 +79,7 @@ def FFT_for_Period(x, k=2, alpha=0.4):
     k_eff = min(k, len(scores))
 
     # menor logdet = maior coerência espectral
-    _, idx = torch.topk(scores, k_eff, largest=False)
+    _, idx = torch.topk(scores, k_eff, largest=True)
 
     freqs = torch.tensor(valid_freqs, device=x.device)[idx]
 
