@@ -148,9 +148,12 @@ timeline["time_idx"] = timeline["time_idx"] + 1
 
 to_tfb = to_tfb.merge(timeline, on="date", how="left")
 
-to_tfb = to_tfb.sort_values(["col","date"])
+to_tfb = to_tfb.sort_values(["cols","date"])
 
-to_tfb["date"] = to_tfb["time_idx"].drop(columns=['time_idx'])
+to_tfb["date"] = to_tfb["time_idx"]
+
+
+to_tfb = to_tfb.drop(columns=['time_idx'])
 
 output_path = os.path.join(OUTPUT_DIR, "b3_daily_tfb.csv")
 
