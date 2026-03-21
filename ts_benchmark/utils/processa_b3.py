@@ -134,7 +134,19 @@ to_tfb = df_daily[selecao].rename(
 
 
 #to_tfb = to_tfb.set_index("date")
+#to_tfb["date"] = to_tfb.groupby("cols").cumcount() + 1
 
+df_tfb = df_tfb.sort_values(["date", "cols"]).copy()
+
+timeline = (
+    pd.DataFrame({"date": sorted(df_tfb["date"].unique())})
+    .reset_index()
+    .rename(columns={"index": "time_idx"})
+)
+
+timeline["time_idx"] = timeline["time_idx"] + 1
+
+df_tfb = df_tfb.merge(timeline, on="date", how="left")
 output_path = os.path.join(OUTPUT_DIR, "b3_daily_tfb.csv")
 
 to_tfb.to_csv(output_path, index=False)
