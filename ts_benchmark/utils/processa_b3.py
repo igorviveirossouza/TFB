@@ -66,7 +66,7 @@ caminho = os.path.join(save_dir, "b3Candles_15min.parquet")
 
 df.to_parquet(caminho, index=False)
 
-
+# %%
 # Remove o after market:
 df = df[df['flag']==0]
 
@@ -74,9 +74,15 @@ df = df.sort_values(["ticker","datahora"])
 
 #df.set_index(["datahora"], inplace=True)
 
+df["dia.da.semana"] = df["datahora"].dt.day_name()
+
+df = df[~df["dia.da.semana"].isin(["Saturday", "Sunday"])].copy()
+
+
 df = df.set_index("datahora")
 
-df = df.between_time("10:00", "18:00")
+
+#df = df.between_time("10:00", "18:00")
 
 # %%
 
@@ -87,8 +93,8 @@ df_daily = (
     .groupby("ticker")
     .resample(
         "1D",
-        label="left",
-        closed="right",
+        #label="right",
+        #closed="right",
         #origin="start_day",
         #offset="10H"
      )
@@ -105,6 +111,44 @@ df_daily = (
     .reset_index()
 )
 
+df_daily["datahora"] = df_daily["datahora"].dt.normalize()
+
+global_dates = pd.DatetimeIndex(sorted(df_daily["datahora"].unique()))
+tickers = sorted(df_daily["ticker"].unique())
+full_index = pd.MultiIndex.from_product(
+    [tickers, global_dates],
+    names=["ticker", "datahora"]
+)
+# reindexa para explicitar os gaps
+full = (
+    df_daily.set_index(["ticker", "datahora"])
+         .reindex(full_index)
+         .reset_index()
+)
+# marca quais linhas eram faltantes
+full["era_gap"] = full["fechamento"].isna()
+
+# preenche fechamento com o último valor observado do próprio papel
+full["fechamento"] = full.groupby("ticker")["fechamento"].ffill()
+
+# opcional: remover início de cada série antes do primeiro valor observado
+full = full[full["fechamento"].notna()].copy()
+
+# %%
+gaps_summary = (
+    full.groupby("ticker", as_index=False)
+        .agg(
+            n_total=("datahora", "size"),
+            n_gaps=("era_gap", "sum"),
+            start=("datahora", "min"),
+            end=("datahora", "max")
+        )
+        .sort_values(["n_gaps", "ticker"], ascending=[False, True])
+)
+
+print(gaps_summary.head(20))
+
+
 # %%
 
 
@@ -119,9 +163,9 @@ df_daily.to_csv(output_path, index=False)
 print("Arquivo salvo em:")
 print(output_path)
 print(df_daily.head())
+
+
 # %%
-
-
 selecao = ["ticker","datahora","fechamento"]
 
 to_tfb = df_daily[selecao].rename(
@@ -154,6 +198,34 @@ to_tfb["date"] = to_tfb["time_idx"]
 
 
 to_tfb = to_tfb.drop(columns=['time_idx'])
+
+# %%
+# Filtra as séries incompletas:
+
+# resumo por série
+summary = (
+    to_tfb.groupby("cols")
+      .agg(
+          n_obs=("data", "size"),
+          start=("date", "min"),
+          end=("date", "max")
+      )
+      .reset_index()
+      .sort_values(["n_obs", "start", "cols"])
+)
+
+max_obs = summary["n_obs"].max()
+
+# séries incompletas = têm menos observações que a maior série
+incomplete = summary[summary["n_obs"] < max_obs].copy()
+
+print(f"Total de séries: {summary.shape[0]}")
+print(f"Maior comprimento: {max_obs}")
+print(f"Séries incompletas: {incomplete}")
+
+
+# %%
+#to_tfb = to_tfb[~to_tfb["cols"].isin(incomplete["cols"])].copy()
 
 output_path = os.path.join(OUTPUT_DIR, "b3_daily_tfb.csv")
 
