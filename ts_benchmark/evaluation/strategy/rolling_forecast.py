@@ -104,6 +104,11 @@ class RollingForecastEvalBatchMaker:
         :return: A batch of data.
         """
         windows = sliding_window_view(data, window_shape=(win_size, *data.shape[1:]))
+
+        max_valid = len(windows) - 1
+        index_list = np.asarray(index_list)
+        index_list = index_list[index_list <= max_valid]
+
         data_batch = windows[index_list]
         data_batch = np.squeeze(data_batch, axis=tuple(range(1, np.ndim(data))))
         return data_batch
@@ -213,7 +218,7 @@ class RollingForecast(ForecastingStrategy):
             train-test split;
         :return: The length of the train-validation series, and the length of the test series.
         """
-        data_len = int(self._get_meta_info(meta_info, "length", len(series)))
+        data_len = min(int(self._get_meta_info(meta_info, "length", len(series))), len(series))
         train_length = int(tv_ratio * data_len)
         test_length = data_len - train_length
         if train_length <= 0 or test_length <= 0:
