@@ -24,7 +24,7 @@ python ./scripts/run_benchmark.py --config-path "rolling_forecast_config.json" -
 
 python ./scripts/run_benchmark.py --config-path "rolling_forecast_config.json" --data-name-list "b3_daily_tfb.csv" --strategy-args '{"horizon": 60}' --model-name "duet.DUET" --model-hyper-params '{"CI": 1, "batch_size": 32, "d_ff": 16, "d_model": 16, "dropout": 0.5, "e_layers": 1, "factor": 3, "fc_dropout": 0.2, "horizon": 60, "k": 1, "loss": "MAE", "lr": 0.01, "lradj": "type1", "n_heads": 2, "norm": true, "num_epochs": 100, "num_experts": 4, "patch_len": 48, "patience": 10, "seq_len": 36}' --deterministic "full" --gpus 1 --num-workers 1 --timeout 60000 --save-path "experimentos/$SALVAR_EM/h60" --save-true-pred True &
 
-wait
+ wait
 
 echo "Benchmarks finalizados"
 echo "Decodificando previsões..."

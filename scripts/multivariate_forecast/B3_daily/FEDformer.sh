@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH -p medusas
+#SBATCH -p gorgonas
 #SBATCH --cpus-per-task=32
 #SBATCH --output=/sonic_home/igor.viveiros/logs/slurm-%j.out
 
