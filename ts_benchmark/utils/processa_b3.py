@@ -158,7 +158,7 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 output_path = os.path.join(OUTPUT_DIR, "b3_daily.csv")
 
-df_daily.to_csv(output_path, index=False)
+full.to_csv(output_path, index=False)
 
 print("Arquivo salvo em:")
 print(output_path)
@@ -168,7 +168,7 @@ print(df_daily.head())
 # %%
 selecao = ["ticker","datahora","fechamento"]
 
-to_tfb = df_daily[selecao].rename(
+to_tfb = full[selecao].rename(
         columns={
             "ticker": "cols",
             "datahora": "date",
@@ -179,6 +179,8 @@ to_tfb = df_daily[selecao].rename(
 
 #to_tfb = to_tfb.set_index("date")
 #to_tfb["date"] = to_tfb.groupby("cols").cumcount() + 1
+
+
 
 to_tfb = to_tfb.sort_values(["date", "cols"]).copy()
 
@@ -194,6 +196,20 @@ to_tfb = to_tfb.merge(timeline, on="date", how="left")
 
 to_tfb = to_tfb.sort_values(["cols","date"])
 
+to_tfb = to_tfb[to_tfb["time_idx"] >= 235].copy() # Dados a parti de 2012-12-09
+
+n_total = to_tfb["time_idx"].nunique()
+
+completos = (
+    to_tfb.groupby("cols")["time_idx"]
+    .nunique()
+    .loc[lambda s: s == n_total]
+    .index
+)
+
+to_tfb = to_tfb[to_tfb["cols"].isin(completos)].copy()
+
+# %%
 to_tfb["date"] = to_tfb["time_idx"]
 
 
@@ -222,6 +238,10 @@ incomplete = summary[summary["n_obs"] < max_obs].copy()
 print(f"Total de séries: {summary.shape[0]}")
 print(f"Maior comprimento: {max_obs}")
 print(f"Séries incompletas: {incomplete}")
+
+output_path = os.path.join(OUTPUT_DIR, "summary.csv")
+
+summary.to_csv(output_path, index=False)
 
 
 # %%
