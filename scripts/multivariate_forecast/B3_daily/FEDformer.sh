@@ -10,7 +10,7 @@ export MPLCONFIGDIR=/tmp/$USER-mpl
 
 cd /sonic_home/igor.viveiros/src/TFB || exit 1
 
-echo "Starting MY TIMES NET..."
+echo "Starting FED FORMER..."
 
 SALVAR_EM="FEDformer/b3_teste_1"
 

@@ -11,7 +11,7 @@ MODEL_HYPER_PARAMS = {
     "seq_len": 96,
     "label_len": 48,
     "pred_len": 24,
-    "task_name": "short_term_forecast",
+    "task_name": "long_term_forecast",
     "dropout": 0.1,
     "expert_hidden_dim": 128,
     "aggregator_type": "sum",   # "sum" ou "mlp"
@@ -251,3 +251,18 @@ class BandWiseAdapter(DeepForecastingModelBase):
         )
 
         return {"output": output}
+    
+    def forecast_fit(
+        self,
+        train_valid_data,
+        *,
+        covariates=None,
+        train_ratio_in_tv: float = 1.0,
+        **kwargs,
+    ):
+        return super().forecast_fit(
+            train_valid_data,
+            covariates=covariates,
+            train_ratio_in_tv=1.0,
+            **kwargs,
+        )
