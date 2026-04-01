@@ -23,7 +23,8 @@ from ts_benchmark.utils.data_processing import split_time
 
 logger = logging.getLogger(__name__)
 
-# Default hyper parameters
+
+# Default hyper parameters ---------------------------------------------
 DEFAULT_HYPER_PARAMS = {
     "use_amp": 0,
     "loss": "MSE",
