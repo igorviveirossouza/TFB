@@ -23,7 +23,7 @@ from ts_benchmark.utils.data_processing import split_time
 
 logger = logging.getLogger(__name__)
 
-# Default hyper parameters -------------------------------------------------
+# Default hyper parameters
 DEFAULT_HYPER_PARAMS = {
     "use_amp": 0,
     "loss": "MSE",
@@ -432,24 +432,17 @@ class DeepForecastingModelBase(ModelBase):
         )
 
         # Define the loss function and optimizer
-        
-        print("torch.cuda.is_available():", torch.cuda.is_available(), flush=True)
-        print("torch.cuda.device_count():", torch.cuda.device_count(), flush=True)
-        print("torch.version.cuda:", torch.version.cuda, flush=True)
-        print("CUDA_VISIBLE_DEVICES:", __import__("os").environ.get("CUDA_VISIBLE_DEVICES"), flush=True)
-
-        device = get_device()
-        print("DEVICE:", device, flush=True)
-
-
-        self.early_stopping = self._init_early_stopping()
-        self.model.to(device)
-
         criterion, optimizer = self._init_criterion_and_optimizer()
 
         if config.use_amp == 1:
             scaler = torch.cuda.amp.GradScaler()
- 
+
+
+        device = get_device()
+
+
+        self.early_stopping = self._init_early_stopping()
+        self.model.to(device)
         total_params = sum(
             p.numel() for p in self.model.parameters() if p.requires_grad
         )

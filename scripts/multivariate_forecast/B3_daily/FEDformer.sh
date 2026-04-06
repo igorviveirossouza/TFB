@@ -25,6 +25,7 @@ python ./scripts/run_benchmark.py --config-path "rolling_forecast_config.json" -
 python ./scripts/run_benchmark.py --config-path "rolling_forecast_config.json" --data-name-list "b3_daily_tfb.csv" --strategy-args '{"horizon": 60}' --model-name "time_series_library.FEDformer" --model-hyper-params '{"batch_size": 8, "d_ff": 512, "d_model": 256, "dropout": 0.05, "factor": 3, "horizon": 60, "lr": 0.001, "moving_avg": 25, "norm": true, "seq_len": 36}' --adapter "transformer_adapter" --gpus 0 --num-workers 1 --timeout 60000 --save-path "experimentos/$SALVAR_EM/h60" &
 
 echo "Benchmarks finalizados"
+
 echo "Decodificando previsões..."
 
 RESULT_BASE="result/experimentos/$SALVAR_EM"

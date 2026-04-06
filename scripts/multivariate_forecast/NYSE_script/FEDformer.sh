@@ -1,3 +1,15 @@
+#!/bin/bash
+#SBATCH -p gorgonas
+#SBATCH --cpus-per-task=32
+#SBATCH --output=/sonic_home/igor.viveiros/logs/slurm-%j.out
+
+source /sonic_home/igor.viveiros/py310/bin/activate
+export MPLCONFIGDIR=/tmp/$USER-mpl
+
+cd /sonic_home/igor.viveiros/src/TFB || exit 1
+
+
+
 python ./scripts/run_benchmark.py --config-path "rolling_forecast_config.json" --data-name-list "NYSE.csv" --strategy-args '{"horizon": 24}' --model-name "time_series_library.FEDformer" --model-hyper-params '{"batch_size": 8, "d_ff": 512, "d_model": 256, "dropout": 0.05, "factor": 3, "horizon": 24, "lr": 0.001, "moving_avg": 25, "norm": true, "seq_len": 36}' --adapter "transformer_adapter" --gpus 0 --num-workers 1 --timeout 60000 --save-path "NYSE/FEDformer"
 
 python ./scripts/run_benchmark.py --config-path "rolling_forecast_config.json" --data-name-list "NYSE.csv" --strategy-args '{"horizon": 36}' --model-name "time_series_library.FEDformer" --model-hyper-params '{"batch_size": 8, "d_ff": 1024, "d_model": 512, "dropout": 0.05, "factor": 3, "horizon": 36, "lr": 0.001, "moving_avg": 25, "norm": true, "seq_len": 36}' --adapter "transformer_adapter" --gpus 0 --num-workers 1 --timeout 60000 --save-path "NYSE/FEDformer"

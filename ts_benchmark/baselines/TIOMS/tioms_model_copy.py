@@ -26,69 +26,150 @@ MODEL_HYPER_PARAMS = {
     "loss": "MSE",
     "patience": 3,
 
-    # novos
+    
     "expert_type": "attention",   # "mlp" ou "attention"
     "expert_d_model": 16, #expert_d_model,
     "expert_n_heads": 4, #max(expert_d_model // 4, 1),
     "expert_ff_dim": 128,
     "channel_n_heads": 4,
-    "temporal_pool_type": "avg",   # "avg", "max", "last", "attn", "flat"
+    "temporal_pool_type": "attn",   # "avg", "max", "last", "attn", "flat"
+
+    "n_bands": 3,
+    "band_init": "uniform",              # "uniform" ou "log"
+    "band_init_width": 0.18,
+    "band_min_width": 1e-3,
+    "normalize_band_masks": True,
 }
 
-class SpectralBandDecomposer(nn.Module):
-    def __init__(self):
+class LearnableSpectralBandDecomposer(nn.Module):
+    """
+    Separação espectral suave e aprendível.
+
+    Mantém a interface do decomposer atual:
+        x -> x_low, x_mid, x_high
+    com cada saída tendo shape (B, T, N)
+
+    A diferença é que as bandas agora são máscaras gaussianas aprendíveis.
+    """
+
+    def __init__(
+        self,
+        seq_len: int,
+        n_bands: int = 3,
+        init_mode: str = "uniform",
+        init_width: float = 0.18,
+        min_width: float = 1e-3,
+        normalize_masks: bool = True,
+    ):
         super().__init__()
+
+        if n_bands != 3:
+            raise ValueError("Esta versão foi feita para preservar low/mid/high, então n_bands deve ser 3.")
+
+        self.seq_len = seq_len
+        self.n_bands = n_bands
+        self.freq_len = seq_len // 2 + 1
+        self.min_width = min_width
+        self.normalize_masks = normalize_masks
+
+        if init_mode == "uniform":
+            init_centers = torch.linspace(0.15, 0.85, steps=n_bands)
+        elif init_mode == "log":
+            # mais densidade em baixas frequências
+            base = torch.tensor([0.08, 0.28, 0.70], dtype=torch.float32)
+            init_centers = base
+        else:
+            raise ValueError(f"band_init inválido: {init_mode}")
+
+        init_widths = torch.full((n_bands,), init_width, dtype=torch.float32)
+
+        self.raw_centers = nn.Parameter(self._inverse_sigmoid(init_centers))
+        self.raw_widths = nn.Parameter(self._inverse_softplus(init_widths))
+
+        freq_grid = torch.linspace(0.0, 1.0, steps=self.freq_len)
+        self.register_buffer("freq_grid", freq_grid, persistent=False)
+
+    @staticmethod
+    def _inverse_sigmoid(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+        x = x.clamp(eps, 1 - eps)
+        return torch.log(x / (1 - x))
+
+    @staticmethod
+    def _inverse_softplus(x: torch.Tensor) -> torch.Tensor:
+        return torch.log(torch.expm1(x))
+
+    def _build_masks(self) -> torch.Tensor:
+        """
+        Retorna masks com shape (K, F)
+        """
+        centers = torch.sigmoid(self.raw_centers)  # (K,)
+        widths = F.softplus(self.raw_widths) + self.min_width  # (K,)
+        freq = self.freq_grid[None, :]  # (1, F)
+
+        masks = torch.exp(-0.5 * ((freq - centers[:, None]) / widths[:, None]) ** 2)
+
+        if self.normalize_masks:
+            masks = masks / (masks.sum(dim=0, keepdim=True) + 1e-8)
+
+        return masks
 
     def forward(self, x: torch.Tensor):
         if x.ndim != 3:
             raise ValueError(f"Esperado tensor 3D (B, T, N), mas veio {x.shape}")
 
-        original_device = x.device
-        x_cpu = x.detach().float().cpu().contiguous()
+        B, T, N = x.shape
+        if T != self.seq_len:
+            raise ValueError(f"seq_len esperado={self.seq_len}, recebido={T}")
 
-        _, T, _ = x_cpu.shape     
+        # FFT no device atual, sem detach/cpu
+        Xf = torch.fft.rfft(x.float(), dim=1)   # (B, F, N), complexo
+        masks = self._build_masks()             # (3, F)
 
-        #_, T, _ = x.shape
-        
-        Xf = torch.fft.rfft(x_cpu, dim=1)   # (B, F, N)
-        F = Xf.shape[1]
-        K = F - 1
+        outs = []
+        for k in range(self.n_bands):
+            mask_k = masks[k].view(1, self.freq_len, 1)   # (1, F, 1)
+            Xk = Xf * mask_k
+            xk = torch.fft.irfft(Xk, n=T, dim=1)          # (B, T, N)
+            outs.append(xk)
 
-        c1 = K // 3
-        c2 = (2 * K) // 3
+        # preserva interface atual
+        x_low, x_mid, x_high = outs
+        return x_low, x_mid, x_high
 
-        # mask_low = torch.zeros(F, device=x.device, dtype=Xf.dtype)
-        # mask_mid = torch.zeros(F, device=x.device, dtype=Xf.dtype)
-        # mask_high = torch.zeros(F, device=x.device, dtype=Xf.dtype)
-        
-        mask_low  = torch.zeros(F, dtype=Xf.dtype)
-        mask_mid  = torch.zeros(F, dtype=Xf.dtype)
-        mask_high = torch.zeros(F,dtype=Xf.dtype)
+    def regularization_loss(
+        self,
+        smoothness_weight: float = 1.0,
+        diversity_weight: float = 1.0,
+        coverage_weight: float = 1.0,
+    ):
+        masks = self._build_masks()  # (3, F)
 
-        mask_low[0:c1 + 1] = 1
-        if c1 + 1 <= c2:
-            mask_mid[c1 + 1:c2 + 1] = 1
-        if c2 + 1 <= K:
-            mask_high[c2 + 1:K + 1] = 1
+        smooth = ((masks[:, 1:] - masks[:, :-1]) ** 2).mean()
 
-        mask_low = mask_low.view(1, F, 1)
-        mask_mid = mask_mid.view(1, F, 1)
-        mask_high = mask_high.view(1, F, 1)
+        gram = masks @ masks.transpose(0, 1)
+        eye = torch.eye(self.n_bands, device=gram.device, dtype=gram.dtype)
+        diversity = ((gram * (1 - eye)) ** 2).mean()
 
-        X_low = Xf * mask_low
-        X_mid = Xf * mask_mid
-        X_high = Xf * mask_high
+        coverage = ((masks.sum(dim=0) - 1.0) ** 2).mean()
 
-        x_low = torch.fft.irfft(X_low, n=T, dim=1)
-        x_mid = torch.fft.irfft(X_mid, n=T, dim=1)
-        x_high = torch.fft.irfft(X_high, n=T, dim=1)
-
-        #return x_low, x_mid, x_high
-        return (
-            x_low.to(original_device),
-            x_mid.to(original_device),
-            x_high.to(original_device),
+        total = (
+            smoothness_weight * smooth
+            + diversity_weight * diversity
+            + coverage_weight * coverage
         )
+
+        return {
+            "smoothness": smooth,
+            "diversity": diversity,
+            "coverage": coverage,
+            "total": total,
+        }
+
+    def band_params(self):
+        centers = torch.sigmoid(self.raw_centers).detach()
+        widths = (F.softplus(self.raw_widths) + self.min_width).detach()
+        return {"centers": centers, "widths": widths}
+
 
 class BandInstanceNorm(nn.Module):
     def __init__(self, eps: float = 1e-5):
@@ -386,7 +467,14 @@ class BandWiseForecastModel(nn.Module):
         self.expert_ff_dim = configs.expert_ff_dim
         self.channel_n_heads = configs.channel_n_heads
 
-        self.decomposer = SpectralBandDecomposer()
+        self.decomposer = LearnableSpectralBandDecomposer(
+            seq_len=self.seq_len,
+            n_bands=configs.n_bands,
+            init_mode=configs.band_init,
+            init_width=configs.band_init_width,
+            min_width=configs.band_min_width,
+            normalize_masks=configs.normalize_band_masks,
+        )
         self.norm = BandInstanceNorm(eps=self.eps)
 
         self.temporal_pool_type = configs.temporal_pool_type
@@ -464,7 +552,7 @@ class BandWiseForecastModel(nn.Module):
         return dec_out[:, -self.pred_len:, :]
 
 
-class BandWiseAdapter(DeepForecastingModelBase):
+class LearnableBandWiseAdapter(DeepForecastingModelBase):
     def __init__(self, **kwargs):
         super().__init__(MODEL_HYPER_PARAMS, **kwargs)
 

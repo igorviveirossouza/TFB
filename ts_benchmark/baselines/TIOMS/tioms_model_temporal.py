@@ -31,8 +31,6 @@ MODEL_HYPER_PARAMS = {
     "expert_d_model": 16, #expert_d_model,
     "expert_n_heads": 4, #max(expert_d_model // 4, 1),
     "expert_ff_dim": 128,
-    "channel_n_heads": 4,
-    "temporal_pool_type": "avg",   # "avg", "max", "last", "attn", "flat"
 }
 
 class SpectralBandDecomposer(nn.Module):
@@ -149,18 +147,12 @@ class BandExpertAttention(nn.Module):
         d_model: int = 32,
         n_heads: int = 4,
         ff_dim: int = 128,
-        channel_n_heads: int = 4,
-        temporal_pool_type: str = "avg",
         dropout: float = 0.1,
     ):
         super().__init__()
 
         if d_model % n_heads != 0:
             raise ValueError(f"d_model={d_model} deve ser divisível por n_heads={n_heads}")
-        if d_model % channel_n_heads != 0:
-            raise ValueError(
-                f"d_model={d_model} deve ser divisível por channel_n_heads={channel_n_heads}"
-            )
 
         self.seq_len = seq_len
         self.pred_len = pred_len
@@ -169,19 +161,21 @@ class BandExpertAttention(nn.Module):
         # embedding escalar -> vetor
         self.value_embedding = nn.Linear(1, d_model)
 
-        # embedding posicional temporal
+        # embedding posicional aprendível
         self.pos_embedding = nn.Parameter(torch.zeros(1, seq_len, d_model))
 
-        # -------- temporal self-attention --------
-        self.temporal_attn = nn.MultiheadAttention(
+        # bloco de atenção temporal
+        self.attn = nn.MultiheadAttention(
             embed_dim=d_model,
             num_heads=n_heads,
             dropout=dropout,
             batch_first=True,
         )
-        self.temporal_norm1 = nn.LayerNorm(d_model)
-        self.temporal_norm2 = nn.LayerNorm(d_model)
-        self.temporal_ffn = nn.Sequential(
+
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+
+        self.ffn = nn.Sequential(
             nn.Linear(d_model, ff_dim),
             nn.GELU(),
             nn.Dropout(dropout),
@@ -189,59 +183,8 @@ class BandExpertAttention(nn.Module):
             nn.Dropout(dropout),
         )
 
-        # resumo temporal: L x d -> d
-        self.temporal_pool_type = temporal_pool_type
-
-        if self.temporal_pool_type == "avg":
-            self.temporal_pool = nn.AdaptiveAvgPool1d(1)
-
-        elif self.temporal_pool_type == "max":
-            self.temporal_pool = nn.AdaptiveMaxPool1d(1)
-
-        elif self.temporal_pool_type == "last":
-            self.temporal_pool = None
-
-        elif self.temporal_pool_type == "attn":
-            self.temporal_pool = None
-            self.temporal_score = nn.Linear(d_model, 1)
-
-        elif self.temporal_pool_type == "flat":
-            self.temporal_pool = nn.Sequential(
-                nn.Flatten(start_dim=1),              # (B*N, T, d) -> (B*N, T*d)
-                nn.Linear(seq_len * d_model, d_model),
-                nn.GELU(),
-                nn.Dropout(dropout),
-            )
-
-        else:
-            raise ValueError(f"temporal_pool_type inválido: {self.temporal_pool_type}")
-        
-        
-
-        # -------- channel self-attention --------
-        self.channel_attn = nn.MultiheadAttention(
-            embed_dim=d_model,
-            num_heads=channel_n_heads,
-            dropout=dropout,
-            batch_first=True,
-        )
-        self.channel_norm1 = nn.LayerNorm(d_model)
-        self.channel_norm2 = nn.LayerNorm(d_model)
-        self.channel_ffn = nn.Sequential(
-            nn.Linear(d_model, ff_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(ff_dim, d_model),
-            nn.Dropout(dropout),
-        )
-
-        # head final por canal: d -> pred_len
-        self.head = nn.Sequential(
-            nn.Linear(d_model, ff_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(ff_dim, pred_len),
-        )
+        # cabeça de previsão
+        self.head = nn.Linear(seq_len * d_model, pred_len)
 
     def forward(self, x: torch.Tensor):
         """
@@ -255,69 +198,28 @@ class BandExpertAttention(nn.Module):
         if T != self.seq_len:
             raise ValueError(f"seq_len esperado={self.seq_len}, recebido={T}")
 
-        # -------------------------------------------------
-        # 1) organizar por canal: (B, T, N) -> (B*N, T, 1)
-        # -------------------------------------------------
+        # (B, T, N) -> (B, N, T) -> (B*N, T, 1)
         x = x.permute(0, 2, 1).contiguous().reshape(B * N, T, 1)
 
-        # -------------------------------------------------
-        # 2) embedding temporal
-        # -------------------------------------------------
-        z = self.value_embedding(x) + self.pos_embedding  # (B*N, T, d)
+        # embedding temporal
+        z = self.value_embedding(x) + self.pos_embedding  # (B*N, T, d_model)
 
-        # -------------------------------------------------
-        # 3) temporal self-attention
-        # -------------------------------------------------
-        attn_out, _ = self.temporal_attn(z, z, z, need_weights=False)
-        z = self.temporal_norm1(z + attn_out)
+        # self-attention temporal
+        attn_out, _ = self.attn(z, z, z, need_weights=False)
+        z = self.norm1(z + attn_out)
 
-        ffn_out = self.temporal_ffn(z)
-        z = self.temporal_norm2(z + ffn_out)  # (B*N, T, d)
+        # FFN
+        ffn_out = self.ffn(z)
+        z = self.norm2(z + ffn_out)
 
-        # -------------------------------------------------
-        # 4) resumir no tempo -> um vetor por canal
-        #    (B*N, T, d) -> (B*N, d)
-        # -------------------------------------------------
-        if self.temporal_pool_type in ["avg", "max"]:
-            z = z.transpose(1, 2)                 # (B*N, d, T)
-            z = self.temporal_pool(z).squeeze(-1) # (B*N, d)
+        # flatten temporal
+        z = z.reshape(B * N, T * self.d_model)
 
-        elif self.temporal_pool_type == "last":
-            z = z[:, -1, :]                       # (B*N, d)
+        # projeção para horizonte
+        y = self.head(z)  # (B*N, pred_len)
 
-        elif self.temporal_pool_type == "attn":
-            alpha = torch.softmax(self.temporal_score(z), dim=1)  # (B*N, T, 1)
-            z = torch.sum(alpha * z, dim=1)                       # (B*N, d)
-
-        elif self.temporal_pool_type == "flat":
-            z = self.temporal_pool(z)                             # (B*N, d)
-
-        else:
-            raise ValueError(f"temporal_pool_type inválido: {self.temporal_pool_type}")
-
-        # -------------------------------------------------
-        # 5) reorganizar por batch/canais: (B*N, d) -> (B, N, d)
-        # -------------------------------------------------
-        z = z.reshape(B, N, self.d_model)
-
-        # -------------------------------------------------
-        # 6) channel self-attention
-        # -------------------------------------------------
-        c_attn_out, _ = self.channel_attn(z, z, z, need_weights=False)
-        c = self.channel_norm1(z + c_attn_out)
-
-        c_ffn_out = self.channel_ffn(c)
-        c = self.channel_norm2(c + c_ffn_out)  # (B, N, d)
-
-        # -------------------------------------------------
-        # 7) head por canal: (B, N, d) -> (B, N, pred_len)
-        # -------------------------------------------------
-        y = self.head(c)
-
-        # -------------------------------------------------
-        # 8) voltar para (B, pred_len, N)
-        # -------------------------------------------------
-        y = y.permute(0, 2, 1).contiguous()
+        # volta para (B, pred_len, N)
+        y = y.reshape(B, N, self.pred_len).permute(0, 2, 1).contiguous()
         return y
 
 ## AGREGADORES ------------------------------------------------------------------------------------------        
@@ -384,13 +286,10 @@ class BandWiseForecastModel(nn.Module):
         self.expert_d_model = configs.expert_d_model
         self.expert_n_heads = configs.expert_n_heads
         self.expert_ff_dim = configs.expert_ff_dim
-        self.channel_n_heads = configs.channel_n_heads
 
         self.decomposer = SpectralBandDecomposer()
         self.norm = BandInstanceNorm(eps=self.eps)
 
-        self.temporal_pool_type = configs.temporal_pool_type
-        
         if self.expert_type == "mlp":
             expert_cls = lambda: BandExpertMLP(
                 seq_len=self.seq_len,
@@ -405,8 +304,6 @@ class BandWiseForecastModel(nn.Module):
                 d_model=self.expert_d_model,
                 n_heads=self.expert_n_heads,
                 ff_dim=self.expert_ff_dim,
-                channel_n_heads=self.channel_n_heads,
-                temporal_pool_type = self.temporal_pool_type,
                 dropout=self.dropout,
             )
         else:
@@ -427,8 +324,6 @@ class BandWiseForecastModel(nn.Module):
              self.aggregator = LearnedLinearAggregator()   
         else:
             raise ValueError(f"aggregator_type inválido: {self.aggregator_type}")
-
-            
 
     def forecast(self, x_enc, x_mark_enc=None, x_dec=None, x_mark_dec=None):
         if x_enc.ndim != 3:
@@ -464,7 +359,7 @@ class BandWiseForecastModel(nn.Module):
         return dec_out[:, -self.pred_len:, :]
 
 
-class BandWiseAdapter(DeepForecastingModelBase):
+class BandWiseAdapterTemp(DeepForecastingModelBase):
     def __init__(self, **kwargs):
         super().__init__(MODEL_HYPER_PARAMS, **kwargs)
 
