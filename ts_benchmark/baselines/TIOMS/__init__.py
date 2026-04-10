@@ -10,7 +10,7 @@ from ts_benchmark.baselines.TIOMS.tioms_model_copy import (
     LearnableBandWiseAdapter,
 )
 
-from ts_benchmark.baselines.TIOMS.tioms_model_audit import (
+from ts_benchmark.baselines.TIOMS.tioms_model_audit_modified import (
     LearnableBandWiseAdapterAudit,
 )
 
@@ -22,6 +22,10 @@ from ts_benchmark.baselines.TIOMS.tioms_model_temporal_sem_band import (
     NoBandWiseAdapter,
 )
 
-from ts_benchmark.baselines.TIOMS.tioms_model_temporal_sem_band_com_chanel import (
+from ts_benchmark.baselines.TIOMS.tioms_model_temporal_sem_band_abblation import (
     NoBandWiseAdapterChanel,
+)
+
+from ts_benchmark.baselines.TIOMS.attention_solo import (
+    AttentionAdapterChannel,
 )

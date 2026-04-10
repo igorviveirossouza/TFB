@@ -46,42 +46,35 @@ MODEL_HYPER_PARAMS = {
     "enable_band_audit": False,
     "print_band_audit": False,
 
-    # Agregação:
-    "channel_agg_type": "attention",   # "attention", "none", "linear", "residual_gated"
+    # Agregação entre canais:
+    # "attention", "none", "linear", "residual_gated",
+    # "linear_residual", "linear_lowrank_residual", "mlp_mixer", "linear_per_band"
+    "channel_agg_type": "attention",
+
+    # hiperparâmetros das novas agregações
+    "channel_rank": 8,                 # para low-rank
+    "channel_mlp_hidden_mult": 2,      # hidden = mult * N no MLP mixer
 }
 
 
 def _safe_mean_corr(a: torch.Tensor, b: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
-    """
-    Correlação média entre dois tensores com shape (B, T, N) ou (B, H, N).
-    Calcula por (batch, canal) ao longo da dimensão temporal e depois tira média.
-    Retorna escalar tensor.
-    """
     if a.shape != b.shape:
         raise ValueError(f"Shapes incompatíveis para correlação: {a.shape} vs {b.shape}")
 
     a0 = a - a.mean(dim=1, keepdim=True)
     b0 = b - b.mean(dim=1, keepdim=True)
 
-    num = (a0 * b0).sum(dim=1)  # (B, N)
-    den = torch.sqrt((a0.pow(2).sum(dim=1) + eps) * (b0.pow(2).sum(dim=1) + eps))  # (B, N)
+    num = (a0 * b0).sum(dim=1)
+    den = torch.sqrt((a0.pow(2).sum(dim=1) + eps) * (b0.pow(2).sum(dim=1) + eps))
     corr = num / den
     return corr.mean()
 
 
 def _band_energy(x: torch.Tensor) -> torch.Tensor:
-    """
-    Energia média de um tensor (B, T, N) ou (B, H, N).
-    Retorna escalar tensor.
-    """
     return x.pow(2).mean()
 
 
 def _pairwise_overlap_from_masks(masks: torch.Tensor, eps: float = 1e-8) -> Dict[str, torch.Tensor]:
-    """
-    masks: (K, F)
-    overlap cosseno entre pares de bandas.
-    """
     out: Dict[str, torch.Tensor] = {}
     K = masks.shape[0]
     for i, j in itertools.combinations(range(K), 2):
@@ -93,9 +86,6 @@ def _pairwise_overlap_from_masks(masks: torch.Tensor, eps: float = 1e-8) -> Dict
 
 
 def _pairwise_time_corr(prefix: str, xs: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-    """
-    xs: dict com tensores de shape (B, T, N) ou (B, H, N)
-    """
     out: Dict[str, torch.Tensor] = {}
     keys = list(xs.keys())
     for a, b in itertools.combinations(keys, 2):
@@ -104,16 +94,12 @@ def _pairwise_time_corr(prefix: str, xs: Dict[str, torch.Tensor]) -> Dict[str, t
 
 
 def tensor_dict_to_python(d: Dict[str, torch.Tensor]) -> Dict[str, float]:
-    """
-    Converte um dict de tensores escalares em floats Python para print/log.
-    """
     out: Dict[str, float] = {}
     for k, v in d.items():
         if torch.is_tensor(v):
             if v.ndim == 0:
                 out[k] = float(v.detach().cpu())
             else:
-                # fallback simples para vetores pequenos
                 out[k] = float(v.detach().cpu().mean())
         else:
             out[k] = float(v)
@@ -121,9 +107,6 @@ def tensor_dict_to_python(d: Dict[str, torch.Tensor]) -> Dict[str, float]:
 
 
 def summarize_band_audits(audits: List[Dict[str, torch.Tensor]]) -> Dict[str, float]:
-    """
-    Resume uma lista de auditorias (um dict por batch) tomando a média por chave.
-    """
     if len(audits) == 0:
         return {}
 
@@ -145,11 +128,8 @@ def summarize_band_audits(audits: List[Dict[str, torch.Tensor]]) -> Dict[str, fl
 
     return summary
 
+
 class NoChannelAggregation(nn.Module):
-    """
-    Não faz agregação entre canais.
-    Entrada e saída: (B, N, d)
-    """
     def __init__(self):
         super().__init__()
 
@@ -159,88 +139,163 @@ class NoChannelAggregation(nn.Module):
 
 class LinearChannelMixer(nn.Module):
     """
-    Mistura linear entre canais:
-    para cada dimensão latente, aplica uma transformação linear no eixo dos canais.
-
-    Entrada: (B, N, d)
-    Saída:   (B, N, d)
+    Mistura linear pura no eixo dos canais:
+        z_out = W z
     """
     def __init__(self, dropout: float = 0.0):
         super().__init__()
         self.dropout = nn.Dropout(dropout)
+        self._built = False
+
+    def _build_if_needed(self, n_channels: int, device, dtype):
+        if not self._built:
+            self.W = nn.Parameter(torch.eye(n_channels, device=device, dtype=dtype))
+            self.b = nn.Parameter(torch.zeros(n_channels, device=device, dtype=dtype))
+            self._built = True
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
         if z.ndim != 3:
             raise ValueError(f"Esperado z com shape (B, N, d), recebido {z.shape}")
 
-        B, N, d = z.shape
+        _, N, _ = z.shape
+        self._build_if_needed(N, z.device, z.dtype)
 
-        # (B, N, d) -> (B, d, N)
-        z_perm = z.transpose(1, 2)
-
-        # peso compartilhado no eixo dos canais por batch
-        # atenção: lazy parameterização simples não serve bem aqui,
-        # então usamos uma projeção criada dinamicamente via einsum + parâmetro registrado.
-        # Para ficar simples e robusto, criamos W no primeiro forward.
-        if not hasattr(self, "W"):
-            self.W = nn.Parameter(torch.eye(N, device=z.device, dtype=z.dtype))
-            self.b = nn.Parameter(torch.zeros(N, device=z.device, dtype=z.dtype))
-
+        z_perm = z.transpose(1, 2)  # (B, d, N)
         mixed = torch.einsum("bdn,mn->bdm", z_perm, self.W) + self.b.view(1, 1, N)
         mixed = self.dropout(mixed)
-
-        # volta para (B, N, d)
         return mixed.transpose(1, 2)
 
 
 class ResidualGatedChannelMixer(nn.Module):
     """
-    Mistura entre canais como correção residual gateada.
-
-    z_out = z + gate(z) * mix(z)
-
-    Entrada: (B, N, d)
-    Saída:   (B, N, d)
+    Mistura residual gateada:
+        z_out = z + gate(z) * (W z)
     """
     def __init__(self, d_model: int, dropout: float = 0.0):
         super().__init__()
         self.dropout = nn.Dropout(dropout)
-
         self.gate = nn.Sequential(
             nn.Linear(d_model, d_model),
             nn.Sigmoid(),
         )
+        self._built = False
+
+    def _build_if_needed(self, n_channels: int, device, dtype):
+        if not self._built:
+            self.W = nn.Parameter(torch.eye(n_channels, device=device, dtype=dtype))
+            self.b = nn.Parameter(torch.zeros(n_channels, device=device, dtype=dtype))
+            self._built = True
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
         if z.ndim != 3:
             raise ValueError(f"Esperado z com shape (B, N, d), recebido {z.shape}")
 
-        B, N, d = z.shape
-        z_perm = z.transpose(1, 2)  # (B, d, N)
+        _, N, _ = z.shape
+        self._build_if_needed(N, z.device, z.dtype)
 
-        if not hasattr(self, "W"):
-            self.W = nn.Parameter(torch.eye(N, device=z.device, dtype=z.dtype))
-            self.b = nn.Parameter(torch.zeros(N, device=z.device, dtype=z.dtype))
-
+        z_perm = z.transpose(1, 2)
         mixed = torch.einsum("bdn,mn->bdm", z_perm, self.W) + self.b.view(1, 1, N)
-        mixed = self.dropout(mixed).transpose(1, 2)  # (B, N, d)
+        mixed = self.dropout(mixed).transpose(1, 2)
 
-        g = self.gate(z)  # (B, N, d)
+        g = self.gate(z)
         return z + g * mixed
 
 
+class LinearResidualChannelMixer(nn.Module):
+    """
+    Mistura linear residual:
+        z_out = z + W z
+    """
+    def __init__(self, dropout: float = 0.0):
+        super().__init__()
+        self.dropout = nn.Dropout(dropout)
+        self._built = False
+
+    def _build_if_needed(self, n_channels: int, device, dtype):
+        if not self._built:
+            self.W = nn.Parameter(torch.eye(n_channels, device=device, dtype=dtype))
+            self.b = nn.Parameter(torch.zeros(n_channels, device=device, dtype=dtype))
+            self._built = True
+
+    def forward(self, z: torch.Tensor) -> torch.Tensor:
+        if z.ndim != 3:
+            raise ValueError(f"Esperado z com shape (B, N, d), recebido {z.shape}")
+
+        _, N, _ = z.shape
+        self._build_if_needed(N, z.device, z.dtype)
+
+        z_perm = z.transpose(1, 2)
+        mixed = torch.einsum("bdn,mn->bdm", z_perm, self.W) + self.b.view(1, 1, N)
+        mixed = self.dropout(mixed).transpose(1, 2)
+        return z + mixed
+
+
+class LowRankResidualChannelMixer(nn.Module):
+    """
+    Mistura low-rank residual:
+        z_out = z + U V^T z
+    """
+    def __init__(self, rank: int = 8, dropout: float = 0.0):
+        super().__init__()
+        self.rank = rank
+        self.dropout = nn.Dropout(dropout)
+        self._built = False
+
+    def _build_if_needed(self, n_channels: int, device, dtype):
+        if not self._built:
+            rank = min(self.rank, n_channels)
+            self.U = nn.Parameter(0.02 * torch.randn(n_channels, rank, device=device, dtype=dtype))
+            self.V = nn.Parameter(0.02 * torch.randn(n_channels, rank, device=device, dtype=dtype))
+            self.b = nn.Parameter(torch.zeros(n_channels, device=device, dtype=dtype))
+            self._built = True
+
+    def forward(self, z: torch.Tensor) -> torch.Tensor:
+        if z.ndim != 3:
+            raise ValueError(f"Esperado z com shape (B, N, d), recebido {z.shape}")
+
+        _, N, _ = z.shape
+        self._build_if_needed(N, z.device, z.dtype)
+
+        W = self.U @ self.V.T
+        z_perm = z.transpose(1, 2)
+        mixed = torch.einsum("bdn,mn->bdm", z_perm, W) + self.b.view(1, 1, N)
+        mixed = self.dropout(mixed).transpose(1, 2)
+        return z + mixed
+
+
+class ChannelMLPMixer(nn.Module):
+    """
+    MLP Mixer no eixo dos canais:
+        z_out = W2 GELU(W1 z)
+    """
+    def __init__(self, hidden_mult: int = 2, dropout: float = 0.0):
+        super().__init__()
+        self.hidden_mult = hidden_mult
+        self.dropout = nn.Dropout(dropout)
+        self._built = False
+
+    def _build_if_needed(self, n_channels: int, device, dtype):
+        if not self._built:
+            hidden = max(self.hidden_mult * n_channels, 1)
+            self.fc1 = nn.Linear(n_channels, hidden, bias=True, device=device, dtype=dtype)
+            self.fc2 = nn.Linear(hidden, n_channels, bias=True, device=device, dtype=dtype)
+            self.act = nn.GELU()
+            self._built = True
+
+    def forward(self, z: torch.Tensor) -> torch.Tensor:
+        if z.ndim != 3:
+            raise ValueError(f"Esperado z com shape (B, N, d), recebido {z.shape}")
+
+        _, N, _ = z.shape
+        self._build_if_needed(N, z.device, z.dtype)
+
+        z_perm = z.transpose(1, 2)
+        mixed = self.fc2(self.dropout(self.act(self.fc1(z_perm))))
+        mixed = self.dropout(mixed).transpose(1, 2)
+        return mixed
+
 
 class LearnableSpectralBandDecomposer(nn.Module):
-    """
-    Separação espectral suave e aprendível.
-
-    Mantém a interface do decomposer atual:
-        x -> x_low, x_mid, x_high
-    com cada saída tendo shape (B, T, N)
-
-    A diferença é que as bandas agora são máscaras gaussianas aprendíveis.
-    """
-
     def __init__(
         self,
         seq_len: int,
@@ -264,7 +319,6 @@ class LearnableSpectralBandDecomposer(nn.Module):
         if init_mode == "uniform":
             init_centers = torch.linspace(0.15, 0.85, steps=n_bands)
         elif init_mode == "log":
-            # mais densidade em baixas frequências
             init_centers = torch.tensor([0.08, 0.28, 0.70], dtype=torch.float32)
         else:
             raise ValueError(f"band_init inválido: {init_mode}")
@@ -287,12 +341,9 @@ class LearnableSpectralBandDecomposer(nn.Module):
         return torch.log(torch.expm1(x))
 
     def _build_masks(self) -> torch.Tensor:
-        """
-        Retorna masks com shape (K, F)
-        """
-        centers = torch.sigmoid(self.raw_centers)  # (K,)
-        widths = F.softplus(self.raw_widths) + self.min_width  # (K,)
-        freq = self.freq_grid[None, :]  # (1, F)
+        centers = torch.sigmoid(self.raw_centers)
+        widths = F.softplus(self.raw_widths) + self.min_width
+        freq = self.freq_grid[None, :]
 
         masks = torch.exp(-0.5 * ((freq - centers[:, None]) / widths[:, None]) ** 2)
 
@@ -309,17 +360,30 @@ class LearnableSpectralBandDecomposer(nn.Module):
         if T != self.seq_len:
             raise ValueError(f"seq_len esperado={self.seq_len}, recebido={T}")
 
-        Xf = torch.fft.rfft(x.float(), dim=1)   # (B, F, N), complexo
-        masks = self._build_masks()             # (3, F)
+        orig_device = x.device
+        orig_dtype = x.dtype
 
-        outs = []
-        for k in range(self.n_bands):
-            mask_k = masks[k].view(1, self.freq_len, 1)   # (1, F, 1)
-            Xk = Xf * mask_k
-            xk = torch.fft.irfft(Xk, n=T, dim=1)          # (B, T, N)
-            outs.append(xk)
+        def _decompose(x_work: torch.Tensor):
+            Xf = torch.fft.rfft(x_work, dim=1)
+            masks = self._build_masks().to(Xf.device, dtype=Xf.real.dtype)
 
-        x_low, x_mid, x_high = outs
+            outs = []
+            for k in range(self.n_bands):
+                mask_k = masks[k].view(1, self.freq_len, 1)
+                Xk = Xf * mask_k
+                xk = torch.fft.irfft(Xk, n=T, dim=1)
+                outs.append(xk)
+            return outs
+
+        try:
+            outs = _decompose(x.float())
+        except RuntimeError as e:
+            if "cuFFT" not in str(e):
+                raise
+            x_cpu = x.detach().to("cpu", dtype=torch.float32)
+            outs = _decompose(x_cpu)
+
+        x_low, x_mid, x_high = [o.to(orig_device, dtype=orig_dtype) for o in outs]
         return x_low, x_mid, x_high
 
     def regularization_loss(
@@ -328,7 +392,7 @@ class LearnableSpectralBandDecomposer(nn.Module):
         diversity_weight: float = 1.0,
         coverage_weight: float = 1.0,
     ):
-        masks = self._build_masks()  # (3, F)
+        masks = self._build_masks()
 
         smooth = ((masks[:, 1:] - masks[:, :-1]) ** 2).mean()
 
@@ -357,17 +421,11 @@ class LearnableSpectralBandDecomposer(nn.Module):
         return {"centers": centers, "widths": widths}
 
     def audit(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
-        """
-        Auditoria do decomposer.
-        x: (B, T, N)
-
-        Retorna métricas sobre máscaras e componentes decompostas.
-        """
         if x.ndim != 3:
             raise ValueError(f"Esperado tensor 3D (B, T, N), mas veio {x.shape}")
 
         x_low, x_mid, x_high = self.forward(x)
-        masks = self._build_masks()  # (3, F)
+        masks = self._build_masks()
 
         audit: Dict[str, torch.Tensor] = {
             "mask_low_mean": masks[0].mean(),
@@ -414,7 +472,7 @@ class BandInstanceNorm(nn.Module):
         if x.ndim != 3:
             raise ValueError(f"Esperado tensor 3D (B, T, N), mas veio {x.shape}")
 
-        mean = x.mean(dim=1, keepdim=True)  # (B, 1, N)
+        mean = x.mean(dim=1, keepdim=True)
         var = torch.var(x, dim=1, keepdim=True, unbiased=False)
         std = torch.sqrt(var + self.eps)
 
@@ -450,9 +508,9 @@ class BandExpertMLP(nn.Module):
         if T != self.seq_len:
             raise ValueError(f"seq_len esperado={self.seq_len}, recebido={T}")
 
-        x = x.permute(0, 2, 1)   # (B, N, T)
-        y = self.net(x)          # (B, N, H)
-        y = y.permute(0, 2, 1)   # (B, H, N)
+        x = x.permute(0, 2, 1)
+        y = self.net(x)
+        y = y.permute(0, 2, 1)
         return y
 
 
@@ -466,6 +524,8 @@ class BandExpertAttention(nn.Module):
         ff_dim: int = 128,
         channel_n_heads: int = 4,
         channel_agg_type: str = "attention",
+        channel_rank: int = 8,
+        channel_mlp_hidden_mult: int = 2,
         temporal_pool_type: str = "avg",
         dropout: float = 0.1,
     ):
@@ -524,7 +584,6 @@ class BandExpertAttention(nn.Module):
         else:
             raise ValueError(f"temporal_pool_type inválido: {self.temporal_pool_type}")
 
-        # -------- channel aggregation --------
         if self.channel_agg_type == "attention":
             self.channel_attn = nn.MultiheadAttention(
                 embed_dim=d_model,
@@ -556,6 +615,24 @@ class BandExpertAttention(nn.Module):
             )
             self.channel_norm = nn.LayerNorm(d_model)
 
+        elif self.channel_agg_type == "linear_residual":
+            self.channel_block = LinearResidualChannelMixer(dropout=dropout)
+            self.channel_norm = nn.LayerNorm(d_model)
+
+        elif self.channel_agg_type == "linear_lowrank_residual":
+            self.channel_block = LowRankResidualChannelMixer(
+                rank=channel_rank,
+                dropout=dropout,
+            )
+            self.channel_norm = nn.LayerNorm(d_model)
+
+        elif self.channel_agg_type == "mlp_mixer":
+            self.channel_block = ChannelMLPMixer(
+                hidden_mult=channel_mlp_hidden_mult,
+                dropout=dropout,
+            )
+            self.channel_norm = nn.LayerNorm(d_model)
+
         else:
             raise ValueError(f"channel_agg_type inválido: {self.channel_agg_type}")
 
@@ -567,10 +644,6 @@ class BandExpertAttention(nn.Module):
         )
 
     def forward(self, x: torch.Tensor):
-        """
-        x: (B, T, N)
-        retorna: (B, pred_len, N)
-        """
         if x.ndim != 3:
             raise ValueError(f"Esperado tensor 3D (B, T, N), mas veio {x.shape}")
 
@@ -579,36 +652,29 @@ class BandExpertAttention(nn.Module):
             raise ValueError(f"seq_len esperado={self.seq_len}, recebido={T}")
 
         x = x.permute(0, 2, 1).contiguous().reshape(B * N, T, 1)
-        z = self.value_embedding(x) + self.pos_embedding  # (B*N, T, d)
+        z = self.value_embedding(x) + self.pos_embedding
 
         attn_out, _ = self.temporal_attn(z, z, z, need_weights=False)
         z = self.temporal_norm1(z + attn_out)
 
         ffn_out = self.temporal_ffn(z)
-        z = self.temporal_norm2(z + ffn_out)  # (B*N, T, d)
+        z = self.temporal_norm2(z + ffn_out)
 
         if self.temporal_pool_type in ["avg", "max"]:
-            z = z.transpose(1, 2)                 # (B*N, d, T)
-            z = self.temporal_pool(z).squeeze(-1) # (B*N, d)
+            z = z.transpose(1, 2)
+            z = self.temporal_pool(z).squeeze(-1)
         elif self.temporal_pool_type == "last":
-            z = z[:, -1, :]                       # (B*N, d)
+            z = z[:, -1, :]
         elif self.temporal_pool_type == "attn":
-            alpha = torch.softmax(self.temporal_score(z), dim=1)  # (B*N, T, 1)
-            z = torch.sum(alpha * z, dim=1)                       # (B*N, d)
+            alpha = torch.softmax(self.temporal_score(z), dim=1)
+            z = torch.sum(alpha * z, dim=1)
         elif self.temporal_pool_type == "flat":
-            z = self.temporal_pool(z)                             # (B*N, d)
+            z = self.temporal_pool(z)
         else:
             raise ValueError(f"temporal_pool_type inválido: {self.temporal_pool_type}")
 
         z = z.reshape(B, N, self.d_model)
 
-       # c_attn_out, _ = self.channel_attn(z, z, z, need_weights=False)
-       #  c = self.channel_norm1(z + c_attn_out)
-
-       #  c_ffn_out = self.channel_ffn(c)
-       #  c = self.channel_norm2(c + c_ffn_out)  # (B, N, d)
-
-    # 6) agregação entre canais
         if self.channel_agg_type == "attention":
             c_attn_out, _ = self.channel_attn(z, z, z, need_weights=False)
             c = self.channel_norm1(z + c_attn_out)
@@ -619,13 +685,19 @@ class BandExpertAttention(nn.Module):
         elif self.channel_agg_type == "none":
             c = self.channel_block(z)
 
-        elif self.channel_agg_type in ["linear", "residual_gated"]:
+        elif self.channel_agg_type in [
+            "linear",
+            "residual_gated",
+            "linear_residual",
+            "linear_lowrank_residual",
+            "mlp_mixer",
+            "linear_per_band",
+        ]:
             c = self.channel_block(z)
             c = self.channel_norm(c)
 
         else:
             raise ValueError(f"channel_agg_type inválido: {self.channel_agg_type}")
-
 
         y = self.head(c)
         y = y.permute(0, 2, 1).contiguous()
@@ -651,12 +723,12 @@ class MLPAggregator(nn.Module):
         )
 
     def forward(self, y_low: torch.Tensor, y_mid: torch.Tensor, y_high: torch.Tensor):
-        y_low = y_low.unsqueeze(-1)    # (B, H, N, 1)
+        y_low = y_low.unsqueeze(-1)
         y_mid = y_mid.unsqueeze(-1)
         y_high = y_high.unsqueeze(-1)
 
-        y_cat = torch.cat([y_low, y_mid, y_high], dim=-1)  # (B, H, N, 3)
-        y = self.mlp(y_cat).squeeze(-1)                    # (B, H, N)
+        y_cat = torch.cat([y_low, y_mid, y_high], dim=-1)
+        y = self.mlp(y_cat).squeeze(-1)
         return y
 
 
@@ -701,6 +773,8 @@ class BandWiseForecastModel(nn.Module):
         self.temporal_pool_type = configs.temporal_pool_type
 
         self.channel_agg_type = getattr(configs, "channel_agg_type", "attention")
+        self.channel_rank = getattr(configs, "channel_rank", 8)
+        self.channel_mlp_hidden_mult = getattr(configs, "channel_mlp_hidden_mult", 2)
 
         self.decomposer = LearnableSpectralBandDecomposer(
             seq_len=self.seq_len,
@@ -728,6 +802,8 @@ class BandWiseForecastModel(nn.Module):
                 ff_dim=self.expert_ff_dim,
                 channel_n_heads=self.channel_n_heads,
                 channel_agg_type=self.channel_agg_type,
+                channel_rank=self.channel_rank,
+                channel_mlp_hidden_mult=self.channel_mlp_hidden_mult,
                 temporal_pool_type=self.temporal_pool_type,
                 dropout=self.dropout,
             )
@@ -760,9 +836,6 @@ class BandWiseForecastModel(nn.Module):
         x_mid: Optional[torch.Tensor] = None,
         x_high: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
-        """
-        Consolida métricas de auditoria das bandas.
-        """
         audit: Dict[str, torch.Tensor] = {}
 
         if hasattr(self.decomposer, "audit"):
@@ -910,6 +983,8 @@ class LearnableBandWiseAdapterAudit(DeepForecastingModelBase):
         print("expert_n_heads:", self.config.expert_n_heads, flush=True)
         print("expert_ff_dim:", self.config.expert_ff_dim, flush=True)
         print("channel_agg_type:", getattr(self.config, "channel_agg_type", "attention"), flush=True)
+        print("channel_rank:", getattr(self.config, "channel_rank", 8), flush=True)
+        print("channel_mlp_hidden_mult:", getattr(self.config, "channel_mlp_hidden_mult", 2), flush=True)
         return BandWiseForecastModel(self.config)
 
     def _process(self, input, target, input_mark, target_mark):
@@ -948,9 +1023,6 @@ class LearnableBandWiseAdapterAudit(DeepForecastingModelBase):
 
     @torch.no_grad()
     def collect_band_audit_batch(self, input, target, input_mark=None, target_mark=None) -> Dict[str, torch.Tensor]:
-        """
-        Coleta auditoria de um único batch.
-        """
         self.model.eval()
         dec_input = target
 
@@ -965,14 +1037,7 @@ class LearnableBandWiseAdapterAudit(DeepForecastingModelBase):
 
     @torch.no_grad()
     def collect_band_audit_from_loader(self, loader, max_batches: Optional[int] = None) -> Dict[str, float]:
-        """
-        Pipeline de auditoria:
-        - percorre um loader
-        - coleta auditoria por batch
-        - resume tudo por média
-        """
         self.model.eval()
-
         audits: List[Dict[str, torch.Tensor]] = []
 
         for batch_idx, batch in enumerate(loader):
@@ -985,7 +1050,6 @@ class LearnableBandWiseAdapterAudit(DeepForecastingModelBase):
                 input_mark = batch.get("input_mark")
                 target_mark = batch.get("target_mark")
             else:
-                # fallback comum
                 if len(batch) == 4:
                     input, target, input_mark, target_mark = batch
                 elif len(batch) == 2:
@@ -995,12 +1059,13 @@ class LearnableBandWiseAdapterAudit(DeepForecastingModelBase):
                 else:
                     raise ValueError("Batch com formato não suportado para auditoria.")
 
-            input = input.to(next(self.model.parameters()).device)
-            target = target.to(next(self.model.parameters()).device)
+            device = next(self.model.parameters()).device
+            input = input.to(device)
+            target = target.to(device)
             if input_mark is not None:
-                input_mark = input_mark.to(next(self.model.parameters()).device)
+                input_mark = input_mark.to(device)
             if target_mark is not None:
-                target_mark = target_mark.to(next(self.model.parameters()).device)
+                target_mark = target_mark.to(device)
 
             audit = self.collect_band_audit_batch(
                 input=input,
