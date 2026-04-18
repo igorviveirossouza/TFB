@@ -1,9 +1,9 @@
-
 import torch
 import torch.nn as nn
 from torch import optim
 
 from ts_benchmark.baselines.deep_forecasting_model_base import DeepForecastingModelBase
+from ts_benchmark.baselines.TIOMS.embeddings import build_embedding
 
 
 MODEL_HYPER_PARAMS = {
@@ -23,45 +23,38 @@ MODEL_HYPER_PARAMS = {
     "loss": "TimeWeightedMSE",  # "MSE", "MAE", "Huber", "TimeWeightedMSE"
     "loss_decay_rate": 0.5,
     "patience": 3,
-
-    # bloco temporal
     "d_model": 16,
     "n_heads": 4,
     "ff_dim": 128,
-
-    # pooling temporal após atenção
-    # opções: "avg", "max", "last", "attn", "flat"
     "temporal_pool_type": "attn",
-
-    # agregação opcional entre canais, após o bloco temporal
-    # opções: "none", "attention"
     "channel_agg_type": "attention",
     "channel_n_heads": 4,
+    "causal_att": "non_causal",  # "non_causal", "causal", "no_self"
 
-    # Causal:
-    # opções: "non_causal", "causal", "no_self"
-    "causal_att": "non_causal",
+    # Embeddings
+    "embedding_type": "linear",   # "linear", "nonlinear", "lag_linear", "mixed", "spectral"
+    "embedding_hidden_dim": 32,
+    "lag_size": 7,
+    "spectral_num_freqs": 8,
+
+    # Normalização
+    "norm_type": "revin",     # "classic" | "revin"
+    "revin_affine": True,
+
 }
 
 
 class TimeWeightedMSE(nn.Module):
-    """
-    MSE ponderada no eixo temporal.
-
-    Para horizonte K e decay_rate = lambda:
-        w_t ∝ lambda^t,   t = 0, 1, ..., K-1
-
-    Os pesos são normalizados para somarem K, mantendo escala próxima à MSE.
-    """
-
     def __init__(self, K: int, decay_rate: float = 0.9):
         super().__init__()
-        weights = torch.pow(torch.tensor(decay_rate, dtype=torch.float32), torch.arange(K, dtype=torch.float32))
+        weights = torch.pow(
+            torch.tensor(decay_rate, dtype=torch.float32),
+            torch.arange(K, dtype=torch.float32),
+        )
         weights = weights * (K / weights.sum())
-        self.register_buffer("weights", weights.view(1, K, 1))  # (1, K, 1)
+        self.register_buffer("weights", weights.view(1, K, 1))
 
     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        # pred, target: (B, K, N)
         weights = self.weights.to(pred.device)
         loss = (pred - target) ** 2
         weighted_loss = loss * weights
@@ -69,63 +62,74 @@ class TimeWeightedMSE(nn.Module):
 
 
 class InstanceNorm(nn.Module):
-    def __init__(self, eps: float = 1e-5):
+    def __init__(
+        self,
+        num_features: int,
+        eps: float = 1e-5,
+        norm_type: str = "revin",
+        revin_affine: bool = True,
+    ):
         super().__init__()
+        self.num_features = num_features
         self.eps = eps
+        self.norm_type = norm_type
+        self.revin_affine = revin_affine
+        self.affine_eps = 1e-8
 
-    def forward(self, x: torch.Tensor):
-        """
-        x: (B, T, N)
-        retorna:
-            x_norm: (B, T, N)
-            mean:   (B, 1, N)
-            std:    (B, 1, N)
-        """
+        if self.norm_type == "revin" and self.revin_affine:
+            self.affine_weight = nn.Parameter(torch.ones(1, 1, num_features))
+            self.affine_bias = nn.Parameter(torch.zeros(1, 1, num_features))
+        else:
+            self.register_parameter("affine_weight", None)
+            self.register_parameter("affine_bias", None)
+
+        self.mean = None
+        self.std = None
+
+    def normalize(self, x: torch.Tensor) -> torch.Tensor:
         if x.ndim != 3:
-            raise ValueError(f"Esperado tensor 3D (B, T, N), mas veio {x.shape}")
+            raise ValueError(f"Esperado (B, T, N), veio {x.shape}")
 
-        mean = x.mean(dim=1, keepdim=True)
-        var = x.var(dim=1, keepdim=True, unbiased=False)
-        std = torch.sqrt(var + self.eps)
-        x_norm = (x - mean) / std
-        return x_norm, mean, std
+        self.mean = x.mean(dim=1, keepdim=True).detach()
+        self.std = torch.sqrt(
+            x.var(dim=1, keepdim=True, unbiased=False) + self.eps
+        ).detach()
 
-    @staticmethod
-    def denormalize(y_norm: torch.Tensor, mean: torch.Tensor, std: torch.Tensor):
-        """
-        y_norm: (B, H, N)
-        mean:   (B, 1, N)
-        std:    (B, 1, N)
-        """
-        return y_norm * std + mean
+        x_norm = (x - self.mean) / self.std
+
+        if self.norm_type == "revin" and self.revin_affine:
+            x_norm = x_norm * self.affine_weight + self.affine_bias
+
+        return x_norm
+
+    def denormalize(self, y_norm: torch.Tensor) -> torch.Tensor:
+        if self.mean is None or self.std is None:
+            raise RuntimeError("Chame normalize() antes de denormalize().")
+
+        y = y_norm
+
+        if self.norm_type == "revin" and self.revin_affine:
+            y = (y - self.affine_bias) / (self.affine_weight + self.affine_eps)
+
+        y = y * self.std + self.mean
+        return y
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.normalize(x)
 
 
 class AttentiveTemporalPool(nn.Module):
-    """
-    Pooling atencional ao longo do tempo.
-    entrada: (B*, T, D)
-    saída:   (B*, D)
-    """
-
     def __init__(self, d_model: int):
         super().__init__()
         self.score = nn.Linear(d_model, 1)
 
     def forward(self, z: torch.Tensor):
-        attn_logits = self.score(z)           # (B*, T, 1)
+        attn_logits = self.score(z)
         attn_weights = torch.softmax(attn_logits, dim=1)
-        pooled = (z * attn_weights).sum(dim=1)
-        return pooled
+        return (z * attn_weights).sum(dim=1)
 
 
 class TemporalAttentionWithChannelAggregation(nn.Module):
-    """
-    1) Aplica atenção temporal separadamente em cada canal.
-    2) Faz pooling temporal para obter um embedding por canal.
-    3) Opcionalmente agrega entre canais.
-    4) Decodifica cada canal para pred_len.
-    """
-
     def __init__(
         self,
         seq_len: int,
@@ -138,11 +142,16 @@ class TemporalAttentionWithChannelAggregation(nn.Module):
         channel_agg_type: str = "attention",
         channel_n_heads: int = 4,
         causal_att: str = "non_causal",
+        embedding_type: str = "linear",
+        embedding_hidden_dim: int = 32,
+        lag_size: int = 7,
+        spectral_num_freqs: int = 8,
     ):
         super().__init__()
 
         if d_model % n_heads != 0:
             raise ValueError(f"d_model={d_model} deve ser divisível por n_heads={n_heads}")
+
         if channel_agg_type == "attention" and d_model % channel_n_heads != 0:
             raise ValueError(
                 f"d_model={d_model} deve ser divisível por channel_n_heads={channel_n_heads}"
@@ -162,6 +171,20 @@ class TemporalAttentionWithChannelAggregation(nn.Module):
                 f"Use um de {sorted(valid_channel_agg_types)}"
             )
 
+        valid_embedding_types = {"linear", "nonlinear", "lag_linear", "mixed", "spectral"}
+        if embedding_type not in valid_embedding_types:
+            raise ValueError(
+                f"embedding_type inválido: {embedding_type}. "
+                f"Use um de {sorted(valid_embedding_types)}"
+            )
+
+        valid_causal = {"non_causal", "causal", "no_self"}
+        if causal_att not in valid_causal:
+            raise ValueError(
+                f"causal_att inválido: {causal_att}. "
+                f"Use um de {sorted(valid_causal)}"
+            )
+
         self.seq_len = seq_len
         self.pred_len = pred_len
         self.d_model = d_model
@@ -169,7 +192,14 @@ class TemporalAttentionWithChannelAggregation(nn.Module):
         self.channel_agg_type = channel_agg_type
         self.causal_att = causal_att
 
-        self.value_embedding = nn.Linear(1, d_model)
+        self.embedding = build_embedding(
+            embedding_type=embedding_type,
+            d_model=d_model,
+            hidden_dim=embedding_hidden_dim,
+            lag_size=lag_size,
+            spectral_num_freqs=spectral_num_freqs,
+        )
+
         self.pos_embedding = nn.Parameter(torch.zeros(1, seq_len, d_model))
 
         self.temporal_attn = nn.MultiheadAttention(
@@ -236,10 +266,6 @@ class TemporalAttentionWithChannelAggregation(nn.Module):
         raise RuntimeError(f"temporal_pool_type não tratado: {self.temporal_pool_type}")
 
     def forward(self, x: torch.Tensor):
-        """
-        x: (B, T, N)
-        retorna: (B, pred_len, N)
-        """
         if x.ndim != 3:
             raise ValueError(f"Esperado tensor 3D (B, T, N), mas veio {x.shape}")
 
@@ -247,42 +273,36 @@ class TemporalAttentionWithChannelAggregation(nn.Module):
         if T != self.seq_len:
             raise ValueError(f"seq_len esperado={self.seq_len}, recebido={T}")
 
-        # atenção temporal por canal
         x = x.permute(0, 2, 1).contiguous().reshape(B * N, T, 1)
-        z = self.value_embedding(x) + self.pos_embedding
+        z = self.embedding(x) + self.pos_embedding
 
-        if self.causal_att == 'non_causal':
+        if self.causal_att == "non_causal":
             attn_out, _ = self.temporal_attn(z, z, z, need_weights=False)
-        elif self.causal_att == 'causal':
-            mask = torch.triu(torch.ones(T, T, device=z.device, dtype=torch.bool), diagonal=1)
+        elif self.causal_att == "causal":
+            mask = torch.triu(
+                torch.ones(T, T, device=z.device, dtype=torch.bool),
+                diagonal=1,
+            )
             attn_out, _ = self.temporal_attn(z, z, z, attn_mask=mask, need_weights=False)
-        elif self.causal_att == 'no_self':
+        elif self.causal_att == "no_self":
             mask = torch.eye(T, device=z.device, dtype=torch.bool)
             attn_out, _ = self.temporal_attn(z, z, z, attn_mask=mask, need_weights=False)
         else:
-            raise ValueError(f"causal_att inválido: {self.causal_att}")
+            raise RuntimeError(f"causal_att não tratado: {self.causal_att}")
 
         z = self.temporal_norm1(z + attn_out)
+        z = self.temporal_norm2(z + self.temporal_ffn(z))
 
-        ffn_out = self.temporal_ffn(z)
-        z = self.temporal_norm2(z + ffn_out)
+        z = self._pool_time(z)
+        z = z.reshape(B, N, self.d_model)
 
-        # um embedding por canal
-        z = self._pool_time(z)                 # (B*N, D)
-        z = z.reshape(B, N, self.d_model)      # (B, N, D)
-
-        # agregação opcional entre canais
         if self.channel_agg_type == "attention":
             c_attn_out, _ = self.channel_attn(z, z, z, need_weights=False)
-            c = self.channel_norm1(z + c_attn_out)
-            c_ffn_out = self.channel_ffn(c)
-            c = self.channel_norm2(c + c_ffn_out)
-        else:  # "none"
-            c = z
+            z = self.channel_norm1(z + c_attn_out)
+            z = self.channel_norm2(z + self.channel_ffn(z))
 
-        y = self.head(c)                       # (B, N, H)
-        y = y.permute(0, 2, 1).contiguous()    # (B, H, N)
-        return y
+        y = self.head(z)
+        return y.permute(0, 2, 1).contiguous()
 
 
 class AttentionForecastModel(nn.Module):
@@ -306,7 +326,20 @@ class AttentionForecastModel(nn.Module):
         self.channel_n_heads = getattr(configs, "channel_n_heads", self.n_heads)
         self.causal_att = getattr(configs, "causal_att", "non_causal")
 
-        self.norm = InstanceNorm(eps=self.eps)
+        self.embedding_type = getattr(configs, "embedding_type", "linear")
+        self.embedding_hidden_dim = getattr(configs, "embedding_hidden_dim", 32)
+        self.lag_size = getattr(configs, "lag_size", 7)
+        self.spectral_num_freqs = getattr(configs, "spectral_num_freqs", 8)
+
+        self.norm_type = getattr(configs, "norm_type", "classic")
+        self.revin_affine = getattr(configs, "revin_affine", True)
+
+        self.norm = InstanceNorm(
+            num_features=self.enc_in,
+            eps=self.eps,
+            norm_type=self.norm_type,
+            revin_affine=self.revin_affine,
+        )
 
         self.block = TemporalAttentionWithChannelAggregation(
             seq_len=self.seq_len,
@@ -319,13 +352,13 @@ class AttentionForecastModel(nn.Module):
             channel_agg_type=self.channel_agg_type,
             channel_n_heads=self.channel_n_heads,
             causal_att=self.causal_att,
+            embedding_type=self.embedding_type,
+            embedding_hidden_dim=self.embedding_hidden_dim,
+            lag_size=self.lag_size,
+            spectral_num_freqs=self.spectral_num_freqs,
         )
 
     def forecast(self, x_enc, x_mark_enc=None, x_dec=None, x_mark_dec=None):
-        """
-        x_enc: (B, T, N)
-        retorna: (B, pred_len, N)
-        """
         if x_enc.ndim != 3:
             raise ValueError(f"Esperado tensor 3D (B, T, N), mas veio {x_enc.shape}")
 
@@ -333,9 +366,9 @@ class AttentionForecastModel(nn.Module):
         if T != self.seq_len:
             raise ValueError(f"seq_len esperado={self.seq_len}, recebido={T}")
 
-        x_norm, x_mean, x_std = self.norm(x_enc)
+        x_norm = self.norm.normalize(x_enc)
         y_norm = self.block(x_norm)
-        dec_out = self.norm.denormalize(y_norm, x_mean, x_std)
+        dec_out = self.norm.denormalize(y_norm)
 
         if torch.isnan(dec_out).any():
             print("WARNING: NaN detected in model output", flush=True)
@@ -363,22 +396,40 @@ class AttentionAdapterChannel(DeepForecastingModelBase):
         print("temporal_pool_type:", self.config.temporal_pool_type, flush=True)
         print("channel_agg_type:", getattr(self.config, "channel_agg_type", "attention"), flush=True)
         print("channel_n_heads:", getattr(self.config, "channel_n_heads", self.config.n_heads), flush=True)
+        print("causal_att:", getattr(self.config, "causal_att", "non_causal"), flush=True)
         print("loss:", getattr(self.config, "loss", "MSE"), flush=True)
         print("loss_decay_rate:", getattr(self.config, "loss_decay_rate", 0.9), flush=True)
-        return AttentionForecastModel(self.config)
+        print("embedding_type:", getattr(self.config, "embedding_type", "linear"), flush=True)
+        print("embedding_hidden_dim:", getattr(self.config, "embedding_hidden_dim", 32), flush=True)
+        print("lag_size:", getattr(self.config, "lag_size", 7), flush=True)
+        print("spectral_num_freqs:", getattr(self.config, "spectral_num_freqs", 8), flush=True)
+
+        model = AttentionForecastModel(self.config)
+
+        if getattr(self.config, "embedding_type", "linear") == "mixed":
+            weights = model.block.embedding.get_mixing_weights()
+            print(
+                f"mixed_embedding_init_weights: nl={weights[0]:.4f}, "
+                f"t2v={weights[1]:.4f}, spec={weights[2]:.4f}",
+                flush=True,
+            )
+
+        return model
 
     def _init_criterion_and_optimizer(self):
-        if self.config.loss == "MSE":
-            criterion = nn.MSELoss()
-        elif self.config.loss == "MAE":
-            criterion = nn.L1Loss()
-        elif self.config.loss == "TimeWeightedMSE":
+        loss_type = getattr(self.config, "loss", "MSE")
+
+        if loss_type == "TimeWeightedMSE":
             criterion = TimeWeightedMSE(
                 K=self.config.pred_len,
                 decay_rate=getattr(self.config, "loss_decay_rate", 0.9),
             )
-        else:
+        elif loss_type == "MAE":
+            criterion = nn.L1Loss()
+        elif loss_type == "Huber":
             criterion = nn.HuberLoss(delta=0.5)
+        else:
+            criterion = nn.MSELoss()
 
         optimizer = optim.Adam(self.model.parameters(), lr=self.config.lr)
         return criterion, optimizer
