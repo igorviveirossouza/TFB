@@ -19,21 +19,21 @@ class NonlinearMultiFuncEmbedding(nn.Module):
     def __init__(self, d_model: int, hidden_dim: int, eps: float = 1e-6):
         super().__init__()
         self.pre = nn.Linear(1, hidden_dim)
-        self.post = nn.Linear(3 * hidden_dim, d_model)
+        self.post = nn.Linear(5 * hidden_dim, d_model)
         self.eps = eps
-        #self.mix_logits = nn.Parameter(torch.zeros(5))
+        self.mix_logits = nn.Parameter(torch.zeros(5))
 
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         h = self.pre(x)  # (M, T, H)
-        #alpha = torch.softmax(self.mix_logits, dim=0)
+        alpha = torch.softmax(self.mix_logits, dim=0)
         u = torch.cat(
             [
-                F.gelu(h),
-                torch.tanh(h),
-                torch.sin(h),
-                #alpha[3] * torch.pow(h, 2),
-                #alpha[4] * torch.log(torch.abs(h) + self.eps),
+                alpha[0] * F.gelu(h),
+                alpha[1] * torch.tanh(h),
+                alpha[2] * torch.sin(h),
+                alpha[3] * torch.pow(h, 2),
+                alpha[4] * torch.log(torch.abs(h) + self.eps),
             ],
             dim=-1,
         )

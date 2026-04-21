@@ -1,18 +1,11 @@
-# -*- coding: utf-8 -*-
-import logging
 import os
-from concurrent.futures import ThreadPoolExecutor
-from typing import Optional, Dict, NoReturn, List
-
 import pandas as pd
 
 from ts_benchmark.common.constant import FORECASTING_DATASET_PATH
-from ts_benchmark.data.dataset import Dataset, DatasetOHLCV
-from ts_benchmark.data.utils import load_series_info, read_data ,read_data_with_aux
-
+from ts_benchmark.data.data_source import LocalDataSource
+from ts_benchmark.data.utils import load_series_info, read_data_with_aux
 
 logger = logging.getLogger(__name__)
-
 
 class DataSource:
     """
@@ -23,7 +16,7 @@ class DataSource:
     """
 
     # The class for the internal dataset object
-    DATASET_CLASS = Dataset
+    DATASET_CLASS = DatasetOHLCV
 
     def __init__(
         self,
@@ -61,7 +54,6 @@ class DataSource:
         raise NotImplementedError(
             f"{self.__class__.__name__} does not support loading series at runtime."
         )
-
 
 class LocalDataSource(DataSource):
     """
@@ -154,43 +146,30 @@ class LocalDataSource(DataSource):
         data = read_data(datafile_path)
         return data
 
-
-class LocalForecastingDataSource(LocalDataSource):
+class LocalForecastingDataSourceOHLCV(LocalDataSource):
     """
-    The local data source of the forecasting task
+    DataSource paralela ao loader padrão do TFB.
+    Lê o dataset principal no formato TFB e um dataset auxiliar OHLCV.
     """
 
-    def __init__(self):
+    def __init__(
+        self,
+        aux_data_path: str,
+        aux_cols=None,
+    ):
         super().__init__(FORECASTING_DATASET_PATH, "FORECAST_META.csv")
-
-
-# Novas classes para os dados OHLCV:
-
-
-class LocalForecastingDataSourceOHLCV(LocalForecastingDataSource):
-    DATASET_CLASS = DatasetOHLCV
-
-    def __init__(self, aux_file_path: str = "/sonic_home/igor.viveiros/src/b3_daily_tfb_ohlcv.csv", aux_cols=None):
-        super().__init__()
-        self.aux_file_path = aux_file_path
-        self.aux_cols = aux_cols or [
-            "data",
-            "abertura",
-            "maxima",
-            "minima",
-            "volume",
-            "negocios",
-            "volume_financeiro",
-        ]
+        self.aux_data_path = aux_data_path
+        self.aux_cols = aux_cols or ["abertura", "maxima", "minima", "volume", "negocios", "volume_financeiro" ]
 
     def _load_series(self, series_name: str):
         main_path = os.path.join(self.local_data_path, series_name)
+        aux_path = os.path.join(self.aux_data_path, series_name)
 
-        if not os.path.exists(self.aux_file_path):
-            raise FileNotFoundError(f"Arquivo auxiliar não encontrado: {self.aux_file_path}")
+        if not os.path.exists(aux_path):
+            raise FileNotFoundError(f"Arquivo auxiliar não encontrado: {aux_path}")
 
         return read_data_with_aux(
             main_path=main_path,
-            aux_path=self.aux_file_path,
+            aux_path=aux_path,
             aux_cols=self.aux_cols,
         )

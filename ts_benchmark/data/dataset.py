@@ -1,4 +1,5 @@
 from typing import Optional, Dict, NoReturn
+import numpy as np
 
 import pandas as pd
 
@@ -160,3 +161,89 @@ class Dataset:
         """
         self._metadata = state["metadata"]
         self._data_dict = state["data_dict"]
+
+
+class DatasetOHLCV(Dataset):
+    AUX_FEATURE_ORDER = [
+        "data_aux",
+        "abertura",
+        "maxima",
+        "minima",
+        "volume",
+        "negocios",
+        "volume_financeiro",
+    ]
+
+    def get_series(self, name: str) -> Optional[pd.DataFrame]:
+        item = self._data_dict.get(name, None)
+        if item is None:
+            return None
+
+        target = item["target"].copy(deep=False)
+        target.attrs["ohlcv_aux"] = item["aux"]
+        return target
+
+    def get_target(self, name: str) -> Optional[pd.DataFrame]:
+        item = self._data_dict.get(name, None)
+        return None if item is None else item["target"]
+
+    def get_aux(self, name: str) -> Optional[Dict[str, pd.DataFrame]]:
+        item = self._data_dict.get(name, None)
+        return None if item is None else item["aux"]
+
+    def get_aux_array(
+        self,
+        name: str,
+        feature_order: Optional[list] = None,
+        dtype=np.float32,
+    ):
+        aux = self.get_aux(name)
+        if aux is None:
+            return None
+
+        feature_order = feature_order or self.AUX_FEATURE_ORDER
+        mats = [aux[k].to_numpy(dtype=dtype) for k in feature_order]
+        return np.stack(mats, axis=-1)  # (T, N, F)
+
+    def get_target_array(self, name: str, dtype=np.float32):
+        target = self.get_target(name)
+        if target is None:
+            return None
+        return target.to_numpy(dtype=dtype)
+
+    def _validate_data(
+        self,
+        data_dict: Dict[str, Dict],
+        metadata: Optional[pd.DataFrame],
+    ) -> NoReturn:
+        for series_name, item in data_dict.items():
+            if not isinstance(item, dict):
+                raise TypeError(f"{series_name}: esperado dict com keys ['target','aux'].")
+
+            if "target" not in item or "aux" not in item:
+                raise ValueError(f"{series_name}: item deve conter 'target' e 'aux'.")
+
+            target = item["target"]
+            aux = item["aux"]
+
+            if not isinstance(target, pd.DataFrame):
+                raise TypeError(f"{series_name}: 'target' deve ser pd.DataFrame.")
+            if not isinstance(aux, dict):
+                raise TypeError(f"{series_name}: 'aux' deve ser dict[str, pd.DataFrame].")
+
+            for feat in self.AUX_FEATURE_ORDER:
+                if feat not in aux:
+                    raise ValueError(f"{series_name}: feature auxiliar ausente: {feat}")
+                if not isinstance(aux[feat], pd.DataFrame):
+                    raise TypeError(f"{series_name}: aux['{feat}'] deve ser pd.DataFrame.")
+
+                if not aux[feat].index.equals(target.index):
+                    raise ValueError(f"{series_name}: índice de '{feat}' difere do target.")
+                if not aux[feat].columns.equals(target.columns):
+                    raise ValueError(f"{series_name}: colunas de '{feat}' diferem do target.")
+
+                if aux[feat].isna().any().any():
+                    raise ValueError(f"{series_name}: NaN encontrado em aux['{feat}'].")
+
+            if target.isna().any().any():
+                raise ValueError(f"{series_name}: NaN encontrado em target.")

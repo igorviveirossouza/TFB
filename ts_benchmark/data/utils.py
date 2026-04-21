@@ -214,3 +214,86 @@ def load_series_info(file_path: str) -> dict:
         "shifting": "",
         "correlation": "",
     }
+
+
+def read_data_with_aux(
+    main_path: str,
+    aux_path: str,
+    aux_cols=None,
+    nrows=None,
+):
+    """
+    Lê:
+      - main_path: CSV TFB padrão -> colunas [date, data, cols]
+      - aux_path:  CSV OHLCV -> colunas [date, data, cols, ...features...]
+
+    Retorna um dict com:
+      {
+        "target": DataFrame wide do close, index=date, cols=symbol
+        "aux":    dict[str, DataFrame wide], uma matriz wide por feature auxiliar
+      }
+    """
+    if aux_cols is None:
+        aux_cols = ["abertura", "maxima", "minima", "volume", "negocios"]
+
+    main_df = pd.read_csv(main_path)
+    aux_df = pd.read_csv(aux_path)
+
+    expected_main = {"date", "data", "cols"}
+    if not expected_main.issubset(main_df.columns):
+        raise ValueError(f"main_path deve conter {expected_main}, veio {set(main_df.columns)}")
+
+    expected_aux = {"date", "data", "cols", *aux_cols}
+    if not set(["date", "data", "cols"]).issubset(aux_df.columns):
+        raise ValueError("aux_path deve conter ao menos ['date', 'data', 'cols'] + features auxiliares")
+
+    # mantém só o necessário no auxiliar
+    aux_df = aux_df[["date", "cols", *aux_cols]].copy()
+
+    if "data" in aux_cols:
+        aux_df = aux_df.rename(columns={"data": "data_aux"})
+        aux_cols = ["data_aux" if c == "data" else c for c in aux_cols]
+
+    # merge seguro
+    merged = main_df.merge(
+        aux_df,
+        on=["date", "cols"],
+        how="left",
+        validate="one_to_one",
+    )
+
+    missing_mask = merged[aux_cols].isna().any(axis=1)
+    if missing_mask.any():
+        missing_rows = merged.loc[missing_mask, ["date", "cols"]].head(10)
+        raise ValueError(
+            "Faltam features auxiliares para algumas chaves (date, cols). "
+            f"Exemplos:\n{missing_rows}"
+        )
+
+    if merged.duplicated(["date", "cols"]).any():
+        raise ValueError("Há duplicatas em (date, cols) após o merge.")
+
+    merged["date"] = pd.to_datetime(merged["date"])
+    merged = merged.sort_values(["date", "cols"]).reset_index(drop=True)
+
+    if nrows is not None and isinstance(nrows, int):
+        merged = merged.iloc[:nrows].copy()
+
+    # close/target em wide
+    target_df = (
+        merged.pivot(index="date", columns="cols", values="data")
+        .sort_index()
+    )
+
+    # features auxiliares em wide, uma por feature
+    aux_dict = {}
+    for col in aux_cols:
+        aux_dict[col] = (
+            merged.pivot(index="date", columns="cols", values=col)
+            .sort_index()
+        )
+
+    return {
+        "target": target_df,
+        "aux": aux_dict,
+    }

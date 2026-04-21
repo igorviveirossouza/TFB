@@ -29,3 +29,7 @@ from ts_benchmark.baselines.TIOMS.tioms_model_temporal_sem_band_abblation import
 from ts_benchmark.baselines.TIOMS.attention_solo import (
     AttentionAdapterChannel,
 )
+
+from ts_benchmark.baselines.TIOMS.attention_encoder import (
+    AttentionAdapterChannelEnc,
+)

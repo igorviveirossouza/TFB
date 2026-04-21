@@ -15,6 +15,27 @@ from ts_benchmark.models.model_base import BatchMaker, ModelBase
 from ts_benchmark.utils.data_processing import split_time
 from ts_benchmark.utils.data_processing import split_channel
 
+AUX_FEATURE_ORDER = [
+    "data_aux",
+    "abertura",
+    "maxima",
+    "minima",
+    "volume",
+    "negocios",
+    "volume_financeiro",
+]
+
+
+def build_ohlcv_array(aux_dict, columns):
+    """
+    Constrói array (T, N, F) a partir do dict de DataFrames auxiliares.
+    """
+    mats = [
+        aux_dict[feat].loc[:, columns].to_numpy(dtype=np.float32)
+        for feat in AUX_FEATURE_ORDER
+    ]
+    return np.stack(mats, axis=-1)
+
 
 class RollingForecastEvalBatchMaker:
     def __init__(
@@ -76,19 +97,19 @@ class RollingForecastEvalBatchMaker:
         }
 
     def _make_batch_covariates(self, index_list: np.ndarray, win_size: int) -> Dict:
-        """
-        Create a batch of covariates
-
-        :param index_list: An array of starting indices for each window.
-        :param win_size: The size of each window.
-        :return: A batch of covariates.
-        """
         covariates = {} if self.covariates is None else self.covariates
         covariates_batch = {}
+
         if covariates.get("exog") is not None:
             covariates_batch["exog"] = self._make_batch_data(
                 self.covariates["exog"], index_list, win_size
             )
+
+        if covariates.get("ohlcv_aux") is not None:
+            covariates_batch["ohlcv_aux"] = self._make_batch_data(
+                self.covariates["ohlcv_aux"], index_list, win_size
+            )
+
         return covariates_batch
 
     @staticmethod
@@ -283,6 +304,12 @@ class RollingForecast(ForecastingStrategy):
         covariates_train = {}
         covariates_train["exog"] = exog_data
 
+        aux_dict = series.attrs.get("ohlcv_aux", None)
+        aux_target_full = None
+        if aux_dict is not None:
+            aux_target_full = build_ohlcv_array(aux_dict, target_train_valid_data.columns)
+            covariates_train["ohlcv_aux"] = aux_target_full[:train_length]
+
         start_fit_time = time.time()
         fit_method = model.forecast_fit if hasattr(model, "forecast_fit") else model.fit
         fit_method(
@@ -305,6 +332,9 @@ class RollingForecast(ForecastingStrategy):
             target_train, exog_train = split_channel(train, target_channel)
             covariates_forecast = {}
             covariates_forecast["exog"] = exog_train
+
+            if aux_target_full is not None:
+                covariates_forecast["ohlcv_aux"] = aux_target_full[:index]
 
             start_inference_time = time.time()
             predict = model.forecast(
@@ -380,6 +410,12 @@ class RollingForecast(ForecastingStrategy):
         covariates_train, covariates4batch = {}, {}
         covariates_train["exog"] = exog_train_valid_data
         covariates4batch["exog"] = exog_data4batch
+
+        aux_dict = series.attrs.get("ohlcv_aux", None)
+        if aux_dict is not None:
+            aux_target_full = build_ohlcv_array(aux_dict, target4batch.columns)
+            covariates_train["ohlcv_aux"] = aux_target_full[:train_length]
+            covariates4batch["ohlcv_aux"] = aux_target_full
 
         start_fit_time = time.time()
         fit_method = model.forecast_fit if hasattr(model, "forecast_fit") else model.fit

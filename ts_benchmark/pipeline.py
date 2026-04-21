@@ -8,6 +8,7 @@ import pandas as pd
 
 from ts_benchmark.data.data_source import (
     LocalForecastingDataSource,
+    LocalForecastingDataSourceOHLCV,
     DataSource,
 )
 from ts_benchmark.data.suites.global_storage import GlobalStorageDataServer
@@ -35,6 +36,10 @@ PREDEFINED_DATASETS = {
     ),
     "user_forecast": DatasetInfo(
         size_value=["user"], datasrc_class=LocalForecastingDataSource
+    ),
+    "user_forecast_ohlcv": DatasetInfo(
+        size_value=["user"],
+        datasrc_class=LocalForecastingDataSourceOHLCV,
     ),
 }
 
