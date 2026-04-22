@@ -6,6 +6,8 @@ from torch import optim
 from ts_benchmark.baselines.deep_forecasting_model_base import DeepForecastingModelBase
 from ts_benchmark.baselines.TIOMS.embeddings import build_embedding
 from ts_benchmark.baselines.TIOMS.encoder import OHLCVFeatureEncoder
+from ts_benchmark.baselines.TIOMS.custom_losses import build_loss
+
 
 
 MODEL_HYPER_PARAMS = {
@@ -22,8 +24,10 @@ MODEL_HYPER_PARAMS = {
     "lr": 1e-4,
     "num_epochs": 30,
     "num_workers": 0,
-    "loss": "TimeWeightedMSE",  # "MSE", "MAE", "Huber", "TimeWeightedMSE"
+    "loss": "TimeWeightedMSE",  # "MSE", "MAE", "Huber", "TimeWeightedMSE", "DILATE"
     "loss_decay_rate": 0.5,
+    "dilate_alpha": 0.5,
+    "dilate_gamma": 0.01,
     "patience": 3,
     "d_model": 16,
     "n_heads": 4,
@@ -49,22 +53,6 @@ MODEL_HYPER_PARAMS = {
     "use_ohlcv_aux": True,
 }
 
-
-class TimeWeightedMSE(nn.Module):
-    def __init__(self, K: int, decay_rate: float = 0.9):
-        super().__init__()
-        weights = torch.pow(
-            torch.tensor(decay_rate, dtype=torch.float32),
-            torch.arange(K, dtype=torch.float32),
-        )
-        weights = weights * (K / weights.sum())
-        self.register_buffer("weights", weights.view(1, K, 1))
-
-    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        weights = self.weights.to(pred.device)
-        loss = (pred - target) ** 2
-        weighted_loss = loss * weights
-        return weighted_loss.mean()
 
 
 class InstanceNorm(nn.Module):
@@ -453,6 +441,8 @@ class AttentionAdapterChannelEnc(DeepForecastingModelBase):
         print("causal_att:", getattr(self.config, "causal_att", "non_causal"), flush=True)
         print("loss:", getattr(self.config, "loss", "MSE"), flush=True)
         print("loss_decay_rate:", getattr(self.config, "loss_decay_rate", 0.9), flush=True)
+        print("dilate_alpha:", getattr(self.config, "dilate_alpha", 0.5), flush=True)
+        print("dilate_gamma:", getattr(self.config, "dilate_gamma", 0.01), flush=True)
         print("embedding_type:", getattr(self.config, "embedding_type", "linear"), flush=True)
         print("embedding_hidden_dim:", getattr(self.config, "embedding_hidden_dim", 32), flush=True)
         print("lag_size:", getattr(self.config, "lag_size", 7), flush=True)
@@ -473,19 +463,13 @@ class AttentionAdapterChannelEnc(DeepForecastingModelBase):
         return model
 
     def _init_criterion_and_optimizer(self):
-        loss_type = getattr(self.config, "loss", "MSE")
-
-        if loss_type == "TimeWeightedMSE":
-            criterion = TimeWeightedMSE(
-                K=self.config.pred_len,
-                decay_rate=getattr(self.config, "loss_decay_rate", 0.9),
-            )
-        elif loss_type == "MAE":
-            criterion = nn.L1Loss()
-        elif loss_type == "Huber":
-            criterion = nn.HuberLoss(delta=0.5)
-        else:
-            criterion = nn.MSELoss()
+        criterion = build_loss(
+            loss_type=getattr(self.config, "loss", "MSE"),
+            K=self.config.pred_len,
+            decay_rate=getattr(self.config, "loss_decay_rate", 0.9),
+            alpha=getattr(self.config, "dilate_alpha", 0.5),
+            gamma=getattr(self.config, "dilate_gamma", 0.01),
+        )
 
         optimizer = optim.Adam(self.model.parameters(), lr=self.config.lr)
         return criterion, optimizer

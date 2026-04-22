@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH -p gorgonas
+#SBATCH -p medusas
 #SBATCH --cpus-per-task=32
 #SBATCH --output=/sonic_home/igor.viveiros/logs/DilateLoss-%j.out
 
@@ -29,14 +29,14 @@ for DATA in "${DATA_NAME[@]}"; do
       echo "=================================================="
 
       # SALVAR_EM="AtencaoSolo/Embeddings/${DATA}/${MASK}/${EMB}"
-      SALVAR_EM="AtencaoSolo/Teste/REVIN/MSE"
+      SALVAR_EM="experimento_global/SemOHLCV"
 
       $PYTHON_BIN ./scripts/run_benchmark.py \
         --config-path "rolling_forecast_config.json" \
         --data-name-list "${DATA}" \
         --strategy-args "{\"horizon\": ${PRED_LEN}}" \
         --model-name "TIOMS.AttentionAdapterChannel" \
-        --model-hyper-params "{\"loss\": \"MSE\", \"embedding_type\": \"${EMB}\", \"embedding_hidden_dim\": 16, \"lag_size\": 7, \"spectral_num_freqs\": 18, \"causal_att\": \"${MASK}\", \"channel_agg_type\": \"none\", \"seq_len\": ${SEQ_LEN}, \"pred_len\": ${PRED_LEN}, \"label_len\": ${LABEL_LEN}, \"batch_size\": 32, \"dropout\": 0.1, \"eps\": 1e-5, \"d_model\": 32, \"n_heads\": 4, \"ff_dim\": 128, \"channel_n_heads\": 60, \"patience\": 8, \"num_epochs\": 60, \"temporal_pool_type\": \"last\"}" \
+        --model-hyper-params "{\"loss\": \"MSE\", \"embedding_type\": \"${EMB}\", \"embedding_hidden_dim\": 16, \"lag_size\": 7, \"spectral_num_freqs\": 18, \"causal_att\": \"${MASK}\", \"channel_agg_type\": \"none\", \"seq_len\": ${SEQ_LEN}, \"pred_len\": ${PRED_LEN}, \"label_len\": ${LABEL_LEN}, \"horizon\": ${PRED_LEN}, \"batch_size\": 32, \"dropout\": 0.1, \"eps\": 1e-5, \"d_model\": 32, \"n_heads\": 4, \"ff_dim\": 128, \"channel_n_heads\": 60, \"patience\": 8, \"num_epochs\": 60, \"temporal_pool_type\": \"last\"}" \
         --deterministic "full" \
         --eval-backend sequential \
         --num-workers 1 \
