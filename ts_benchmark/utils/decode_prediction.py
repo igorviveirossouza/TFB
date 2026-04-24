@@ -124,6 +124,9 @@ def decode_result_dataframe(data: pd.DataFrame, base_output_dir: str, source_nam
     print(f"[INFO] Salvando dados decodificados em: {save_dir}")
 
     for index, row in data.iterrows():
+        sample_dir = os.path.join(save_dir, f"sample_{index}")
+        os.makedirs(sample_dir, exist_ok=True)
+
         inference_data = safe_decode_column(row, "inference_data", source_name, index)
         actual_data = safe_decode_column(row, "actual_data", source_name, index)
 
@@ -132,15 +135,15 @@ def decode_result_dataframe(data: pd.DataFrame, base_output_dir: str, source_nam
             continue
 
         if inference_data is not None:
-            to_csv(inference_data, save_dir, "inference_data.csv")
+            to_csv(inference_data, sample_dir, "inference_data.csv")
 
         if actual_data is not None:
-            to_csv(actual_data, save_dir, "actual_data.csv")
+            to_csv(actual_data, sample_dir, "actual_data.csv")
 
-        save_metadata(save_dir, source_name, index, row)
+        save_metadata(sample_dir, source_name, index, row)
 
         metrics = row.drop(labels=[c for c in ["actual_data", "inference_data"] if c in row.index])
-        pd.DataFrame([metrics]).to_csv(os.path.join(save_dir, "metrics.csv"), index=False)
+        pd.DataFrame([metrics]).to_csv(os.path.join(sample_dir, "metrics.csv"), index=False)
 
 
 def decode_csv_file(filepath: str):
