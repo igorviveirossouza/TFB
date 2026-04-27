@@ -41,7 +41,7 @@ rename_tars() {
   find "$result_dir" -maxdepth 1 -type f -name "*.tar.gz" | while read -r tarfile; do
     local old_name new_name
     old_name="$(basename "$tarfile")"
-    if [[ "$old_name" == *"${model_key}"* && "$old_name" == *"${JOB_ID}"* ]]; then
+    if [[ "$old_name" =~ ^${model_key}_[0-9]+_ ]]; then
       continue
     fi
 
@@ -51,27 +51,44 @@ rename_tars() {
   done
 }
 
+is_pred_len_csv() {
+  local csvfile="$1"
+  local expected_len="$2"
+
+  "$PYTHON_BIN" - "$csvfile" "$expected_len" <<'PY'
+import sys
+import pandas as pd
+
+csv_path = sys.argv[1]
+expected = int(sys.argv[2])
+df = pd.read_csv(csv_path)
+sys.exit(0 if len(df) == expected else 1)
+PY
+}
+
 decode_predictions() {
   local result_dir="$1"
   local seq_len="$2"
   local model_key="$3"
+  local pred_len="$4"
 
   local out_dir="${PREV_ROOT}/${seq_len}/${model_key}"
   mkdir -p "$out_dir"
 
-  find "$result_dir" -maxdepth 1 -type f -name "*.tar.gz" | while read -r tarfile; do
+  find "$result_dir" -maxdepth 1 -type f -name "${model_key}_${JOB_ID}_*.tar.gz" | while read -r tarfile; do
     local base_name tmpdir
     base_name="$(basename "${tarfile%.tar.gz}")"
     tmpdir="$(mktemp -d)"
 
-    tar -xzf "$tarfile" -C "$tmpdir"
-
-    find "$tmpdir" -type f -name "*.csv" | while read -r csvfile; do
-      "$PYTHON_BIN" "$DECODE_SCRIPT" "$csvfile"
-    done
+    cp "$tarfile" "$tmpdir/"
+    "$PYTHON_BIN" "$DECODE_SCRIPT" "$tmpdir/$(basename "$tarfile")"
 
     find "$tmpdir" -type f -path "*/decoded_*/*.csv" | while read -r decoded_csv; do
       local output_name
+      if ! is_pred_len_csv "$decoded_csv" "$pred_len"; then
+        echo "CSV ignorado (len != ${pred_len}): ${decoded_csv}"
+        continue
+      fi
       output_name="${model_key}_${JOB_ID}_${base_name}_$(basename "$decoded_csv")"
       cp "$decoded_csv" "${out_dir}/${output_name}"
       echo "CSV decodificado salvo: ${out_dir}/${output_name}"
@@ -158,7 +175,7 @@ for SEQ_LEN in "${SEQ_LENS[@]}"; do
       --save-true-pred True
 
     rename_tars "$RESULT_DIR" "$MODEL_KEY"
-    decode_predictions "$RESULT_DIR" "seq_len_${SEQ_LEN}" "$MODEL_KEY"
+    decode_predictions "$RESULT_DIR" "seq_len_${SEQ_LEN}" "$MODEL_KEY" "$PRED_LEN"
   done
 done
 
