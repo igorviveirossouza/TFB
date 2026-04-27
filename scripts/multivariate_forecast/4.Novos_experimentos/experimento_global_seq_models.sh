@@ -16,6 +16,8 @@ DATA_NAME="b3_daily_tfb.csv"
 PRED_LEN=24
 LABEL_LEN=18
 JOB_ID="${SLURM_JOB_ID:-manual}"
+RUN_DATE="$(date +%Y%m%d)"
+PREDICTION_OP_INDEX=0
 
 RESULT_ROOT="/sonic_home/igor.viveiros/src/TFB/result/experimento_global"
 PREV_ROOT="/sonic_home/igor.viveiros/src/TFB/Previsoes"
@@ -34,67 +36,43 @@ MODELS=(
 
 mkdir -p "$RESULT_ROOT" "$PREV_ROOT"
 
-rename_tars() {
-  local result_dir="$1"
-  local model_key="$2"
-
-  find "$result_dir" -maxdepth 1 -type f -name "*.tar.gz" | while read -r tarfile; do
-    local old_name new_name
-    old_name="$(basename "$tarfile")"
-    if [[ "$old_name" =~ ^${model_key}_[0-9]+_ ]]; then
-      continue
-    fi
-
-    new_name="${model_key}_${JOB_ID}_${old_name}"
-    mv "$tarfile" "${result_dir}/${new_name}"
-    echo "Tar renomeado: ${result_dir}/${new_name}"
-  done
-}
-
-is_pred_len_csv() {
-  local csvfile="$1"
-  local expected_len="$2"
-
-  "$PYTHON_BIN" - "$csvfile" "$expected_len" <<'PY'
-import sys
-import pandas as pd
-
-csv_path = sys.argv[1]
-expected = int(sys.argv[2])
-df = pd.read_csv(csv_path)
-sys.exit(0 if len(df) == expected else 1)
-PY
-}
-
 decode_predictions() {
-  local result_dir="$1"
+  local tarfile="$1"
   local seq_len="$2"
   local model_key="$3"
   local pred_len="$4"
+  local op_index="$5"
 
   local out_dir="${PREV_ROOT}/${seq_len}/${model_key}"
   mkdir -p "$out_dir"
 
-  find "$result_dir" -maxdepth 1 -type f -name "${model_key}_${JOB_ID}_*.tar.gz" | while read -r tarfile; do
-    local base_name tmpdir
-    base_name="$(basename "${tarfile%.tar.gz}")"
-    tmpdir="$(mktemp -d)"
+  local tar_dir raw_stem extracted_dir copy_index
+  tar_dir="$(dirname "$tarfile")"
+  raw_stem="$(basename "${tarfile%.tar.gz}")"
+  extracted_dir="${tar_dir}/$(basename "$tarfile" .tar.gz)_extracted"
+  copy_index=0
 
-    cp "$tarfile" "$tmpdir/"
-    "$PYTHON_BIN" "$DECODE_SCRIPT" "$tmpdir/$(basename "$tarfile")"
+  "$PYTHON_BIN" "$DECODE_SCRIPT" "$tarfile"
 
-    find "$tmpdir" -type f -path "*/decoded_*/*.csv" | while read -r decoded_csv; do
-      local output_name
-      if ! is_pred_len_csv "$decoded_csv" "$pred_len"; then
-        echo "CSV ignorado (len != ${pred_len}): ${decoded_csv}"
-        continue
-      fi
-      output_name="${model_key}_${JOB_ID}_${base_name}_$(basename "$decoded_csv")"
-      cp "$decoded_csv" "${out_dir}/${output_name}"
-      echo "CSV decodificado salvo: ${out_dir}/${output_name}"
-    done
+  if [[ ! -d "$extracted_dir" ]]; then
+    echo "[WARN] Pasta extraída não encontrada para ${tarfile}" >&2
+    return
+  fi
 
-    rm -rf "$tmpdir"
+  find "$extracted_dir" -type f -path "*/decoded_*/*/*.csv" | while read -r decoded_csv; do
+    local rows output_name sample_tag data_tag
+    rows="$("$PYTHON_BIN" -c "import pandas as pd; print(len(pd.read_csv(r'''$decoded_csv''')))" 2>/dev/null || echo 0)"
+    if [[ "$rows" -ne "$pred_len" ]]; then
+      echo "CSV ignorado (length=${rows}, esperado=${pred_len}): ${decoded_csv}"
+      continue
+    fi
+
+    sample_tag="$(basename "$(dirname "$decoded_csv")")"
+    data_tag="$(basename "$decoded_csv" .csv)"
+    output_name="${model_key}_${RUN_DATE}_job${JOB_ID}_op${op_index}_idx${copy_index}_${raw_stem}_${sample_tag}_${data_tag}.csv"
+    cp "$decoded_csv" "${out_dir}/${output_name}"
+    echo "CSV decodificado salvo: ${out_dir}/${output_name}"
+    copy_index=$((copy_index + 1))
   done
 }
 
@@ -158,6 +136,8 @@ for SEQ_LEN in "${SEQ_LENS[@]}"; do
         ;;
     esac
 
+    mapfile -t BEFORE_TARS < <(find "$RESULT_DIR" -maxdepth 1 -type f -name "*.csv.tar.gz" -printf '%f\n' | sort)
+
     "$PYTHON_BIN" ./scripts/run_benchmark.py \
       --config-path "rolling_forecast_config.json" \
       --data-name-list "$DATA_NAME" \
@@ -174,8 +154,24 @@ for SEQ_LEN in "${SEQ_LENS[@]}"; do
       --save-path "experimento_global/seq_len_${SEQ_LEN}/${MODEL_KEY}" \
       --save-true-pred True
 
-    rename_tars "$RESULT_DIR" "$MODEL_KEY"
-    decode_predictions "$RESULT_DIR" "seq_len_${SEQ_LEN}" "$MODEL_KEY" "$PRED_LEN"
+    mapfile -t AFTER_TARS < <(find "$RESULT_DIR" -maxdepth 1 -type f -name "*.csv.tar.gz" -printf '%f\n' | sort)
+
+    NEW_TARS=()
+    for tar_name in "${AFTER_TARS[@]}"; do
+      if ! printf '%s\n' "${BEFORE_TARS[@]}" | grep -Fxq "$tar_name"; then
+        NEW_TARS+=("${RESULT_DIR}/${tar_name}")
+      fi
+    done
+
+    if [[ ${#NEW_TARS[@]} -eq 0 ]]; then
+      echo "[WARN] Nenhum novo tar.gz encontrado para seq_len=${SEQ_LEN}, modelo=${MODEL_KEY}"
+      continue
+    fi
+
+    for tarfile in "${NEW_TARS[@]}"; do
+      PREDICTION_OP_INDEX=$((PREDICTION_OP_INDEX + 1))
+      decode_predictions "$tarfile" "seq_len_${SEQ_LEN}" "$MODEL_KEY" "$PRED_LEN" "$PREDICTION_OP_INDEX"
+    done
   done
 done
 
