@@ -69,6 +69,10 @@ decode_predictions() {
 
     sample_tag="$(basename "$(dirname "$decoded_csv")")"
     data_tag="$(basename "$decoded_csv" .csv)"
+    if [[ "$data_tag" != "inference_data" ]]; then
+      continue
+    fi
+
     output_name="${model_key}_${RUN_DATE}_job${JOB_ID}_op${op_index}_idx${copy_index}_${raw_stem}_${sample_tag}_${data_tag}.csv"
     cp "$decoded_csv" "${out_dir}/${output_name}"
     echo "CSV decodificado salvo: ${out_dir}/${output_name}"
