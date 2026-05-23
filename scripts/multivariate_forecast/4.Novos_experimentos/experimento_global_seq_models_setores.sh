@@ -1,6 +1,5 @@
 #!/bin/bash
 #SBATCH -p medusas
-# Memória de CPU: ~#SBATCH --mem=100G
 #SBATCH --time=14:00:00
 # ~#SBATCH --cpus-per-task=32
 #SBATCH --output=/sonic_home/igor.viveiros/logs/experimento-global-%j.out
@@ -14,32 +13,33 @@ export MPLCONFIGDIR=/tmp/$USER-mpl
 
 cd /sonic_home/igor.viveiros/src/TFB || exit 1
 
-DATA_NAME="b3_daily_tfb.csv"
+setor="financeiro"
+
+DATA_NAME="b3_daily_${setor}.csv"
 PRED_LEN=24
 LABEL_LEN=18
 JOB_ID="${SLURM_JOB_ID:-manual}"
 RUN_DATE="$(date +%Y%m%d)"
 PREDICTION_OP_INDEX=0
 
-RESULT_ROOT="/sonic_home/igor.viveiros/src/TFB/result/experimento_global"
-PREV_ROOT="/sonic_home/igor.viveiros/src/TFB/Previsoes"
+RESULT_ROOT="/sonic_home/igor.viveiros/src/TFB/result/experimento_global/${setor}"
+PREV_ROOT="/sonic_home/igor.viveiros/src/TFB/Previsoes/${setor}"
 DECODE_SCRIPT="/sonic_home/igor.viveiros/src/TFB/ts_benchmark/utils/decode_prediction.py"
 
 #SEQ_LENS=(18 26 104)
 SEQ_LENS=(104)
 
 MODELS=(
-  # "DUET"
-  # "TimesNet"
-  # "FEDformer"
-  # "Nonstationary_Transformer"
-  #"TIOMS_OHLC_DILATE_g001_alpha01"
-  #"TIOMS_OHLC_DILATE_g0001"
-  # "TIOMS_OHLC_MSE"
-  # "TIOMS_AttentionAdapterChannel"
-  #"TIOMS_CROSS_OHLC_MSE"
-  #"TIOMS_ENC_DEC_OHLC_DILATE"
-  "TIOMS_ENC_DEC_OHLC_MSE_PAR"
+  "DUET"
+  "TimesNet"
+  "FEDformer"
+  "Nonstationary_Transformer"
+#  "TIOMS_OHLC_DILATE_g001_alpha01"
+#  "TIOMS_OHLC_MSE"
+#  "TIOMS_AttentionAdapterChannel"
+#  "TIOMS_CROSS_OHLC_MSE"
+#  "TIOMS_ENC_DEC_OHLC_DILATE"
+#  "TIOMS_ENC_DEC_OHLC_MSE_PAR"
 )
 
 mkdir -p "$RESULT_ROOT" "$PREV_ROOT"
@@ -156,12 +156,6 @@ for SEQ_LEN in "${SEQ_LENS[@]}"; do
         DATASET_ARG=(--data-set-name "user_forecast_ohlcv")
         EVAL_BACKEND_ARG=(--eval-backend sequential)
         ;;
-      "TIOMS_CROSS_OHLC_MSE_B3MASK")
-        MODEL_NAME="TIOMS.CrossAttentionAdapterChannelEnc"
-        MODEL_HYPER_PARAMS="{\"loss\": \"MSE\", \"embedding_type\": \"nonlinear\", \"embedding_hidden_dim\": 16, \"lag_size\": 7, \"spectral_num_freqs\": 18, \"causal_att\": \"causal\", \"use_b3_cross_mask\": true, \"channel_agg_type\": \"none\", \"seq_len\": ${SEQ_LEN}, \"pred_len\": ${PRED_LEN}, \"horizon\": ${PRED_LEN}, \"label_len\": ${LABEL_LEN}, \"batch_size\": 8, \"dropout\": 0.1, \"eps\": 1e-5, \"d_model\": 32, \"n_heads\": 4, \"ff_dim\": 128, \"channel_n_heads\": 4, \"patience\": 8, \"num_epochs\": 60, \"temporal_pool_type\": \"last\"}"
-        DATASET_ARG=(--data-set-name "user_forecast_ohlcv")
-        EVAL_BACKEND_ARG=(--eval-backend sequential)
-        ;;  
       "TIOMS_ENC_DEC_OHLC_MSE_PAR")
         MODEL_NAME="TIOMS.CrossAttentionAdapterChannelEncDecPar"
         MODEL_HYPER_PARAMS="{\"loss\": \"MSE\",  \"loss_decay_rate\": 0.4, \"embedding_type\": \"nonlinear\", \"embedding_hidden_dim\": 16, \"lag_size\": 7, \"spectral_num_freqs\": 18, \"causal_att\": \"non_causal\", \"use_b3_cross_mask\": true, \"channel_agg_type\": \"none\", \"seq_len\": ${SEQ_LEN}, \"pred_len\": ${PRED_LEN}, \"horizon\": ${PRED_LEN}, \"label_len\": ${LABEL_LEN}, \"batch_size\": 4, \"dropout\": 0.1, \"eps\": 1e-5, \"d_model\": 32, \"n_heads\": 4, \"ff_dim\": 128, \"channel_n_heads\": 4, \"patience\": 8, \"num_epochs\": 60, \"temporal_pool_type\": \"last\"}"
@@ -191,7 +185,7 @@ for SEQ_LEN in "${SEQ_LENS[@]}"; do
       --gpus 0 \
       --num-workers 1 \
       --timeout 60000 \
-      --save-path "experimento_global/seq_len_${SEQ_LEN}/${MODEL_KEY}" \
+      --save-path "experimento_global/${setor}/seq_len_${SEQ_LEN}/${MODEL_KEY}" \
       --save-true-pred True
 
     mapfile -t AFTER_TARS < <(find "$RESULT_DIR" -maxdepth 1 -type f -name "*.csv.tar.gz" -printf '%f\n' | sort)
