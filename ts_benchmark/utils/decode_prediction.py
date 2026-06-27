@@ -30,15 +30,12 @@ def iter_samples(obj: Any) -> Iterable[Any]:
     if isinstance(obj, list):
         yield from obj
         return
-
     if isinstance(obj, tuple):
         yield from obj
         return
-
     if isinstance(obj, pd.DataFrame):
         yield obj
         return
-
     if isinstance(obj, pd.Series):
         yield obj.to_frame()
         return
@@ -100,12 +97,13 @@ def decode_prediction_file(
             if decoded is None:
                 continue
 
-            for local_idx, sample in enumerate(iter_samples(decoded)):
+            samples = list(iter_samples(decoded))
+            for local_idx, sample in enumerate(samples):
                 sample_idx = sample_offset + decoded_count + local_idx
                 out = to_frame(sample)
                 out.to_csv(output_dir / f"csv_sample_{sample_idx}_{column}.csv", index=False)
 
-            decoded_count += local_idx + 1
+            decoded_count += len(samples)
 
     return decoded_count
 
