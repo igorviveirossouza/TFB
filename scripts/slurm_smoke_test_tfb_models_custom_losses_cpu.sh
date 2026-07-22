@@ -16,6 +16,7 @@ export MPLCONFIGDIR="/tmp/${USER}-mpl"
 
 MODELS="${MODELS:-all}"
 LOSSES="${LOSSES:-ranknet}"
+LOSS_K="${LOSS_K:-none}"
 N_OBS="${N_OBS:-256}"
 N_ASSETS="${N_ASSETS:-24}"
 SEQ_LEN="${SEQ_LEN:-16}"
@@ -36,6 +37,7 @@ printf 'COMMIT: %s\n' "$(git rev-parse HEAD)"
 printf 'CUDA_VISIBLE_DEVICES: %s\n' "${CUDA_VISIBLE_DEVICES:-unset}"
 printf 'MODELS: %s\n' "$MODELS"
 printf 'LOSSES: %s\n' "$LOSSES"
+printf 'LOSS_K: %s\n' "$LOSS_K"
 printf 'N_OBS: %s\n' "$N_OBS"
 printf 'N_ASSETS: %s\n' "$N_ASSETS"
 printf 'SEQ_LEN: %s\n' "$SEQ_LEN"
@@ -50,6 +52,7 @@ git status --short
   --losses "$LOSSES" \
   --data-kind log_return \
   --score-kind log_return \
+  --loss-k "$LOSS_K" \
   --n-obs "$N_OBS" \
   --n-assets "$N_ASSETS" \
   --seq-len "$SEQ_LEN" \
