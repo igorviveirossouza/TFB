@@ -317,7 +317,7 @@ def main():
     parser.add_argument("--d-model", type=int, default=16)
     parser.add_argument("--d-ff", type=int, default=32)
     parser.add_argument("--hidden-size", type=int, default=16)
-    parser.add_argument("--n-heads", type=int, default=4)
+    parser.add_argument("--n-heads", type=int, default=8)
     parser.add_argument("--moving-avg", type=int, default=3)
     parser.add_argument("--top-k", type=int, default=2)
     parser.add_argument("--num-kernels", type=int, default=2)
