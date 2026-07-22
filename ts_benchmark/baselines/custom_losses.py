@@ -32,6 +32,19 @@ def _as_bool(value):
     return bool(value)
 
 
+def _optional_positive_int(value):
+    if value is None:
+        return None
+    if isinstance(value, str):
+        value = value.strip().lower()
+        if value in {"", "none", "null", "nan"}:
+            return None
+    value = int(value)
+    if value <= 0:
+        raise ValueError("loss_k deve ser positivo ou None.")
+    return value
+
+
 def build_loss(config, normalizer_mean=None, normalizer_scale=None):
     """
     Factory central de losses para modelos deep do TFB.
@@ -40,6 +53,7 @@ def build_loss(config, normalizer_mean=None, normalizer_scale=None):
       loss: mse|mae|huber|rank_hinge|rank_margin|rank_bpr|ranknet|whr1|whr2|listnet|fingat
       loss_data_kind: log_return|simple_return|price
       loss_score_kind: log_return|simple_return
+      loss_k: número de passos do horizonte usados pela loss. Se None, usa todo o horizon.
       loss_rank_lambda: peso do componente de ranking em losses combinadas
       loss_margin: margem das losses Hinge/Margin/WHR
       loss_ranknet_alpha: escala da RankNet
@@ -63,6 +77,7 @@ def build_loss(config, normalizer_mean=None, normalizer_scale=None):
         loss_name=loss_name,
         data_kind=str(_cfg(config, "loss_data_kind", "log_return")),
         score_kind=str(_cfg(config, "loss_score_kind", "log_return")),
+        loss_k=_optional_positive_int(_cfg(config, "loss_k", None)),
         rank_lambda=float(_cfg(config, "loss_rank_lambda", 1.0)),
         margin=float(_cfg(config, "loss_margin", 0.0)),
         ranknet_alpha=float(_cfg(config, "loss_ranknet_alpha", 1.0)),
@@ -83,9 +98,9 @@ class FinancialRankingLoss(nn.Module):
     Losses financeiras cross-section para saídas [B, H, N].
 
     A saída temporal do TFB é reduzida internamente para scores [B, N]:
-      - log_return: soma dos log-retornos ao longo de H
-      - simple_return: retorno simples acumulado ao longo de H
-      - price: retorno entre preço-base t e preço previsto/observado em t+H
+      - log_return: soma dos log-retornos ao longo de loss_k ou H
+      - simple_return: retorno simples acumulado ao longo de loss_k ou H
+      - price: retorno entre preço-base t e preço previsto/observado em t+loss_k ou t+H
 
     Para dados de preço, base_value deve ser o último preço observado antes da janela futura.
     """
@@ -95,6 +110,7 @@ class FinancialRankingLoss(nn.Module):
         loss_name,
         data_kind="log_return",
         score_kind="log_return",
+        loss_k=None,
         rank_lambda=1.0,
         margin=0.0,
         ranknet_alpha=1.0,
@@ -109,6 +125,7 @@ class FinancialRankingLoss(nn.Module):
         self.loss_name = loss_name.lower()
         self.data_kind = data_kind.lower()
         self.score_kind = score_kind.lower()
+        self.loss_k = _optional_positive_int(loss_k)
         self.rank_lambda = rank_lambda
         self.margin = margin
         self.ranknet_alpha = ranknet_alpha
@@ -151,9 +168,27 @@ class FinancialRankingLoss(nn.Module):
             return x * scale.squeeze(1) + mean.squeeze(1)
         return x * scale + mean
 
+    def _select_loss_horizon(self, pred, target):
+        if pred.shape[1] != target.shape[1]:
+            raise ValueError(
+                "pred e target devem ter o mesmo horizonte temporal dentro da loss: "
+                f"pred={pred.shape}, target={target.shape}"
+            )
+
+        if self.loss_k is None:
+            return pred, target
+
+        if self.loss_k > pred.shape[1]:
+            raise ValueError(
+                f"loss_k={self.loss_k} é maior que o horizonte disponível H={pred.shape[1]}."
+            )
+
+        return pred[:, : self.loss_k, :], target[:, : self.loss_k, :]
+
     def _scores_from_series(self, pred, target, base_value=None):
         pred = self._maybe_inverse_norm(pred)
         target = self._maybe_inverse_norm(target)
+        pred, target = self._select_loss_horizon(pred, target)
 
         data_kind = self.data_kind
         score_kind = self.score_kind
