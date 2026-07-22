@@ -22,6 +22,7 @@ SEQ_LEN="${SEQ_LEN:-16}"
 HORIZON="${HORIZON:-10}"
 BATCH_SIZE="${BATCH_SIZE:-4}"
 NUM_EPOCHS="${NUM_EPOCHS:-1}"
+N_HEADS="${N_HEADS:-8}"
 OUTPUT="${OUTPUT:-artifacts/tfb_models_custom_loss_smoke_results_cpu.csv}"
 
 mkdir -p "$LOG_DIR" "$MPLCONFIGDIR"
@@ -39,6 +40,7 @@ printf 'N_OBS: %s\n' "$N_OBS"
 printf 'N_ASSETS: %s\n' "$N_ASSETS"
 printf 'SEQ_LEN: %s\n' "$SEQ_LEN"
 printf 'HORIZON: %s\n' "$HORIZON"
+printf 'N_HEADS: %s\n' "$N_HEADS"
 
 git status --short
 
@@ -54,6 +56,7 @@ git status --short
   --horizon "$HORIZON" \
   --batch-size "$BATCH_SIZE" \
   --num-epochs "$NUM_EPOCHS" \
+  --n-heads "$N_HEADS" \
   --output "$OUTPUT"
 
 printf 'Resultado CSV: %s/%s\n' "$TFB_ROOT" "$OUTPUT"
