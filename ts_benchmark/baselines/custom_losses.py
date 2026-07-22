@@ -20,6 +20,18 @@ def _cfg(config, name, default):
     return getattr(config, name, default)
 
 
+def _as_bool(value):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        value = value.lower()
+        if value in {"true", "1", "yes", "y", "sim", "s"}:
+            return True
+        if value in {"false", "0", "no", "n", "nao", "não"}:
+            return False
+    return bool(value)
+
+
 def build_loss(config, normalizer_mean=None, normalizer_scale=None):
     """
     Factory central de losses para modelos deep do TFB.
@@ -56,7 +68,7 @@ def build_loss(config, normalizer_mean=None, normalizer_scale=None):
         ranknet_alpha=float(_cfg(config, "loss_ranknet_alpha", 1.0)),
         listnet_tau=float(_cfg(config, "loss_listnet_tau", 1.0)),
         fingat_delta=float(_cfg(config, "loss_fingat_delta", 0.01)),
-        inverse_norm=bool(_cfg(config, "loss_inverse_norm", True)),
+        inverse_norm=_as_bool(_cfg(config, "loss_inverse_norm", True)),
         normalizer_mean=normalizer_mean,
         normalizer_scale=normalizer_scale,
     )
