@@ -67,6 +67,7 @@ def make_log_return_data(n_obs, n_assets, seed):
     data = common + idio
     cols = [f"asset_{i:03d}" for i in range(n_assets)]
     idx = pd.date_range("2020-01-01", periods=n_obs, freq="B")
+    idx.name = "date"
     return pd.DataFrame(data, index=idx, columns=cols)
 
 
