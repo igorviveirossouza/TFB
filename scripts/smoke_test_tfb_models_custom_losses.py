@@ -107,6 +107,19 @@ def parse_list(value, all_values):
     return [x.strip().lower() for x in value.split(",") if x.strip()]
 
 
+def normalize_loss_k(value):
+    if value is None:
+        return None
+    if isinstance(value, str):
+        value = value.strip().lower()
+        if value in {"", "none", "null", "nan"}:
+            return None
+    value = int(value)
+    if value <= 0:
+        raise ValueError("loss_k deve ser positivo ou None.")
+    return value
+
+
 def make_model(model_name, args):
     common_kwargs = dict(
         seq_len=args.seq_len,
@@ -141,6 +154,7 @@ def make_model(model_name, args):
         loss=args.loss_name,
         loss_data_kind=args.data_kind,
         loss_score_kind=args.score_kind,
+        loss_k=args.loss_k,
         loss_rank_lambda=args.rank_lambda,
         loss_margin=args.margin,
         loss_ranknet_alpha=args.ranknet_alpha,
@@ -223,6 +237,7 @@ def run_one(model_name, loss_name, args):
         "model": model_name,
         "loss": loss_name,
         "data_kind": args.data_kind,
+        "loss_k": args.loss_k,
         "device_requested": args.device,
         "torch_cuda_available": bool(torch.cuda.is_available()),
         "device_used": str(get_device()),
@@ -284,6 +299,7 @@ def print_rows(rows):
         "ok",
         "model",
         "loss",
+        "loss_k",
         "device_used",
         "diagnostic_loss",
         "forecast_shape",
@@ -306,6 +322,7 @@ def main():
     parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
     parser.add_argument("--data-kind", default="log_return", choices=["log_return", "simple_return"])
     parser.add_argument("--score-kind", default="log_return", choices=["log_return", "simple_return"])
+    parser.add_argument("--loss-k", default=None, help="Passos usados pela loss. Se omitido, usa todo o horizon.")
     parser.add_argument("--n-obs", type=int, default=256)
     parser.add_argument("--n-assets", type=int, default=24)
     parser.add_argument("--seq-len", type=int, default=16)
@@ -330,6 +347,10 @@ def main():
     parser.add_argument("--seed", type=int, default=123)
     parser.add_argument("--output", default="artifacts/tfb_models_custom_loss_smoke_results.csv")
     args = parser.parse_args()
+    args.loss_k = normalize_loss_k(args.loss_k)
+
+    if args.loss_k is not None and args.loss_k > args.horizon:
+        raise SystemExit("--loss-k não pode ser maior que --horizon")
 
     if args.device == "cuda" and not torch.cuda.is_available():
         raise SystemExit("--device cuda solicitado, mas torch.cuda.is_available() == False")
