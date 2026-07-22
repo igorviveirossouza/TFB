@@ -11,7 +11,10 @@ TFB_ROOT="/sonic_home/igor.viveiros/src/TFB"
 PYTHON_BIN="/sonic_home/igor.viveiros/py310/bin/python"
 LOG_DIR="/sonic_home/igor.viveiros/paralelo/logs"
 
-mkdir -p "$LOG_DIR"
+export CUDA_VISIBLE_DEVICES=""
+export MPLCONFIGDIR="/tmp/${USER}-mpl"
+
+mkdir -p "$LOG_DIR" "$MPLCONFIGDIR"
 cd "$TFB_ROOT"
 
 echo "HOSTNAME: $(hostname)"
@@ -19,6 +22,7 @@ echo "PYTHON_BIN: $PYTHON_BIN"
 echo "TFB_ROOT: $TFB_ROOT"
 echo "BRANCH: $(git rev-parse --abbrev-ref HEAD)"
 echo "COMMIT: $(git rev-parse HEAD)"
+echo "CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-unset}"
 
 git status --short
 
