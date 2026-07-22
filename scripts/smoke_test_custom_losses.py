@@ -4,7 +4,11 @@
 
 Uso a partir da raiz do repositório TFB:
 
-    python scripts/smoke_test_custom_losses.py
+    python scripts/smoke_test_custom_losses.py --device auto
+
+No cluster, prefira executar via Slurm com:
+
+    sbatch scripts/slurm_smoke_test_custom_losses.sh
 
 O teste verifica, para tensores artificiais [B, H, N], se cada loss:
   1. é instanciada por build_loss(...);
@@ -46,6 +50,14 @@ LOSS_NAMES = [
 DATA_KINDS = ["log_return", "simple_return", "price"]
 
 
+def resolve_device(device_arg):
+    if device_arg == "auto":
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if device_arg == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("--device cuda solicitado, mas torch.cuda.is_available() é False.")
+    return torch.device(device_arg)
+
+
 def make_config(loss_name, data_kind):
     return SimpleNamespace(
         loss=loss_name,
@@ -61,22 +73,21 @@ def make_config(loss_name, data_kind):
     )
 
 
-def make_data(data_kind, batch_size, horizon, n_assets, seed):
+def make_data(data_kind, batch_size, horizon, n_assets, seed, device):
+    # Gera em CPU para reprodutibilidade e move para o device escolhido.
     generator = torch.Generator().manual_seed(seed)
 
     if data_kind == "log_return":
         target = 0.01 * torch.randn(batch_size, horizon, n_assets, generator=generator)
         pred = target + 0.01 * torch.randn(batch_size, horizon, n_assets, generator=generator)
-        base_value = None
-        return pred.requires_grad_(True), target, base_value
+        return pred.to(device).requires_grad_(True), target.to(device), None
 
     if data_kind == "simple_return":
         target = 0.01 * torch.randn(batch_size, horizon, n_assets, generator=generator)
         pred = target + 0.01 * torch.randn(batch_size, horizon, n_assets, generator=generator)
         pred = torch.clamp(pred, min=-0.95, max=0.95)
         target = torch.clamp(target, min=-0.95, max=0.95)
-        base_value = None
-        return pred.requires_grad_(True), target, base_value
+        return pred.to(device).requires_grad_(True), target.to(device), None
 
     if data_kind == "price":
         base_value = 50.0 + 100.0 * torch.rand(batch_size, n_assets, generator=generator)
@@ -86,7 +97,11 @@ def make_data(data_kind, batch_size, horizon, n_assets, seed):
         )
         target = base_value.unsqueeze(1) * torch.exp(torch.cumsum(target_log_steps, dim=1))
         pred = base_value.unsqueeze(1) * torch.exp(torch.cumsum(pred_log_steps, dim=1))
-        return pred.requires_grad_(True), target, base_value
+        return (
+            pred.to(device).requires_grad_(True),
+            target.to(device),
+            base_value.to(device),
+        )
 
     raise ValueError("data_kind inválido: %s" % data_kind)
 
@@ -121,10 +136,10 @@ def sign_accuracy(pred_score, target_score):
     return ((pred_score > 0) == (target_score > 0)).float().mean().item()
 
 
-def run_one(loss_name, data_kind, batch_size, horizon, n_assets, seed, top_k):
+def run_one(loss_name, data_kind, batch_size, horizon, n_assets, seed, top_k, device):
     cfg = make_config(loss_name, data_kind)
-    criterion = build_loss(cfg)
-    pred, target, base_value = make_data(data_kind, batch_size, horizon, n_assets, seed)
+    criterion = build_loss(cfg).to(device)
+    pred, target, base_value = make_data(data_kind, batch_size, horizon, n_assets, seed, device)
 
     loss = criterion(pred, target, base_value=base_value)
     loss.backward()
@@ -141,6 +156,7 @@ def run_one(loss_name, data_kind, batch_size, horizon, n_assets, seed, top_k):
 
         return {
             "ok": ok,
+            "device": str(device),
             "loss": loss_name,
             "data_kind": data_kind,
             "loss_value": float(loss.item()),
@@ -156,9 +172,20 @@ def run_one(loss_name, data_kind, batch_size, horizon, n_assets, seed, top_k):
         }
 
 
+def format_value(value):
+    if isinstance(value, bool):
+        return "OK" if value else "FAIL"
+    if isinstance(value, float):
+        if math.isnan(value) or math.isinf(value):
+            return str(value)
+        return "%.6g" % value
+    return str(value)
+
+
 def print_table(rows):
     cols = [
         "ok",
+        "device",
         "loss",
         "data_kind",
         "loss_value",
@@ -174,16 +201,6 @@ def print_table(rows):
     print("-" * len(header))
     for row in rows:
         print("  ".join(format_value(row[col]).ljust(widths[col]) for col in cols))
-
-
-def format_value(value):
-    if isinstance(value, bool):
-        return "OK" if value else "FAIL"
-    if isinstance(value, float):
-        if math.isnan(value) or math.isinf(value):
-            return str(value)
-        return "%.6g" % value
-    return str(value)
 
 
 def write_csv(rows, output_path):
@@ -202,6 +219,7 @@ def main():
     parser.add_argument("--n-assets", type=int, default=66)
     parser.add_argument("--top-k", type=int, default=9)
     parser.add_argument("--seed", type=int, default=123)
+    parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
     parser.add_argument(
         "--data-kind",
         choices=DATA_KINDS + ["all"],
@@ -214,6 +232,14 @@ def main():
         help="Caminho do CSV de saída.",
     )
     args = parser.parse_args()
+
+    device = resolve_device(args.device)
+    print("torch.__version__:", torch.__version__, flush=True)
+    print("torch.cuda.is_available():", torch.cuda.is_available(), flush=True)
+    print("torch.cuda.device_count():", torch.cuda.device_count(), flush=True)
+    print("device:", device, flush=True)
+    if device.type == "cuda":
+        print("cuda_device_name:", torch.cuda.get_device_name(0), flush=True)
 
     data_kinds = DATA_KINDS if args.data_kind == "all" else [args.data_kind]
     rows = []
@@ -228,6 +254,7 @@ def main():
                     n_assets=args.n_assets,
                     seed=args.seed + i,
                     top_k=args.top_k,
+                    device=device,
                 )
             )
 
