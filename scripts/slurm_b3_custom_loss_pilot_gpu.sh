@@ -47,9 +47,13 @@ LOSS_DATA_KIND="${LOSS_DATA_KIND:-log_return}"
 LOSS_SCORE_KIND="${LOSS_SCORE_KIND:-log_return}"
 LOSS_RANK_LAMBDA="${LOSS_RANK_LAMBDA:-1.0}"
 LOSS_MARGIN="${LOSS_MARGIN:-0.01}"
+LOSS_HINGE_MARGIN="${LOSS_HINGE_MARGIN:-$LOSS_MARGIN}"
+LOSS_WHR_MARGIN="${LOSS_WHR_MARGIN:-$LOSS_MARGIN}"
 LOSS_RANKNET_ALPHA="${LOSS_RANKNET_ALPHA:-1.0}"
-LOSS_LISTNET_TAU="${LOSS_LISTNET_TAU:-1.0}"
+LOSS_LISTNET_TAU="${LOSS_LISTNET_TAU:-0.01}"
 LOSS_FINGAT_DELTA="${LOSS_FINGAT_DELTA:-0.01}"
+LOSS_FINGAT_MARGIN="${LOSS_FINGAT_MARGIN:-0.0}"
+LOSS_FINGAT_MOVE_LOGIT_SCALE="${LOSS_FINGAT_MOVE_LOGIT_SCALE:-0.01}"
 LOSS_INVERSE_NORM="${LOSS_INVERSE_NORM:-true}"
 NORM="${NORM:-true}"
 
@@ -109,7 +113,7 @@ EOF
 )
 
 MODEL_HYPER_PARAMS=$(cat <<EOF
-{"batch_size": $BATCH_SIZE, "d_ff": $D_FF, "d_model": $D_MODEL, "hidden_size": $HIDDEN_SIZE, "lr": $LR, "horizon": $HORIZON, "seq_len": $SEQ_LEN, "num_epochs": $NUM_EPOCHS, "patience": $PATIENCE, "n_heads": $N_HEADS, "norm": $NORM_JSON, "loss": "$LOSS", "loss_data_kind": "$LOSS_DATA_KIND", "loss_score_kind": "$LOSS_SCORE_KIND", "loss_k": $LOSS_K, "loss_rank_lambda": $LOSS_RANK_LAMBDA, "loss_margin": $LOSS_MARGIN, "loss_ranknet_alpha": $LOSS_RANKNET_ALPHA, "loss_listnet_tau": $LOSS_LISTNET_TAU, "loss_fingat_delta": $LOSS_FINGAT_DELTA, "loss_inverse_norm": $LOSS_INVERSE_NORM_JSON, "parallel_strategy": null$EXTRA_HPARAMS}
+{"batch_size": $BATCH_SIZE, "d_ff": $D_FF, "d_model": $D_MODEL, "hidden_size": $HIDDEN_SIZE, "lr": $LR, "horizon": $HORIZON, "seq_len": $SEQ_LEN, "num_epochs": $NUM_EPOCHS, "patience": $PATIENCE, "n_heads": $N_HEADS, "norm": $NORM_JSON, "loss": "$LOSS", "loss_data_kind": "$LOSS_DATA_KIND", "loss_score_kind": "$LOSS_SCORE_KIND", "loss_k": $LOSS_K, "loss_rank_lambda": $LOSS_RANK_LAMBDA, "loss_margin": $LOSS_MARGIN, "loss_hinge_margin": $LOSS_HINGE_MARGIN, "loss_whr_margin": $LOSS_WHR_MARGIN, "loss_ranknet_alpha": $LOSS_RANKNET_ALPHA, "loss_listnet_tau": $LOSS_LISTNET_TAU, "loss_fingat_delta": $LOSS_FINGAT_DELTA, "loss_fingat_margin": $LOSS_FINGAT_MARGIN, "loss_fingat_move_logit_scale": $LOSS_FINGAT_MOVE_LOGIT_SCALE, "loss_inverse_norm": $LOSS_INVERSE_NORM_JSON, "parallel_strategy": null$EXTRA_HPARAMS}
 EOF
 )
 
