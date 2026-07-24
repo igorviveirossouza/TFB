@@ -42,7 +42,7 @@ TV_RATIO="${TV_RATIO:-0.8}"
 TRAIN_RATIO="${TRAIN_RATIO:-0.875}"
 STRIDE="${STRIDE:-1}"
 SEED="${SEED:-2021}"
-SAVE_TRUE_PRED="${SAVE_TRUE_PRED:-True}"
+SAVE_TRUE_PRED="${SAVE_TRUE_PRED:-true}"
 LOSS_DATA_KIND="${LOSS_DATA_KIND:-log_return}"
 LOSS_SCORE_KIND="${LOSS_SCORE_KIND:-log_return}"
 LOSS_RANK_LAMBDA="${LOSS_RANK_LAMBDA:-1.0}"
@@ -52,6 +52,18 @@ LOSS_LISTNET_TAU="${LOSS_LISTNET_TAU:-1.0}"
 LOSS_FINGAT_DELTA="${LOSS_FINGAT_DELTA:-0.01}"
 LOSS_INVERSE_NORM="${LOSS_INVERSE_NORM:-true}"
 NORM="${NORM:-true}"
+
+json_bool() {
+  case "${1,,}" in
+    true|1|yes|y|sim|s) echo "true" ;;
+    false|0|no|n|nao|não) echo "false" ;;
+    *) echo "Valor booleano inválido: $1" >&2; exit 4 ;;
+  esac
+}
+
+SAVE_TRUE_PRED_JSON="$(json_bool "$SAVE_TRUE_PRED")"
+LOSS_INVERSE_NORM_JSON="$(json_bool "$LOSS_INVERSE_NORM")"
+NORM_JSON="$(json_bool "$NORM")"
 
 mkdir -p "$LOG_DIR" "$MPLCONFIGDIR"
 cd "$TFB_ROOT"
@@ -92,12 +104,12 @@ RUN_NAME="${MODEL}_${LOSS}_${LOSS_DATA_KIND}_lb${SEQ_LEN}_h${HORIZON}_k${LOSS_K}
 SAVE_PATH="${SAVE_PATH:-b3_custom_loss_pilot/${RUN_NAME}}"
 
 STRATEGY_ARGS=$(cat <<EOF
-{"horizon": $HORIZON, "tv_ratio": $TV_RATIO, "train_ratio_in_tv": {"__default__": $TRAIN_RATIO}, "stride": $STRIDE, "num_rollings": $NUM_ROLLINGS, "seed": $SEED, "save_true_pred": $SAVE_TRUE_PRED, "target_channel": null}
+{"horizon": $HORIZON, "tv_ratio": $TV_RATIO, "train_ratio_in_tv": {"__default__": $TRAIN_RATIO}, "stride": $STRIDE, "num_rollings": $NUM_ROLLINGS, "seed": $SEED, "save_true_pred": $SAVE_TRUE_PRED_JSON, "target_channel": null}
 EOF
 )
 
 MODEL_HYPER_PARAMS=$(cat <<EOF
-{"batch_size": $BATCH_SIZE, "d_ff": $D_FF, "d_model": $D_MODEL, "hidden_size": $HIDDEN_SIZE, "lr": $LR, "horizon": $HORIZON, "seq_len": $SEQ_LEN, "num_epochs": $NUM_EPOCHS, "patience": $PATIENCE, "n_heads": $N_HEADS, "norm": $NORM, "loss": "$LOSS", "loss_data_kind": "$LOSS_DATA_KIND", "loss_score_kind": "$LOSS_SCORE_KIND", "loss_k": $LOSS_K, "loss_rank_lambda": $LOSS_RANK_LAMBDA, "loss_margin": $LOSS_MARGIN, "loss_ranknet_alpha": $LOSS_RANKNET_ALPHA, "loss_listnet_tau": $LOSS_LISTNET_TAU, "loss_fingat_delta": $LOSS_FINGAT_DELTA, "loss_inverse_norm": $LOSS_INVERSE_NORM, "parallel_strategy": null$EXTRA_HPARAMS}
+{"batch_size": $BATCH_SIZE, "d_ff": $D_FF, "d_model": $D_MODEL, "hidden_size": $HIDDEN_SIZE, "lr": $LR, "horizon": $HORIZON, "seq_len": $SEQ_LEN, "num_epochs": $NUM_EPOCHS, "patience": $PATIENCE, "n_heads": $N_HEADS, "norm": $NORM_JSON, "loss": "$LOSS", "loss_data_kind": "$LOSS_DATA_KIND", "loss_score_kind": "$LOSS_SCORE_KIND", "loss_k": $LOSS_K, "loss_rank_lambda": $LOSS_RANK_LAMBDA, "loss_margin": $LOSS_MARGIN, "loss_ranknet_alpha": $LOSS_RANKNET_ALPHA, "loss_listnet_tau": $LOSS_LISTNET_TAU, "loss_fingat_delta": $LOSS_FINGAT_DELTA, "loss_inverse_norm": $LOSS_INVERSE_NORM_JSON, "parallel_strategy": null$EXTRA_HPARAMS}
 EOF
 )
 
@@ -131,7 +143,7 @@ git status --short
   --num-workers "$NUM_WORKERS" \
   --num-cpus "$NUM_CPUS" \
   --timeout "$TIMEOUT" \
-  --save-true-pred "$SAVE_TRUE_PRED" \
+  --save-true-pred "$SAVE_TRUE_PRED_JSON" \
   --save-path "$SAVE_PATH"
 
 printf 'Resultado em: %s/result/%s\n' "$TFB_ROOT" "$SAVE_PATH"
