@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH -p medusas_shr
 #SBATCH --gres=gpu:1
-#SBATCH --array=0-127%4
+#SBATCH --array=0-159%4
 #SBATCH --time=24:00:00
 #SBATCH --job-name=b3-loss-t3
 #SBATCH --output=/sonic_home/igor.viveiros/src/TFB/logs/b3-loss-t3-%A_%a.out
@@ -13,19 +13,22 @@ TFB_ROOT="${TFB_ROOT:-/sonic_home/igor.viveiros/src/TFB}"
 cd "$TFB_ROOT"
 
 # Grade padrão do Teste 3:
-# 4 modelos x 8 losses x 4 loss_k = 128 jobs.
+# 4 modelos x 8 losses x 5 horizontes = 160 jobs.
+# Para comparabilidade com o TFB tradicional, sempre impomos:
+#   HORIZON = LOSS_K = K
+# com K em {1,5,10,20,24}.
 MODELS_CSV="${MODELS:-duet,timesnet,fedformer,nonstationary}"
 LOSSES_CSV="${LOSSES:-rank_hinge,rank_margin,rank_bpr,ranknet,whr1,whr2,listnet,fingat}"
-LOSS_KS_CSV="${LOSS_KS:-1,5,10,24}"
+HORIZONS_CSV="${HORIZONS:-1,5,10,20,24}"
 
 IFS=',' read -r -a MODEL_ARR <<< "$MODELS_CSV"
 IFS=',' read -r -a LOSS_ARR <<< "$LOSSES_CSV"
-IFS=',' read -r -a LOSS_K_ARR <<< "$LOSS_KS_CSV"
+IFS=',' read -r -a HORIZON_ARR <<< "$HORIZONS_CSV"
 
 N_MODELS=${#MODEL_ARR[@]}
 N_LOSSES=${#LOSS_ARR[@]}
-N_KS=${#LOSS_K_ARR[@]}
-TOTAL=$((N_MODELS * N_LOSSES * N_KS))
+N_HORIZONS=${#HORIZON_ARR[@]}
+TOTAL=$((N_MODELS * N_LOSSES * N_HORIZONS))
 TASK_ID=${SLURM_ARRAY_TASK_ID:-0}
 
 if (( TASK_ID >= TOTAL )); then
@@ -33,20 +36,20 @@ if (( TASK_ID >= TOTAL )); then
   exit 0
 fi
 
-K_IDX=$((TASK_ID % N_KS))
-LOSS_IDX=$(((TASK_ID / N_KS) % N_LOSSES))
-MODEL_IDX=$((TASK_ID / (N_KS * N_LOSSES)))
+H_IDX=$((TASK_ID % N_HORIZONS))
+LOSS_IDX=$(((TASK_ID / N_HORIZONS) % N_LOSSES))
+MODEL_IDX=$((TASK_ID / (N_HORIZONS * N_LOSSES)))
 
 export MODEL="${MODEL_ARR[$MODEL_IDX]}"
 export LOSS="${LOSS_ARR[$LOSS_IDX]}"
-export LOSS_K="${LOSS_K_ARR[$K_IDX]}"
+export HORIZON="${HORIZON_ARR[$H_IDX]}"
+export LOSS_K="$HORIZON"
 
 export DATA_NAME="${DATA_NAME:-b3_log_returns.csv}"
 export LOSS_DATA_KIND="${LOSS_DATA_KIND:-log_return}"
 export LOSS_SCORE_KIND="${LOSS_SCORE_KIND:-log_return}"
 
 export SEQ_LEN="${SEQ_LEN:-32}"
-export HORIZON="${HORIZON:-24}"
 export NUM_EPOCHS="${NUM_EPOCHS:-20}"
 export NUM_ROLLINGS="${NUM_ROLLINGS:-512}"
 export BATCH_SIZE="${BATCH_SIZE:-8}"
@@ -70,8 +73,8 @@ RUN_NAME="${MODEL}_${LOSS}_${LOSS_DATA_KIND}_lb${SEQ_LEN}_h${HORIZON}_k${LOSS_K}
 export SAVE_PATH="${SAVE_ROOT}/${RUN_NAME}"
 
 printf 'TEST3_TASK_ID: %s/%s\n' "$TASK_ID" "$TOTAL"
-printf 'MODEL_IDX=%s LOSS_IDX=%s K_IDX=%s\n' "$MODEL_IDX" "$LOSS_IDX" "$K_IDX"
-printf 'MODEL=%s LOSS=%s LOSS_K=%s\n' "$MODEL" "$LOSS" "$LOSS_K"
+printf 'MODEL_IDX=%s LOSS_IDX=%s H_IDX=%s\n' "$MODEL_IDX" "$LOSS_IDX" "$H_IDX"
+printf 'MODEL=%s LOSS=%s HORIZON=%s LOSS_K=%s\n' "$MODEL" "$LOSS" "$HORIZON" "$LOSS_K"
 printf 'SAVE_PATH=%s\n' "$SAVE_PATH"
 
 bash scripts/slurm_b3_custom_loss_pilot_gpu.sh
