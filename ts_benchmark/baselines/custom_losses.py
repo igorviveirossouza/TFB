@@ -24,7 +24,7 @@ def _as_bool(value):
     if isinstance(value, bool):
         return value
     if isinstance(value, str):
-        value = value.lower()
+        value = value.strip().lower()
         if value in {"true", "1", "yes", "y", "sim", "s"}:
             return True
         if value in {"false", "0", "no", "n", "nao", "não"}:
@@ -54,12 +54,18 @@ def build_loss(config, normalizer_mean=None, normalizer_scale=None):
       loss_data_kind: log_return|simple_return|price
       loss_score_kind: log_return|simple_return
       loss_k: número de passos do horizonte usados pela loss. Se None, usa todo o horizon.
-      loss_rank_lambda: peso do componente de ranking em losses combinadas
-      loss_margin: margem das losses Hinge/Margin/WHR
-      loss_ranknet_alpha: escala da RankNet
-      loss_listnet_tau: temperatura da ListNet
-      loss_fingat_delta: peso da BCE de movimento na FinGAT
-      loss_inverse_norm: desfaz normalização do TFB dentro da loss antes de construir scores
+      loss_rank_lambda: peso do componente de ranking em losses combinadas.
+      loss_margin: margem da Margin Ranking Loss.
+      loss_hinge_margin: margem da Hinge Loss.
+      loss_whr_margin: margem das Weighted Hinge Losses.
+      loss_ranknet_alpha: escala da RankNet.
+      loss_listnet_tau: temperatura da ListNet. Para retornos financeiros, valores pequenos
+        costumam ser necessários; default: 0.01.
+      loss_fingat_delta: peso da BCE de movimento na FinGAT.
+      loss_fingat_margin: margem opcional no componente ranking da FinGAT; default 0 preserva o paper.
+      loss_fingat_move_logit_scale: escala usada para transformar retorno previsto em logit de movimento
+        no adaptador single-head do TFB.
+      loss_inverse_norm: desfaz normalização do TFB dentro da loss antes de construir scores.
     """
     loss_name = str(_cfg(config, "loss", "mse")).lower()
 
@@ -79,10 +85,14 @@ def build_loss(config, normalizer_mean=None, normalizer_scale=None):
         score_kind=str(_cfg(config, "loss_score_kind", "log_return")),
         loss_k=_optional_positive_int(_cfg(config, "loss_k", None)),
         rank_lambda=float(_cfg(config, "loss_rank_lambda", 1.0)),
-        margin=float(_cfg(config, "loss_margin", 0.0)),
+        margin=float(_cfg(config, "loss_margin", 0.01)),
+        hinge_margin=float(_cfg(config, "loss_hinge_margin", _cfg(config, "loss_margin", 0.01))),
+        whr_margin=float(_cfg(config, "loss_whr_margin", _cfg(config, "loss_margin", 0.01))),
         ranknet_alpha=float(_cfg(config, "loss_ranknet_alpha", 1.0)),
-        listnet_tau=float(_cfg(config, "loss_listnet_tau", 1.0)),
+        listnet_tau=float(_cfg(config, "loss_listnet_tau", 0.01)),
         fingat_delta=float(_cfg(config, "loss_fingat_delta", 0.01)),
+        fingat_margin=float(_cfg(config, "loss_fingat_margin", 0.0)),
+        fingat_move_logit_scale=float(_cfg(config, "loss_fingat_move_logit_scale", 0.01)),
         inverse_norm=_as_bool(_cfg(config, "loss_inverse_norm", True)),
         normalizer_mean=normalizer_mean,
         normalizer_scale=normalizer_scale,
@@ -98,11 +108,13 @@ class FinancialRankingLoss(nn.Module):
     Losses financeiras cross-section para saídas [B, H, N].
 
     A saída temporal do TFB é reduzida internamente para scores [B, N]:
-      - log_return: soma dos log-retornos ao longo de loss_k ou H
-      - simple_return: retorno simples acumulado ao longo de loss_k ou H
-      - price: retorno entre preço-base t e preço previsto/observado em t+loss_k ou t+H
+      - log_return: soma dos log-retornos ao longo de loss_k ou H;
+      - simple_return: retorno simples acumulado ao longo de loss_k ou H;
+      - price: retorno entre preço-base t e preço previsto/observado em t+loss_k ou t+H.
 
-    Para dados de preço, base_value deve ser o último preço observado antes da janela futura.
+    Observação sobre FinGAT: o paper original usa duas saídas, uma para retorno e outra para
+    movimento. Como os modelos TFB aqui têm uma única cabeça [B,H,N], implementamos um adaptador
+    single-head: o score de retorno é usado no ranking e, reescalado, como logit para a BCE de movimento.
     """
 
     def __init__(
@@ -112,10 +124,14 @@ class FinancialRankingLoss(nn.Module):
         score_kind="log_return",
         loss_k=None,
         rank_lambda=1.0,
-        margin=0.0,
+        margin=0.01,
+        hinge_margin=0.01,
+        whr_margin=0.01,
         ranknet_alpha=1.0,
-        listnet_tau=1.0,
+        listnet_tau=0.01,
         fingat_delta=0.01,
+        fingat_margin=0.0,
+        fingat_move_logit_scale=0.01,
         inverse_norm=True,
         normalizer_mean=None,
         normalizer_scale=None,
@@ -128,9 +144,13 @@ class FinancialRankingLoss(nn.Module):
         self.loss_k = _optional_positive_int(loss_k)
         self.rank_lambda = rank_lambda
         self.margin = margin
+        self.hinge_margin = hinge_margin
+        self.whr_margin = whr_margin
         self.ranknet_alpha = ranknet_alpha
         self.listnet_tau = listnet_tau
         self.fingat_delta = fingat_delta
+        self.fingat_margin = fingat_margin
+        self.fingat_move_logit_scale = fingat_move_logit_scale
         self.inverse_norm = inverse_norm
         self.eps = eps
 
@@ -247,12 +267,12 @@ class FinancialRankingLoss(nn.Module):
     def _masked_mean(self, values, mask):
         values = values[mask]
         if values.numel() == 0:
-            return torch.zeros((), device=mask.device, dtype=torch.float32)
+            return torch.zeros((), device=mask.device, dtype=values.dtype if values.numel() else torch.float32)
         return values.mean()
 
-    def _hinge(self, pred_score, target_score, weighted=False, whr_mode="whr1"):
+    def _pairwise_margin(self, pred_score, target_score, margin, weighted=False, whr_mode="whr1"):
         pred_diff, _, s_ij, valid = self._pairwise_terms(pred_score, target_score)
-        loss = F.relu(self.margin - s_ij * pred_diff)
+        loss = F.relu(margin - s_ij * pred_diff)
 
         if weighted:
             weights = self._rank_weights(target_score, whr_mode)
@@ -283,12 +303,17 @@ class FinancialRankingLoss(nn.Module):
         pred_diff = pred_score.unsqueeze(2) - pred_score.unsqueeze(1)
         target_diff = target_score.unsqueeze(2) - target_score.unsqueeze(1)
         valid = target_diff != 0
-        loss = F.relu(-(pred_diff * target_diff))
+        raw = -(pred_diff * target_diff)
+        if self.fingat_margin > 0:
+            raw = raw + self.fingat_margin
+        loss = F.relu(raw)
         return self._masked_mean(loss, valid)
 
     def _fingat_move(self, pred_score, target_score):
         target_move = (target_score > 0).to(dtype=pred_score.dtype)
-        return F.binary_cross_entropy_with_logits(pred_score, target_move)
+        scale = max(self.fingat_move_logit_scale, self.eps)
+        move_logits = pred_score / scale
+        return F.binary_cross_entropy_with_logits(move_logits, target_move)
 
     def _rank_weights(self, target_score, mode):
         n = target_score.shape[1]
@@ -298,45 +323,45 @@ class FinancialRankingLoss(nn.Module):
         ranks.scatter_(1, order, rank_values.unsqueeze(0).expand_as(ranks))
 
         if mode == "whr2":
-            # peso exponencial decrescente: maior peso para o topo real
             denom = max(n - 1, 1)
             return torch.exp(-(ranks - 1.0) / denom)
 
-        # WHR1: peso linear decrescente por posição no ranking real
         return (n - ranks + 1.0) / n
+
+    def _combined(self, pred_score, target_score, rank_loss):
+        point_loss = F.mse_loss(pred_score, target_score)
+        return (1.0 - self.rank_lambda) * point_loss + self.rank_lambda * rank_loss
 
     def forward(self, pred, target, base_value=None):
         pred_score, target_score = self._scores_from_series(pred, target, base_value=base_value)
 
         if self.loss_name == "rank_hinge":
-            rank_loss = self._hinge(pred_score, target_score)
-            point_loss = F.mse_loss(pred_score, target_score)
-            return (1.0 - self.rank_lambda) * point_loss + self.rank_lambda * rank_loss
+            rank_loss = self._pairwise_margin(pred_score, target_score, self.hinge_margin)
+            return self._combined(pred_score, target_score, rank_loss)
 
         if self.loss_name == "rank_margin":
-            rank_loss = self._hinge(pred_score, target_score)
-            point_loss = F.mse_loss(pred_score, target_score)
-            return (1.0 - self.rank_lambda) * point_loss + self.rank_lambda * rank_loss
+            rank_loss = self._pairwise_margin(pred_score, target_score, self.margin)
+            return self._combined(pred_score, target_score, rank_loss)
 
         if self.loss_name == "rank_bpr":
             rank_loss = self._bpr(pred_score, target_score)
-            point_loss = F.mse_loss(pred_score, target_score)
-            return (1.0 - self.rank_lambda) * point_loss + self.rank_lambda * rank_loss
+            return self._combined(pred_score, target_score, rank_loss)
 
         if self.loss_name == "ranknet":
             rank_loss = self._ranknet(pred_score, target_score)
-            point_loss = F.mse_loss(pred_score, target_score)
-            return (1.0 - self.rank_lambda) * point_loss + self.rank_lambda * rank_loss
+            return self._combined(pred_score, target_score, rank_loss)
 
         if self.loss_name == "whr1":
-            rank_loss = self._hinge(pred_score, target_score, weighted=True, whr_mode="whr1")
-            point_loss = F.mse_loss(pred_score, target_score)
-            return (1.0 - self.rank_lambda) * point_loss + self.rank_lambda * rank_loss
+            rank_loss = self._pairwise_margin(
+                pred_score, target_score, self.whr_margin, weighted=True, whr_mode="whr1"
+            )
+            return self._combined(pred_score, target_score, rank_loss)
 
         if self.loss_name == "whr2":
-            rank_loss = self._hinge(pred_score, target_score, weighted=True, whr_mode="whr2")
-            point_loss = F.mse_loss(pred_score, target_score)
-            return (1.0 - self.rank_lambda) * point_loss + self.rank_lambda * rank_loss
+            rank_loss = self._pairwise_margin(
+                pred_score, target_score, self.whr_margin, weighted=True, whr_mode="whr2"
+            )
+            return self._combined(pred_score, target_score, rank_loss)
 
         if self.loss_name == "listnet":
             return self._listnet(pred_score, target_score)
