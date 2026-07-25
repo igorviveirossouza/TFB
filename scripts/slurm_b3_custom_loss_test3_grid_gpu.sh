@@ -18,6 +18,7 @@ cd "$TFB_ROOT"
 #   HORIZON = LOSS_K = K
 # com K em {1,5,10,20,24}.
 # Os contextos/lookbacks seguem os experimentos anteriores: seq_len em {32,104,246}.
+# NUM_ROLLINGS alto significa: usar todas as janelas disponíveis no período de teste.
 MODELS_CSV="${MODELS:-duet,timesnet,fedformer,nonstationary}"
 LOSSES_CSV="${LOSSES:-rank_hinge,rank_margin,rank_bpr,ranknet,whr1,whr2,listnet,fingat}"
 SEQ_LENS_CSV="${SEQ_LENS:-32,104,246}"
@@ -56,7 +57,7 @@ export LOSS_DATA_KIND="${LOSS_DATA_KIND:-log_return}"
 export LOSS_SCORE_KIND="${LOSS_SCORE_KIND:-log_return}"
 
 export NUM_EPOCHS="${NUM_EPOCHS:-20}"
-export NUM_ROLLINGS="${NUM_ROLLINGS:-512}"
+export NUM_ROLLINGS="${NUM_ROLLINGS:-999999}"
 export BATCH_SIZE="${BATCH_SIZE:-8}"
 export PATIENCE="${PATIENCE:-5}"
 export LR="${LR:-0.001}"
@@ -80,6 +81,7 @@ export SAVE_PATH="${SAVE_ROOT}/${RUN_NAME}"
 printf 'TEST3_TASK_ID: %s/%s\n' "$TASK_ID" "$TOTAL"
 printf 'MODEL_IDX=%s LOSS_IDX=%s SEQ_IDX=%s H_IDX=%s\n' "$MODEL_IDX" "$LOSS_IDX" "$SEQ_IDX" "$H_IDX"
 printf 'MODEL=%s LOSS=%s SEQ_LEN=%s HORIZON=%s LOSS_K=%s\n' "$MODEL" "$LOSS" "$SEQ_LEN" "$HORIZON" "$LOSS_K"
+printf 'NUM_ROLLINGS=%s\n' "$NUM_ROLLINGS"
 printf 'SAVE_PATH=%s\n' "$SAVE_PATH"
 
 bash scripts/slurm_b3_custom_loss_pilot_gpu.sh
