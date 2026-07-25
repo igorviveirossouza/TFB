@@ -19,6 +19,7 @@ cd "$TFB_ROOT"
 # com K em {1,5,10,20,24}.
 # Os contextos/lookbacks seguem os experimentos anteriores: seq_len em {32,104,246}.
 # IMPORTANTE: NUM_ROLLINGS é forçado alto para usar todas as janelas disponíveis.
+# IMPORTANTE: CLEAR_SAVE_PATH=true evita misturar arquivos antigos de runs parciais no mesmo diretório.
 MODELS_CSV="${MODELS:-duet,timesnet,fedformer,nonstationary}"
 LOSSES_CSV="${LOSSES:-rank_hinge,rank_margin,rank_bpr,ranknet,whr1,whr2,listnet,fingat}"
 SEQ_LENS_CSV="${SEQ_LENS:-32,104,246}"
@@ -74,6 +75,7 @@ export LOSS_FINGAT_MARGIN="${LOSS_FINGAT_MARGIN:-0.0}"
 export LOSS_FINGAT_MOVE_LOGIT_SCALE="${LOSS_FINGAT_MOVE_LOGIT_SCALE:-0.01}"
 export LOSS_INVERSE_NORM="${LOSS_INVERSE_NORM:-true}"
 export NORM="${NORM:-true}"
+export CLEAR_SAVE_PATH="${CLEAR_SAVE_PATH:-true}"
 
 export SAVE_ROOT="${SAVE_ROOT:-b3_custom_loss_test3}"
 RUN_NAME="${MODEL}_${LOSS}_${LOSS_DATA_KIND}_lb${SEQ_LEN}_h${HORIZON}_k${LOSS_K}_seed${SEED:-2021}"
@@ -83,6 +85,7 @@ printf 'TEST3_TASK_ID: %s/%s\n' "$TASK_ID" "$TOTAL"
 printf 'MODEL_IDX=%s LOSS_IDX=%s SEQ_IDX=%s H_IDX=%s\n' "$MODEL_IDX" "$LOSS_IDX" "$SEQ_IDX" "$H_IDX"
 printf 'MODEL=%s LOSS=%s SEQ_LEN=%s HORIZON=%s LOSS_K=%s\n' "$MODEL" "$LOSS" "$SEQ_LEN" "$HORIZON" "$LOSS_K"
 printf 'NUM_ROLLINGS=%s\n' "$NUM_ROLLINGS"
+printf 'CLEAR_SAVE_PATH=%s\n' "$CLEAR_SAVE_PATH"
 printf 'SAVE_PATH=%s\n' "$SAVE_PATH"
 
 bash scripts/slurm_b3_custom_loss_pilot_gpu.sh
