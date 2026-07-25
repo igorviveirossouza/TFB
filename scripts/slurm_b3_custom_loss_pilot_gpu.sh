@@ -43,6 +43,7 @@ TRAIN_RATIO="${TRAIN_RATIO:-0.875}"
 STRIDE="${STRIDE:-1}"
 SEED="${SEED:-2021}"
 SAVE_TRUE_PRED="${SAVE_TRUE_PRED:-true}"
+CLEAR_SAVE_PATH="${CLEAR_SAVE_PATH:-false}"
 LOSS_DATA_KIND="${LOSS_DATA_KIND:-log_return}"
 LOSS_SCORE_KIND="${LOSS_SCORE_KIND:-log_return}"
 LOSS_RANK_LAMBDA="${LOSS_RANK_LAMBDA:-1.0}"
@@ -106,6 +107,14 @@ fi
 
 RUN_NAME="${MODEL}_${LOSS}_${LOSS_DATA_KIND}_lb${SEQ_LEN}_h${HORIZON}_k${LOSS_K}_seed${SEED}"
 SAVE_PATH="${SAVE_PATH:-b3_custom_loss_pilot/${RUN_NAME}}"
+RESULT_DIR="$TFB_ROOT/result/$SAVE_PATH"
+
+case "${CLEAR_SAVE_PATH,,}" in
+  true|1|yes|y|sim|s)
+    echo "Limpando resultado anterior: $RESULT_DIR"
+    rm -rf "$RESULT_DIR"
+    ;;
+esac
 
 STRATEGY_ARGS=$(cat <<EOF
 {"horizon": $HORIZON, "tv_ratio": $TV_RATIO, "train_ratio_in_tv": {"__default__": $TRAIN_RATIO}, "stride": $STRIDE, "num_rollings": $NUM_ROLLINGS, "seed": $SEED, "save_true_pred": $SAVE_TRUE_PRED_JSON, "target_channel": null}
@@ -130,6 +139,8 @@ printf 'ADAPTER: %s\n' "$ADAPTER"
 printf 'LOSS: %s\n' "$LOSS"
 printf 'HORIZON: %s\n' "$HORIZON"
 printf 'LOSS_K: %s\n' "$LOSS_K"
+printf 'NUM_ROLLINGS: %s\n' "$NUM_ROLLINGS"
+printf 'CLEAR_SAVE_PATH: %s\n' "$CLEAR_SAVE_PATH"
 printf 'SAVE_PATH: %s\n' "$SAVE_PATH"
 printf 'STRATEGY_ARGS: %s\n' "$STRATEGY_ARGS"
 printf 'MODEL_HYPER_PARAMS: %s\n' "$MODEL_HYPER_PARAMS"
