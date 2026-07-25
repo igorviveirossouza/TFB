@@ -18,7 +18,7 @@ cd "$TFB_ROOT"
 #   HORIZON = LOSS_K = K
 # com K em {1,5,10,20,24}.
 # Os contextos/lookbacks seguem os experimentos anteriores: seq_len em {32,104,246}.
-# NUM_ROLLINGS alto significa: usar todas as janelas disponíveis no período de teste.
+# IMPORTANTE: NUM_ROLLINGS é forçado alto para usar todas as janelas disponíveis.
 MODELS_CSV="${MODELS:-duet,timesnet,fedformer,nonstationary}"
 LOSSES_CSV="${LOSSES:-rank_hinge,rank_margin,rank_bpr,ranknet,whr1,whr2,listnet,fingat}"
 SEQ_LENS_CSV="${SEQ_LENS:-32,104,246}"
@@ -57,7 +57,8 @@ export LOSS_DATA_KIND="${LOSS_DATA_KIND:-log_return}"
 export LOSS_SCORE_KIND="${LOSS_SCORE_KIND:-log_return}"
 
 export NUM_EPOCHS="${NUM_EPOCHS:-20}"
-export NUM_ROLLINGS="${NUM_ROLLINGS:-999999}"
+# Não herdar NUM_ROLLINGS=512 do ambiente: este experimento deve usar todas as janelas.
+export NUM_ROLLINGS="999999"
 export BATCH_SIZE="${BATCH_SIZE:-8}"
 export PATIENCE="${PATIENCE:-5}"
 export LR="${LR:-0.001}"
