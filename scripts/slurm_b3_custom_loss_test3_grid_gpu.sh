@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH -p medusas_shr
 #SBATCH --gres=gpu:1
-#SBATCH --array=0-479%4
+#SBATCH --array=0-959%4
 #SBATCH --time=24:00:00
 #SBATCH --job-name=b3-loss-t3
 #SBATCH --output=/sonic_home/igor.viveiros/src/TFB/logs/b3-loss-t3-%A_%a.out
@@ -12,8 +12,13 @@ set -euo pipefail
 TFB_ROOT="${TFB_ROOT:-/sonic_home/igor.viveiros/src/TFB}"
 cd "$TFB_ROOT"
 
-# Grade padrão do Teste 3:
-# 4 modelos x 8 losses x 3 lookbacks x 5 horizontes = 480 jobs.
+# Grade padrão do Teste 3, agora com múltiplas bases.
+# Ativo por padrão:
+#   2 bases x 4 modelos x 8 losses x 3 lookbacks x 5 horizontes = 960 jobs.
+# A base log_return já foi rodada e fica comentada para não gastar GPU de novo.
+# Para rodar tudo novamente, descomente a linha log_return abaixo e submeta com:
+#   sbatch --array=0-1439%4 scripts/slurm_b3_custom_loss_test3_grid_gpu.sh
+#
 # Para comparabilidade com o TFB tradicional, sempre impomos:
 #   HORIZON = LOSS_K = K
 # com K em {1,5,10,20,24}.
@@ -25,16 +30,25 @@ LOSSES_CSV="${LOSSES:-rank_hinge,rank_margin,rank_bpr,ranknet,whr1,whr2,listnet,
 SEQ_LENS_CSV="${SEQ_LENS:-32,104,246}"
 HORIZONS_CSV="${HORIZONS:-1,5,10,20,24}"
 
+# Formato: dataset_label:data_file_candidates:loss_data_kind:loss_score_kind
+# data_file_candidates aceita alternativas separadas por "|"; o script usa a primeira existente.
+DATASET_SPECS=(
+  # "log_return:b3_log_returns.csv:log_return:log_return"  # já rodado; descomente só se quiser refazer tudo
+  "simple_return:b3_returns.csv|b3_daily_return.csv:simple_return:simple_return"
+  "price:b3_daily_tfb.csv:price:log_return"
+)
+
 IFS=',' read -r -a MODEL_ARR <<< "$MODELS_CSV"
 IFS=',' read -r -a LOSS_ARR <<< "$LOSSES_CSV"
 IFS=',' read -r -a SEQ_LEN_ARR <<< "$SEQ_LENS_CSV"
 IFS=',' read -r -a HORIZON_ARR <<< "$HORIZONS_CSV"
 
+N_DATASETS=${#DATASET_SPECS[@]}
 N_MODELS=${#MODEL_ARR[@]}
 N_LOSSES=${#LOSS_ARR[@]}
 N_SEQ_LENS=${#SEQ_LEN_ARR[@]}
 N_HORIZONS=${#HORIZON_ARR[@]}
-TOTAL=$((N_MODELS * N_LOSSES * N_SEQ_LENS * N_HORIZONS))
+TOTAL=$((N_DATASETS * N_MODELS * N_LOSSES * N_SEQ_LENS * N_HORIZONS))
 TASK_ID=${SLURM_ARRAY_TASK_ID:-0}
 
 if (( TASK_ID >= TOTAL )); then
@@ -45,7 +59,25 @@ fi
 H_IDX=$((TASK_ID % N_HORIZONS))
 SEQ_IDX=$(((TASK_ID / N_HORIZONS) % N_SEQ_LENS))
 LOSS_IDX=$(((TASK_ID / (N_HORIZONS * N_SEQ_LENS)) % N_LOSSES))
-MODEL_IDX=$((TASK_ID / (N_HORIZONS * N_SEQ_LENS * N_LOSSES)))
+MODEL_IDX=$(((TASK_ID / (N_HORIZONS * N_SEQ_LENS * N_LOSSES)) % N_MODELS))
+DATASET_IDX=$((TASK_ID / (N_HORIZONS * N_SEQ_LENS * N_LOSSES * N_MODELS)))
+
+DATASET_SPEC="${DATASET_SPECS[$DATASET_IDX]}"
+IFS=':' read -r DATASET_LABEL DATA_FILE_CANDIDATES DATA_KIND SCORE_KIND <<< "$DATASET_SPEC"
+
+DATA_FILE=""
+IFS='|' read -r -a DATA_FILE_ARR <<< "$DATA_FILE_CANDIDATES"
+for candidate in "${DATA_FILE_ARR[@]}"; do
+  if [ -f "dataset/forecasting/$candidate" ]; then
+    DATA_FILE="$candidate"
+    break
+  fi
+done
+
+if [ -z "$DATA_FILE" ]; then
+  echo "Nenhum arquivo encontrado para dataset=$DATASET_LABEL. Candidatos: $DATA_FILE_CANDIDATES" >&2
+  exit 3
+fi
 
 export MODEL="${MODEL_ARR[$MODEL_IDX]}"
 export LOSS="${LOSS_ARR[$LOSS_IDX]}"
@@ -53,9 +85,9 @@ export SEQ_LEN="${SEQ_LEN_ARR[$SEQ_IDX]}"
 export HORIZON="${HORIZON_ARR[$H_IDX]}"
 export LOSS_K="$HORIZON"
 
-export DATA_NAME="${DATA_NAME:-b3_log_returns.csv}"
-export LOSS_DATA_KIND="${LOSS_DATA_KIND:-log_return}"
-export LOSS_SCORE_KIND="${LOSS_SCORE_KIND:-log_return}"
+export DATA_NAME="$DATA_FILE"
+export LOSS_DATA_KIND="$DATA_KIND"
+export LOSS_SCORE_KIND="$SCORE_KIND"
 
 export NUM_EPOCHS="${NUM_EPOCHS:-20}"
 # Não herdar NUM_ROLLINGS=512 do ambiente: este experimento deve usar todas as janelas.
@@ -82,7 +114,8 @@ RUN_NAME="${MODEL}_${LOSS}_${LOSS_DATA_KIND}_lb${SEQ_LEN}_h${HORIZON}_k${LOSS_K}
 export SAVE_PATH="${SAVE_ROOT}/${RUN_NAME}"
 
 printf 'TEST3_TASK_ID: %s/%s\n' "$TASK_ID" "$TOTAL"
-printf 'MODEL_IDX=%s LOSS_IDX=%s SEQ_IDX=%s H_IDX=%s\n' "$MODEL_IDX" "$LOSS_IDX" "$SEQ_IDX" "$H_IDX"
+printf 'DATASET_IDX=%s MODEL_IDX=%s LOSS_IDX=%s SEQ_IDX=%s H_IDX=%s\n' "$DATASET_IDX" "$MODEL_IDX" "$LOSS_IDX" "$SEQ_IDX" "$H_IDX"
+printf 'DATASET_LABEL=%s DATA_NAME=%s LOSS_DATA_KIND=%s LOSS_SCORE_KIND=%s\n' "$DATASET_LABEL" "$DATA_NAME" "$LOSS_DATA_KIND" "$LOSS_SCORE_KIND"
 printf 'MODEL=%s LOSS=%s SEQ_LEN=%s HORIZON=%s LOSS_K=%s\n' "$MODEL" "$LOSS" "$SEQ_LEN" "$HORIZON" "$LOSS_K"
 printf 'NUM_ROLLINGS=%s\n' "$NUM_ROLLINGS"
 printf 'CLEAR_SAVE_PATH=%s\n' "$CLEAR_SAVE_PATH"
