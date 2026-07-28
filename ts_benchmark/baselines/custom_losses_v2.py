@@ -77,13 +77,14 @@ def build_loss(config, normalizer_mean=None, normalizer_scale=None):
         ),
         fingat_delta=float(_cfg(config, "loss_fingat_delta", 0.2)),
         direction_scale=float(_cfg(config, "loss_direction_scale", 0.01)),
+        track_components=_as_bool(_cfg(config, "loss_track_components", False)),
     )
 
 
 def loss_accepts_base_value(criterion) -> bool:
-    return isinstance(criterion, FinancialObjectiveV2) or loss_accepts_base_value_v1(
-        criterion
-    )
+    if isinstance(criterion, FinancialObjectiveV2):
+        return criterion.needs_base_value
+    return loss_accepts_base_value_v1(criterion)
 
 
 class FinancialScoreAggregatorV2(nn.Module):
@@ -260,6 +261,7 @@ class FinancialObjectiveV2(nn.Module):
         hybrid_point_normalization: str = "target_std",
         fingat_delta: float = 0.2,
         direction_scale: float = 0.01,
+        track_components: bool = False,
         eps: float = 1e-8,
     ) -> None:
         super().__init__()
@@ -271,6 +273,7 @@ class FinancialObjectiveV2(nn.Module):
         self.hybrid_point_normalization = hybrid_point_normalization.lower()
         self.fingat_delta = float(fingat_delta)
         self.direction_scale = float(direction_scale)
+        self.track_components = bool(track_components)
         self.eps = eps
 
         if not 0.0 <= self.rank_lambda <= 1.0:
@@ -389,6 +392,8 @@ class FinancialObjectiveV2(nn.Module):
         return F.binary_cross_entropy_with_logits(logits, target_move)
 
     def _remember(self, **components: torch.Tensor) -> None:
+        if not self.track_components:
+            return
         self.last_components = {
             name: float(value.detach().cpu()) for name, value in components.items()
         }
