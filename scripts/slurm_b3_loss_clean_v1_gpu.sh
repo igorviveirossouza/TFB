@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH -p medusas_shr
 #SBATCH --gres=gpu:1
-#SBATCH --array=0-1079%4
+#SBATCH --array=0-999%4
 #SBATCH --time=24:00:00
 #SBATCH --job-name=b3-loss-clean-a
 #SBATCH --output=/sonic_home/igor.viveiros/src/TFB/logs/b3-loss-clean-a-%A_%a.out
@@ -15,11 +15,17 @@ cd "$TFB_ROOT"
 # Experimento A — comparação principal.
 # Losses aplicadas ao mesmo alvo: retorno acumulado até H=K.
 # Grade default: 2 datasets x 4 modelos x 9 losses x 3 lookbacks x 5 horizontes = 1080 jobs.
+#
+# O cluster tem MaxArraySize=1001. Por isso este script usa arrays de no máximo
+# 0-999 e permite fatiar a grade por TASK_OFFSET:
+#   sbatch scripts/slurm_b3_loss_clean_v1_gpu.sh
+#   TASK_OFFSET=1000 sbatch --array=0-79%4 scripts/slurm_b3_loss_clean_v1_gpu.sh
 
 MODELS_CSV="${MODELS:-duet,timesnet,fedformer,nonstationary}"
 LOSSES_CSV="${LOSSES:-mse_accum,rank_hinge,rank_margin,rank_bpr,ranknet,whr1,whr2,listnet,fingat}"
 SEQ_LENS_CSV="${SEQ_LENS:-32,104,246}"
 HORIZONS_CSV="${HORIZONS:-1,5,10,20,24}"
+TASK_OFFSET="${TASK_OFFSET:-0}"
 
 # Formato: dataset_label:data_file_candidates:loss_data_kind:loss_score_kind
 DATASET_SPECS=(
@@ -38,7 +44,8 @@ N_LOSSES=${#LOSS_ARR[@]}
 N_SEQ_LENS=${#SEQ_LEN_ARR[@]}
 N_HORIZONS=${#HORIZON_ARR[@]}
 TOTAL=$((N_DATASETS * N_MODELS * N_LOSSES * N_SEQ_LENS * N_HORIZONS))
-TASK_ID=${SLURM_ARRAY_TASK_ID:-0}
+RAW_TASK_ID=${SLURM_ARRAY_TASK_ID:-0}
+TASK_ID=$((RAW_TASK_ID + TASK_OFFSET))
 
 if (( TASK_ID >= TOTAL )); then
   echo "TASK_ID=$TASK_ID fora da grade TOTAL=$TOTAL. Encerrando."
@@ -100,7 +107,7 @@ export SAVE_ROOT="${SAVE_ROOT:-b3_loss_clean_v1}"
 RUN_NAME="${MODEL}_${LOSS}_${LOSS_DATA_KIND}_lb${SEQ_LEN}_h${HORIZON}_k${LOSS_K}_seed${SEED:-2021}"
 export SAVE_PATH="${SAVE_ROOT}/${RUN_NAME}"
 
-printf 'EXPERIMENTO=A TASK_ID=%s/%s\n' "$TASK_ID" "$TOTAL"
+printf 'EXPERIMENTO=A RAW_TASK_ID=%s TASK_OFFSET=%s TASK_ID=%s/%s\n' "$RAW_TASK_ID" "$TASK_OFFSET" "$TASK_ID" "$TOTAL"
 printf 'DATASET=%s DATA_NAME=%s LOSS_DATA_KIND=%s LOSS_SCORE_KIND=%s\n' "$DATASET_LABEL" "$DATA_NAME" "$LOSS_DATA_KIND" "$LOSS_SCORE_KIND"
 printf 'MODEL=%s LOSS=%s SEQ_LEN=%s HORIZON=%s LOSS_K=%s\n' "$MODEL" "$LOSS" "$SEQ_LEN" "$HORIZON" "$LOSS_K"
 printf 'SAVE_PATH=%s\n' "$SAVE_PATH"
