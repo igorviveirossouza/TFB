@@ -3,7 +3,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-POINTWISE_LOSSES = {"mse", "mae", "huber"}
+POINTWISE_LOSSES = {"mse", "mae", "huber", "mse_step", "mse_step_accum"}
+ACCUMULATED_LOSSES = {"mse_accum"}
 RANKING_LOSSES = {
     "rank_hinge",
     "rank_margin",
@@ -14,6 +15,7 @@ RANKING_LOSSES = {
     "listnet",
     "fingat",
 }
+CUSTOM_ACCUM_LOSSES = ACCUMULATED_LOSSES | RANKING_LOSSES
 
 
 def _cfg(config, name, default):
@@ -49,34 +51,21 @@ def build_loss(config, normalizer_mean=None, normalizer_scale=None):
     """
     Factory central de losses para modelos deep do TFB.
 
-    Parâmetros principais via model_hyper_params:
-      loss: mse|mae|huber|rank_hinge|rank_margin|rank_bpr|ranknet|whr1|whr2|listnet|fingat
-      loss_data_kind: log_return|simple_return|price
-      loss_score_kind: log_return|simple_return
-      loss_k: número de passos do horizonte usados pela loss. Se None, usa todo o horizon.
-      loss_rank_lambda: peso do componente de ranking em losses combinadas.
-      loss_margin: margem da Margin Ranking Loss.
-      loss_hinge_margin: margem da Hinge Loss.
-      loss_whr_margin: margem das Weighted Hinge Losses.
-      loss_ranknet_alpha: escala da RankNet.
-      loss_listnet_tau: temperatura da ListNet. Para retornos financeiros, valores pequenos
-        costumam ser necessários; default: 0.01.
-      loss_fingat_delta: peso da BCE de movimento na FinGAT.
-      loss_fingat_margin: margem opcional no componente ranking da FinGAT; default 0 preserva o paper.
-      loss_fingat_move_logit_scale: escala usada para transformar retorno previsto em logit de movimento
-        no adaptador single-head do TFB.
-      loss_inverse_norm: desfaz normalização do TFB dentro da loss antes de construir scores.
+    Grupos usados no experimento B3 clean v1:
+      - mse_step_accum: alias do MSE ponto-a-ponto tradicional. O acúmulo ocorre depois, no backtest.
+      - mse_accum: acumula a saída [B,H,N] até loss_k e aplica MSE no retorno acumulado [B,N].
+      - rank_*/whr*/listnet/fingat: losses cross-sectionais sobre o mesmo score acumulado.
     """
     loss_name = str(_cfg(config, "loss", "mse")).lower()
 
-    if loss_name == "mse":
+    if loss_name in {"mse", "mse_step", "mse_step_accum"}:
         return nn.MSELoss()
     if loss_name == "mae":
         return nn.L1Loss()
     if loss_name == "huber":
         return nn.HuberLoss(delta=float(_cfg(config, "huber_delta", 0.5)))
 
-    if loss_name not in RANKING_LOSSES:
+    if loss_name not in CUSTOM_ACCUM_LOSSES:
         raise ValueError(f"Loss desconhecida: {loss_name}")
 
     return FinancialRankingLoss(
@@ -105,16 +94,11 @@ def loss_accepts_base_value(criterion):
 
 class FinancialRankingLoss(nn.Module):
     """
-    Losses financeiras cross-section para saídas [B, H, N].
+    Losses financeiras para saídas [B,H,N]. A saída temporal é reduzida para scores [B,N].
 
-    A saída temporal do TFB é reduzida internamente para scores [B, N]:
-      - log_return: soma dos log-retornos ao longo de loss_k ou H;
-      - simple_return: retorno simples acumulado ao longo de loss_k ou H;
-      - price: retorno entre preço-base t e preço previsto/observado em t+loss_k ou t+H.
-
-    Observação sobre FinGAT: o paper original usa duas saídas, uma para retorno e outra para
-    movimento. Como os modelos TFB aqui têm uma única cabeça [B,H,N], implementamos um adaptador
-    single-head: o score de retorno é usado no ranking e, reescalado, como logit para a BCE de movimento.
+    - log_return: soma dos log-retornos até loss_k ou H.
+    - simple_return: retorno simples acumulado até loss_k ou H.
+    - price: retorno entre preço-base e preço previsto/observado no último passo usado.
     """
 
     def __init__(
@@ -155,18 +139,12 @@ class FinancialRankingLoss(nn.Module):
         self.eps = eps
 
         if normalizer_mean is not None:
-            self.register_buffer(
-                "normalizer_mean",
-                torch.as_tensor(normalizer_mean, dtype=torch.float32).view(1, 1, -1),
-            )
+            self.register_buffer("normalizer_mean", torch.as_tensor(normalizer_mean, dtype=torch.float32).view(1, 1, -1))
         else:
             self.normalizer_mean = None
 
         if normalizer_scale is not None:
-            self.register_buffer(
-                "normalizer_scale",
-                torch.as_tensor(normalizer_scale, dtype=torch.float32).view(1, 1, -1),
-            )
+            self.register_buffer("normalizer_scale", torch.as_tensor(normalizer_scale, dtype=torch.float32).view(1, 1, -1))
         else:
             self.normalizer_scale = None
 
@@ -179,30 +157,20 @@ class FinancialRankingLoss(nn.Module):
             return x
         if self.normalizer_mean is None or self.normalizer_scale is None:
             return x
-
         n = x.shape[-1]
         mean = self.normalizer_mean[..., :n].to(device=x.device, dtype=x.dtype)
         scale = self.normalizer_scale[..., :n].to(device=x.device, dtype=x.dtype)
-
         if x.dim() == 2:
             return x * scale.squeeze(1) + mean.squeeze(1)
         return x * scale + mean
 
     def _select_loss_horizon(self, pred, target):
         if pred.shape[1] != target.shape[1]:
-            raise ValueError(
-                "pred e target devem ter o mesmo horizonte temporal dentro da loss: "
-                f"pred={pred.shape}, target={target.shape}"
-            )
-
+            raise ValueError(f"pred e target devem ter o mesmo H: pred={pred.shape}, target={target.shape}")
         if self.loss_k is None:
             return pred, target
-
         if self.loss_k > pred.shape[1]:
-            raise ValueError(
-                f"loss_k={self.loss_k} é maior que o horizonte disponível H={pred.shape[1]}."
-            )
-
+            raise ValueError(f"loss_k={self.loss_k} maior que H={pred.shape[1]}.")
         return pred[:, : self.loss_k, :], target[:, : self.loss_k, :]
 
     def _scores_from_series(self, pred, target, base_value=None):
@@ -216,43 +184,32 @@ class FinancialRankingLoss(nn.Module):
         if data_kind in {"log_return", "log_returns", "log_retornos"}:
             pred_score = pred.sum(dim=1)
             target_score = target.sum(dim=1)
-
             if score_kind in {"simple_return", "simple_returns", "returns", "retornos"}:
                 pred_score = torch.expm1(pred_score)
                 target_score = torch.expm1(target_score)
-
             return pred_score, target_score
 
         if data_kind in {"simple_return", "simple_returns", "return", "returns", "retornos", "retornos_simples"}:
             pred_safe = torch.clamp(pred, min=-1.0 + self.eps)
             target_safe = torch.clamp(target, min=-1.0 + self.eps)
-
             if score_kind in {"log_return", "log_returns", "log_retornos"}:
                 pred_score = torch.log1p(pred_safe).sum(dim=1)
                 target_score = torch.log1p(target_safe).sum(dim=1)
             else:
                 pred_score = torch.prod(1.0 + pred_safe, dim=1) - 1.0
                 target_score = torch.prod(1.0 + target_safe, dim=1) - 1.0
-
             return pred_score, target_score
 
         if data_kind in {"price", "prices", "preco", "preços"}:
             if base_value is None:
-                raise ValueError(
-                    "Loss com loss_data_kind='price' exige base_value: último preço observado antes da janela futura."
-                )
-
-            base = self._maybe_inverse_norm(base_value)
+                raise ValueError("loss_data_kind='price' exige base_value.")
+            base = torch.clamp(self._maybe_inverse_norm(base_value), min=self.eps)
             pred_last = pred[:, -1, :]
             target_last = target[:, -1, :]
-
-            base = torch.clamp(base, min=self.eps)
             pred_ratio = torch.clamp(pred_last, min=self.eps) / base
             target_ratio = torch.clamp(target_last, min=self.eps) / base
-
             if score_kind in {"simple_return", "simple_returns", "returns", "retornos"}:
                 return pred_ratio - 1.0, target_ratio - 1.0
-
             return torch.log(pred_ratio), torch.log(target_ratio)
 
         raise ValueError(f"loss_data_kind inválido: {self.data_kind}")
@@ -267,31 +224,26 @@ class FinancialRankingLoss(nn.Module):
     def _masked_mean(self, values, mask):
         values = values[mask]
         if values.numel() == 0:
-            return torch.zeros((), device=mask.device, dtype=values.dtype if values.numel() else torch.float32)
+            return torch.zeros((), device=mask.device, dtype=torch.float32)
         return values.mean()
 
     def _pairwise_margin(self, pred_score, target_score, margin, weighted=False, whr_mode="whr1"):
         pred_diff, _, s_ij, valid = self._pairwise_terms(pred_score, target_score)
         loss = F.relu(margin - s_ij * pred_diff)
-
         if weighted:
             weights = self._rank_weights(target_score, whr_mode)
-            pair_weights = weights.unsqueeze(2) * weights.unsqueeze(1)
-            loss = loss * pair_weights
-
+            loss = loss * weights.unsqueeze(2) * weights.unsqueeze(1)
         return self._masked_mean(loss, valid)
 
     def _bpr(self, pred_score, target_score):
         pred_diff = pred_score.unsqueeze(2) - pred_score.unsqueeze(1)
         target_diff = target_score.unsqueeze(2) - target_score.unsqueeze(1)
         valid = target_diff > 0
-        loss = F.softplus(-pred_diff)
-        return self._masked_mean(loss, valid)
+        return self._masked_mean(F.softplus(-pred_diff), valid)
 
     def _ranknet(self, pred_score, target_score):
         pred_diff, _, s_ij, valid = self._pairwise_terms(pred_score, target_score)
-        loss = F.softplus(-self.ranknet_alpha * s_ij * pred_diff)
-        return self._masked_mean(loss, valid)
+        return self._masked_mean(F.softplus(-self.ranknet_alpha * s_ij * pred_diff), valid)
 
     def _listnet(self, pred_score, target_score):
         tau = max(self.listnet_tau, self.eps)
@@ -306,14 +258,12 @@ class FinancialRankingLoss(nn.Module):
         raw = -(pred_diff * target_diff)
         if self.fingat_margin > 0:
             raw = raw + self.fingat_margin
-        loss = F.relu(raw)
-        return self._masked_mean(loss, valid)
+        return self._masked_mean(F.relu(raw), valid)
 
     def _fingat_move(self, pred_score, target_score):
         target_move = (target_score > 0).to(dtype=pred_score.dtype)
         scale = max(self.fingat_move_logit_scale, self.eps)
-        move_logits = pred_score / scale
-        return F.binary_cross_entropy_with_logits(move_logits, target_move)
+        return F.binary_cross_entropy_with_logits(pred_score / scale, target_move)
 
     def _rank_weights(self, target_score, mode):
         n = target_score.shape[1]
@@ -321,11 +271,8 @@ class FinancialRankingLoss(nn.Module):
         ranks = torch.empty_like(order, dtype=target_score.dtype)
         rank_values = torch.arange(1, n + 1, device=target_score.device, dtype=target_score.dtype)
         ranks.scatter_(1, order, rank_values.unsqueeze(0).expand_as(ranks))
-
         if mode == "whr2":
-            denom = max(n - 1, 1)
-            return torch.exp(-(ranks - 1.0) / denom)
-
+            return torch.exp(-(ranks - 1.0) / max(n - 1, 1))
         return (n - ranks + 1.0) / n
 
     def _combined(self, pred_score, target_score, rank_loss):
@@ -335,37 +282,23 @@ class FinancialRankingLoss(nn.Module):
     def forward(self, pred, target, base_value=None):
         pred_score, target_score = self._scores_from_series(pred, target, base_value=base_value)
 
+        if self.loss_name == "mse_accum":
+            return F.mse_loss(pred_score, target_score)
+
         if self.loss_name == "rank_hinge":
-            rank_loss = self._pairwise_margin(pred_score, target_score, self.hinge_margin)
-            return self._combined(pred_score, target_score, rank_loss)
-
+            return self._combined(pred_score, target_score, self._pairwise_margin(pred_score, target_score, self.hinge_margin))
         if self.loss_name == "rank_margin":
-            rank_loss = self._pairwise_margin(pred_score, target_score, self.margin)
-            return self._combined(pred_score, target_score, rank_loss)
-
+            return self._combined(pred_score, target_score, self._pairwise_margin(pred_score, target_score, self.margin))
         if self.loss_name == "rank_bpr":
-            rank_loss = self._bpr(pred_score, target_score)
-            return self._combined(pred_score, target_score, rank_loss)
-
+            return self._combined(pred_score, target_score, self._bpr(pred_score, target_score))
         if self.loss_name == "ranknet":
-            rank_loss = self._ranknet(pred_score, target_score)
-            return self._combined(pred_score, target_score, rank_loss)
-
+            return self._combined(pred_score, target_score, self._ranknet(pred_score, target_score))
         if self.loss_name == "whr1":
-            rank_loss = self._pairwise_margin(
-                pred_score, target_score, self.whr_margin, weighted=True, whr_mode="whr1"
-            )
-            return self._combined(pred_score, target_score, rank_loss)
-
+            return self._combined(pred_score, target_score, self._pairwise_margin(pred_score, target_score, self.whr_margin, weighted=True, whr_mode="whr1"))
         if self.loss_name == "whr2":
-            rank_loss = self._pairwise_margin(
-                pred_score, target_score, self.whr_margin, weighted=True, whr_mode="whr2"
-            )
-            return self._combined(pred_score, target_score, rank_loss)
-
+            return self._combined(pred_score, target_score, self._pairwise_margin(pred_score, target_score, self.whr_margin, weighted=True, whr_mode="whr2"))
         if self.loss_name == "listnet":
             return self._listnet(pred_score, target_score)
-
         if self.loss_name == "fingat":
             rank_loss = self._fingat_rank(pred_score, target_score)
             move_loss = self._fingat_move(pred_score, target_score)
