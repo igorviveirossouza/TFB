@@ -12,6 +12,7 @@ set -euo pipefail
 
 TFB_ROOT="${TFB_ROOT:-/sonic_home/igor.viveiros/src/TFB}"
 CLEAN_ROOT="${CLEAN_ROOT:-/sonic_home/igor.viveiros/clean}"
+PRED_ROOT="${PRED_ROOT:-/snfs2/igor.viveiros/previsoes}"
 PYTHON_BIN="${PYTHON_BIN:-/sonic_home/igor.viveiros/py310/bin/python}"
 EXPERIMENT_ID="${EXPERIMENT_ID:-b3_cumulative_target_v1}"
 N_CONVERT_SHARDS="${N_CONVERT_SHARDS:-16}"
@@ -44,7 +45,7 @@ if [ -z "$SIMPLE_RETURN_PATH" ]; then
 fi
 
 TFB_RESULT_ROOT="$TFB_ROOT/result/b3_cumulative_target/$EXPERIMENT_ID"
-OUTPUT_ROOT="$CLEAN_ROOT/previsoes/tfb_cumulative_target/$EXPERIMENT_ID"
+OUTPUT_ROOT="$PRED_ROOT/previsoes/tfb_cumulative_target/$EXPERIMENT_ID"
 DATASET_MAP=$(cat <<EOF
 {"simple_return": "$SIMPLE_RETURN_PATH", "log_return": "$TFB_ROOT/dataset/forecasting/b3_log_returns.csv", "price": "$TFB_ROOT/dataset/forecasting/b3_daily_tfb.csv"}
 EOF

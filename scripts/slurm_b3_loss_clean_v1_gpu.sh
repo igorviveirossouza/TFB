@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH -p medusas_shr
 #SBATCH --gres=gpu:1
-#SBATCH --array=0-999%4
+#SBATCH --array=0-999%8
 #SBATCH --time=24:00:00
 #SBATCH --job-name=b3-loss-clean-a
 #SBATCH --output=/sonic_home/igor.viveiros/src/TFB/logs/b3-loss-clean-a-%A_%a.out

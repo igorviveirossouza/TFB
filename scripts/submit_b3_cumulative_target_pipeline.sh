@@ -14,6 +14,7 @@ set -euo pipefail
 
 TFB_ROOT="${TFB_ROOT:-/sonic_home/igor.viveiros/src/TFB}"
 PARTITION="${PARTITION:-medusas_shr}"
+PRED_ROOT="${PRED_ROOT:-/snfs2/igor.viveiros/previsoes}"
 EXPERIMENT_ID="${EXPERIMENT_ID:-b3_cumulative_target_$(date +%Y%m%d_%H%M%S)}"
 
 MODELS="${MODELS:-DUET,TimesNet,FEDformer,Nonstationary_Transformer}"
@@ -64,7 +65,7 @@ fi
 mkdir -p "$TFB_ROOT/logs"
 
 # As variáveis são herdadas pelos jobs. Evitamos --export com listas contendo vírgulas.
-export TFB_ROOT EXPERIMENT_ID MODELS LOSSES DATASETS SEQ_LENS HORIZONS SEED
+export TFB_ROOT PRED_ROOT EXPERIMENT_ID MODELS LOSSES DATASETS SEQ_LENS HORIZONS SEED
 export N_CONVERT_SHARDS
 
 printf '============================================================\n'
@@ -116,6 +117,6 @@ else
 fi
 
 printf '\nRESULTADOS TFB: %s/result/b3_cumulative_target/%s\n' "$TFB_ROOT" "$EXPERIMENT_ID"
-printf 'PREVISÕES:      /sonic_home/igor.viveiros/clean/previsoes/tfb_cumulative_target/%s\n' "$EXPERIMENT_ID"
+printf 'PREVISÕES:      %s/tfb_cumulative_target/%s\n' "$PRED_ROOT" "$EXPERIMENT_ID"
 printf 'JOBS ESTIMAÇÃO: %s\n' "${ESTIMATION_JOB_IDS[*]}"
 printf 'JOB CONVERSÃO:  %s\n' "$CONVERT_JOB_ID"

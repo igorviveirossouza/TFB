@@ -1,0 +1,35 @@
+{
+  "experiment_id": "20260728_213734",
+  "submitted_from_branch": "speed",
+  "submitted_from_commit": "ff4e86af9db89d8e562ec1041f8c443b294aefbb",
+  "expected_runs": 720,
+  "grid": {
+    "models": "duet,timesnet,fedformer,nonstationary",
+    "losses": "mse_path_v2,mse_score_v2,ranknet_v2,ranknet_hybrid_v2,listnet_v2,fingat_v2",
+    "datasets": "log_return,simple_return",
+    "seq_lens": "32,104,246",
+    "horizons": "1,5,10,20,24",
+    "seeds": "2021"
+  },
+  "parallelism": {
+    "max_gpu_parallel": 8,
+    "conversion_shards": 16,
+    "max_conversion_parallel": 8,
+    "backtest_shards": 16,
+    "max_backtest_parallel": 8
+  },
+  "jobs": {
+    "verify": "28877",
+    "train_gpu_array": "28878",
+    "convert_cpu_array": "28879",
+    "validate_conversion": "28880",
+    "backtest_cpu_array": "28881",
+    "finalize_statistics": "28882"
+  },
+  "paths": {
+    "tfb_results": "/sonic_home/igor.viveiros/src/TFB/result/b3_custom_losses_v2/20260728_213734",
+    "converted_predictions": "/sonic_home/igor.viveiros/clean/previsoes/tfb_custom_losses_v2/20260728_213734",
+    "backtests": "/sonic_home/igor.viveiros/clean/simulacoes/tfb_custom_losses_v2/20260728_213734",
+    "statistics": "/sonic_home/igor.viveiros/clean/simulacoes/tfb_custom_losses_v2/20260728_213734/estatisticas"
+  }
+}

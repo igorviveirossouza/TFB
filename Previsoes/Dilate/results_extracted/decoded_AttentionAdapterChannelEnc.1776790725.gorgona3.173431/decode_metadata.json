@@ -1,8 +1,0 @@
-{
-  "source_name": "AttentionAdapterChannelEnc.1776790725.gorgona3.173431.csv",
-  "row_index": 0,
-  "model_name": "AttentionAdapterChannelEnc",
-  "file_name": "b3_daily_tfb.csv",
-  "fit_time": 6072.710678815842,
-  "inference_time": 0.0449895858764648
-}
