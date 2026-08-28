@@ -29,18 +29,18 @@ set -euo pipefail
 TFB_ROOT="${TFB_ROOT:-/sonic_home/igor.viveiros/src/TFB}"
 VENV_PATH="${VENV_PATH:-/sonic_home/igor.viveiros/py310/bin/activate}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
-CONFIG_PATH="${CONFIG_PATH:-config/rolling_forecast_config.json}"
+CONFIG_PATH="${CONFIG_PATH:-rolling_forecast_config.json}"
 OUT_ROOT="${OUT_ROOT:-/snfs2/igor.viveiros/previsoes/tfb_check}"
 LOG_ROOT="${LOG_ROOT:-${TFB_ROOT}/logs/tfb_check}"
 
-GPU_PARTITION="${GPU_PARTITION:-medusas_shr}"
-CPU_PARTITION="${CPU_PARTITION:-gorgonas}"
+GPU_PARTITION="medusas_shr"
+CPU_PARTITION="medusas_shr"
 GPU_TIME="${GPU_TIME:-48:00:00}"
 CPU_TIME="${CPU_TIME:-24:00:00}"
 MAX_GPU_JOBS="${MAX_GPU_JOBS:-8}"
 MAX_CPU_JOBS="${MAX_CPU_JOBS:-4}"
 
-SEED=2021
+SEED=2026
 TV_RATIO=0.8
 TRAIN_RATIO_IN_TV=0.875
 STRIDE=1
@@ -99,7 +99,7 @@ prepare_worker() {
   cd "$TFB_ROOT"
   mkdir -p "$OUT_ROOT" "$LOG_ROOT"
 
-  if [[ ! -f "$CONFIG_PATH" ]]; then
+if [[ ! -f "${TFB_ROOT}/config/${CONFIG_PATH}" ]]; then
     echo "ERRO: config TFB nao encontrada: ${TFB_ROOT}/${CONFIG_PATH}" >&2
     exit 2
   fi

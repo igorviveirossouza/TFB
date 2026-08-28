@@ -1,0 +1,53 @@
+2026-08-27 21:59:56 [INFO] ts_benchmark.data.data_source(126): Start loading 1 series in parallel
+2026-08-27 21:59:56 [INFO] ts_benchmark.data.data_source(135): Data loading finished.
+2026-08-27 21:59:56 [INFO] ts_benchmark.data.suites.global_storage(40): Data server starting...
+2026-08-27 21:59:56 [INFO] ts_benchmark.data.suites.global_storage(41): Start sending data to the global storage.
+2026-08-27 21:59:56 [INFO] ts_benchmark.data.suites.global_storage(46): Notifying all workers to sync data from the global storage.
+2026-08-27 21:59:56 [INFO] ts_benchmark.data.suites.global_storage(49): Data server started.
+2026-08-27 21:59:56 [INFO] ts_benchmark.models.model_loader(102): Trying to load model ts_benchmark.baselines.time_series_library.TimesNet
+scheduling TimesNet:   0%|          | 0/1 [00:00<?, ?it/s]2026-08-27 21:59:57 [WARNING] ts_benchmark.baselines.deep_forecasting_model_base(67): The model parameter horizon is deprecated. Please use pred_len.
+scheduling TimesNet: 100%|██████████| 1/1 [00:52<00:00, 52.71s/it]scheduling TimesNet: 100%|██████████| 1/1 [00:52<00:00, 52.71s/it]
+collecting TimesNet:   0%|          | 0/1 [00:00<?, ?it/s]collecting TimesNet: 100%|██████████| 1/1 [00:00<00:00, 102300.10it/s]collecting TimesNet: 100%|██████████| 1/1 [00:00<00:00, 14315.03it/s] 
+2026-08-27 22:00:50 [INFO] ts_benchmark.recording(148): Traceback (most recent call last):
+  File "/sonic_home/igor.viveiros/src/TFB/ts_benchmark/evaluation/strategy/forecasting.py", line 51, in execute
+    single_series_results = self._execute(
+  File "/sonic_home/igor.viveiros/src/TFB/ts_benchmark/evaluation/strategy/rolling_forecast.py", line 271, in _execute
+    return self._eval_batch(series, meta_info, model, series_name)
+  File "/sonic_home/igor.viveiros/src/TFB/ts_benchmark/evaluation/strategy/rolling_forecast.py", line 422, in _eval_batch
+    fit_method(
+  File "/sonic_home/igor.viveiros/src/TFB/ts_benchmark/baselines/deep_forecasting_model_base.py", line 381, in forecast_fit
+    out_loss = self._process(input, target, input_mark, target_mark)
+  File "/sonic_home/igor.viveiros/src/TFB/ts_benchmark/baselines/time_series_library/adapters_for_transformers.py", line 89, in _process
+    output = self.model(input, input_mark, dec_input, target_mark)
+  File "/sonic_home/igor.viveiros/py310/lib64/python3.9/site-packages/torch/nn/modules/module.py", line 1773, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/sonic_home/igor.viveiros/py310/lib64/python3.9/site-packages/torch/nn/modules/module.py", line 1784, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/sonic_home/igor.viveiros/src/TFB/ts_benchmark/baselines/time_series_library/models/TimesNet.py", line 223, in forward
+    dec_out = self.forecast(x_enc, x_mark_enc, x_dec, x_mark_dec)
+  File "/sonic_home/igor.viveiros/src/TFB/ts_benchmark/baselines/time_series_library/models/TimesNet.py", line 134, in forecast
+    enc_out = self.layer_norm(self.model[i](enc_out))
+  File "/sonic_home/igor.viveiros/py310/lib64/python3.9/site-packages/torch/nn/modules/module.py", line 1773, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/sonic_home/igor.viveiros/py310/lib64/python3.9/site-packages/torch/nn/modules/module.py", line 1784, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/sonic_home/igor.viveiros/src/TFB/ts_benchmark/baselines/time_series_library/models/TimesNet.py", line 67, in forward
+    out = self.conv(out)
+  File "/sonic_home/igor.viveiros/py310/lib64/python3.9/site-packages/torch/nn/modules/module.py", line 1773, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/sonic_home/igor.viveiros/py310/lib64/python3.9/site-packages/torch/nn/modules/module.py", line 1784, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/sonic_home/igor.viveiros/py310/lib64/python3.9/site-packages/torch/nn/modules/container.py", line 244, in forward
+    input = module(input)
+  File "/sonic_home/igor.viveiros/py310/lib64/python3.9/site-packages/torch/nn/modules/module.py", line 1773, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/sonic_home/igor.viveiros/py310/lib64/python3.9/site-packages/torch/nn/modules/module.py", line 1784, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/sonic_home/igor.viveiros/src/TFB/ts_benchmark/baselines/time_series_library/layers/Conv_Blocks.py", line 31, in forward
+    res = torch.stack(res_list, dim=-1).mean(-1)
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 102.00 MiB. GPU 0 has a total capacity of 31.40 GiB of which 59.88 MiB is free. Process 38283 has 22.41 GiB memory in use. Process 38467 has 5.11 GiB memory in use. Including non-PyTorch memory, this process has 3.80 GiB memory in use. Of the allocated memory 2.89 GiB is allocated by PyTorch, and 270.97 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+
+CUDA out of memory. Tried to allocate 102.00 MiB. GPU 0 has a total capacity of 31.40 GiB of which 59.88 MiB is free. Process 38283 has 22.41 GiB memory in use. Process 38467 has 5.11 GiB memory in use. Including non-PyTorch memory, this process has 3.80 GiB memory in use. Of the allocated memory 2.89 GiB is allocated by PyTorch, and 270.97 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+2026-08-27 22:00:50 [INFO] ts_benchmark.recording(103): loading log file /sonic_home/igor.viveiros/src/TFB/result/tfb_check/log_retornos_TimesNet_lb246_h24_k24_seed2026/TimesNet.1787878850.medusa6.207247.csv.tar.gz
+2026-08-27 22:00:50 [INFO] ts_benchmark.report.utils.leaderboard(164): There are 7 NaN values in the leaderboard due to a higher-than-threshold NaN ratio in the corresponding model+algorithm pairs.
+ERRO: nenhuma previsao decodificada com h=24.

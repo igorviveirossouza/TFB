@@ -1,0 +1,11 @@
+2026-08-27 22:55:04 [INFO] ts_benchmark.data.data_source(126): Start loading 1 series in parallel
+2026-08-27 22:55:05 [INFO] ts_benchmark.data.data_source(135): Data loading finished.
+2026-08-27 22:55:05 [INFO] ts_benchmark.data.suites.global_storage(40): Data server starting...
+2026-08-27 22:55:05 [INFO] ts_benchmark.data.suites.global_storage(41): Start sending data to the global storage.
+2026-08-27 22:55:05 [INFO] ts_benchmark.data.suites.global_storage(46): Notifying all workers to sync data from the global storage.
+2026-08-27 22:55:05 [INFO] ts_benchmark.data.suites.global_storage(49): Data server started.
+2026-08-27 22:55:05 [INFO] ts_benchmark.models.model_loader(102): Trying to load model ts_benchmark.baselines.time_series_library.Nonstationary_Transformer
+scheduling Nonstationary_Transformer:   0%|          | 0/1 [00:00<?, ?it/s]2026-08-27 22:55:07 [WARNING] ts_benchmark.baselines.deep_forecasting_model_base(67): The model parameter horizon is deprecated. Please use pred_len.
+scheduling Nonstationary_Transformer: 100%|██████████| 1/1 [00:07<00:00,  7.09s/it]scheduling Nonstationary_Transformer: 100%|██████████| 1/1 [00:07<00:00,  7.09s/it]
+collecting Nonstationary_Transformer:   0%|          | 0/1 [00:00<?, ?it/s]collecting Nonstationary_Transformer: 100%|██████████| 1/1 [00:00<00:00, 91180.52it/s]collecting Nonstationary_Transformer: 100%|██████████| 1/1 [00:00<00:00, 16912.52it/s]
+2026-08-27 22:55:15 [INFO] ts_benchmark.recording(103): loading log file /sonic_home/igor.viveiros/src/TFB/result/tfb_check/log_retornos_Nonstationary_Transformer_lb32_h24_k24_seed2026/Nonstationary_Transformer.1787882114.medusa4.725762.csv.tar.gz

@@ -1,0 +1,11 @@
+2026-08-27 21:44:46 [INFO] ts_benchmark.data.data_source(126): Start loading 1 series in parallel
+2026-08-27 21:44:46 [INFO] ts_benchmark.data.data_source(135): Data loading finished.
+2026-08-27 21:44:46 [INFO] ts_benchmark.data.suites.global_storage(40): Data server starting...
+2026-08-27 21:44:46 [INFO] ts_benchmark.data.suites.global_storage(41): Start sending data to the global storage.
+2026-08-27 21:44:46 [INFO] ts_benchmark.data.suites.global_storage(46): Notifying all workers to sync data from the global storage.
+2026-08-27 21:44:46 [INFO] ts_benchmark.data.suites.global_storage(49): Data server started.
+2026-08-27 21:44:46 [INFO] ts_benchmark.models.model_loader(102): Trying to load model ts_benchmark.baselines.duet.DUET
+scheduling DUET:   0%|          | 0/1 [00:00<?, ?it/s]2026-08-27 21:44:51 [WARNING] ts_benchmark.baselines.deep_forecasting_model_base(67): The model parameter horizon is deprecated. Please use pred_len.
+scheduling DUET: 100%|██████████| 1/1 [00:31<00:00, 31.31s/it]scheduling DUET: 100%|██████████| 1/1 [00:31<00:00, 31.31s/it]
+collecting DUET:   0%|          | 0/1 [00:00<?, ?it/s]collecting DUET: 100%|██████████| 1/1 [00:00<00:00, 119837.26it/s]collecting DUET: 100%|██████████| 1/1 [00:00<00:00, 19152.07it/s] 
+2026-08-27 21:45:23 [INFO] ts_benchmark.recording(103): loading log file /sonic_home/igor.viveiros/src/TFB/result/tfb_check/log_retornos_DUET_lb246_h24_k24_seed2026/DUET.1787877923.medusa6.202613.csv.tar.gz
