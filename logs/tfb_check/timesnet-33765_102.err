@@ -1,11 +1,0 @@
-2026-08-28 09:36:00 [INFO] ts_benchmark.data.data_source(126): Start loading 1 series in parallel
-2026-08-28 09:36:01 [INFO] ts_benchmark.data.data_source(135): Data loading finished.
-2026-08-28 09:36:01 [INFO] ts_benchmark.data.suites.global_storage(40): Data server starting...
-2026-08-28 09:36:01 [INFO] ts_benchmark.data.suites.global_storage(41): Start sending data to the global storage.
-2026-08-28 09:36:01 [INFO] ts_benchmark.data.suites.global_storage(46): Notifying all workers to sync data from the global storage.
-2026-08-28 09:36:01 [INFO] ts_benchmark.data.suites.global_storage(49): Data server started.
-2026-08-28 09:36:01 [INFO] ts_benchmark.models.model_loader(102): Trying to load model ts_benchmark.baselines.time_series_library.TimesNet
-scheduling TimesNet:   0%|          | 0/1 [00:00<?, ?it/s]2026-08-28 09:36:02 [WARNING] ts_benchmark.baselines.deep_forecasting_model_base(67): The model parameter horizon is deprecated. Please use pred_len.
-scheduling TimesNet: 100%|██████████| 1/1 [01:54<00:00, 114.18s/it]scheduling TimesNet: 100%|██████████| 1/1 [01:54<00:00, 114.18s/it]
-collecting TimesNet:   0%|          | 0/1 [00:00<?, ?it/s]collecting TimesNet: 100%|██████████| 1/1 [00:00<00:00, 104857.60it/s]collecting TimesNet: 100%|██████████| 1/1 [00:00<00:00, 19152.07it/s] 
-2026-08-28 09:37:56 [INFO] ts_benchmark.recording(103): loading log file /sonic_home/igor.viveiros/src/TFB/result/tfb_check/log_retornos_TimesNet_lb246_h1_k1_seed2026/TimesNet.1787920676.medusa5.211326.csv.tar.gz

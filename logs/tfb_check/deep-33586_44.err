@@ -1,11 +1,0 @@
-2026-08-27 19:34:24 [INFO] ts_benchmark.data.data_source(126): Start loading 1 series in parallel
-2026-08-27 19:34:24 [INFO] ts_benchmark.data.data_source(135): Data loading finished.
-2026-08-27 19:34:24 [INFO] ts_benchmark.data.suites.global_storage(40): Data server starting...
-2026-08-27 19:34:24 [INFO] ts_benchmark.data.suites.global_storage(41): Start sending data to the global storage.
-2026-08-27 19:34:24 [INFO] ts_benchmark.data.suites.global_storage(46): Notifying all workers to sync data from the global storage.
-2026-08-27 19:34:24 [INFO] ts_benchmark.data.suites.global_storage(49): Data server started.
-2026-08-27 19:34:24 [INFO] ts_benchmark.models.model_loader(102): Trying to load model ts_benchmark.baselines.time_series_library.FEDformer
-scheduling FEDformer:   0%|          | 0/1 [00:00<?, ?it/s]2026-08-27 19:34:26 [WARNING] ts_benchmark.baselines.deep_forecasting_model_base(67): The model parameter horizon is deprecated. Please use pred_len.
-scheduling FEDformer: 100%|██████████| 1/1 [01:01<00:00, 61.37s/it]scheduling FEDformer: 100%|██████████| 1/1 [01:01<00:00, 61.37s/it]
-collecting FEDformer:   0%|          | 0/1 [00:00<?, ?it/s]collecting FEDformer: 100%|██████████| 1/1 [00:00<00:00, 127100.12it/s]collecting FEDformer: 100%|██████████| 1/1 [00:00<00:00, 20460.02it/s] 
-2026-08-27 19:35:28 [INFO] ts_benchmark.recording(103): loading log file /sonic_home/igor.viveiros/src/TFB/result/tfb_check/retornos_simples_FEDformer_lb104_h10_k10_seed2026/FEDformer.1787870127.medusa6.117264.csv.tar.gz

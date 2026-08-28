@@ -1,12 +1,0 @@
-2026-08-27 18:00:05 [INFO] ts_benchmark.data.data_source(126): Start loading 1 series in parallel
-2026-08-27 18:00:05 [INFO] ts_benchmark.data.data_source(135): Data loading finished.
-2026-08-27 18:00:05 [INFO] ts_benchmark.data.suites.global_storage(40): Data server starting...
-2026-08-27 18:00:05 [INFO] ts_benchmark.data.suites.global_storage(41): Start sending data to the global storage.
-2026-08-27 18:00:05 [INFO] ts_benchmark.data.suites.global_storage(46): Notifying all workers to sync data from the global storage.
-2026-08-27 18:00:05 [INFO] ts_benchmark.data.suites.global_storage(49): Data server started.
-2026-08-27 18:00:05 [INFO] ts_benchmark.models.model_loader(102): Trying to load model ts_benchmark.baselines.self_impl.VAR_model
-scheduling VAR_model:   0%|          | 0/1 [00:00<?, ?it/s]/sonic_home/igor.viveiros/py310/lib64/python3.9/site-packages/statsmodels/tsa/base/tsa_model.py:473: ValueWarning: No frequency information was provided, so inferred frequency ns will be used.
-  self._init_dates(dates, freq)
-scheduling VAR_model: 100%|██████████| 1/1 [00:02<00:00,  2.06s/it]scheduling VAR_model: 100%|██████████| 1/1 [00:02<00:00,  2.06s/it]
-collecting VAR_model:   0%|          | 0/1 [00:00<?, ?it/s]collecting VAR_model: 100%|██████████| 1/1 [00:00<00:00, 102300.10it/s]collecting VAR_model: 100%|██████████| 1/1 [00:00<00:00, 16513.01it/s] 
-2026-08-27 18:00:20 [INFO] ts_benchmark.recording(103): loading log file /sonic_home/igor.viveiros/src/TFB/result/tfb_check/retornos_simples_VAR_lags13_h10_k10_seed2026/VAR_model.1787864418.medusa6.43946.csv.tar.gz

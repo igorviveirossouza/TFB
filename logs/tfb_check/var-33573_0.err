@@ -1,4 +1,0 @@
-Traceback (most recent call last):
-  File "/sonic_home/igor.viveiros/src/TFB/./scripts/run_benchmark.py", line 316, in <module>
-    with open(os.path.join(CONFIG_PATH, args.config_path), "r") as file:
-FileNotFoundError: [Errno 2] No such file or directory: '/sonic_home/igor.viveiros/src/TFB/config/config/rolling_forecast_config.json'
