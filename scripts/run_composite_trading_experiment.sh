@@ -8,6 +8,11 @@ set -euo pipefail
 # Supported datasets: retornos_simples, log_retornos, prices.
 # Prices are supported but are NOT included by default.
 # Only pairs (H,K) satisfying K <= H and H % K == 0 are run.
+#
+# Cross-sectional design:
+#   1) build financially meaningful score S inside each non-overlapping K block;
+#   2) standardize S across assets inside each batch/block;
+#   3) apply the selected cross-sectional loss to standardized scores Z.
 # ==============================================================================
 
 # ------------------------------------------------------------------------------
@@ -33,9 +38,10 @@ TRADE_WINDOWS=(1 5 10 15 20 24)
 
 # Composite loss
 TEMPORAL_LOSS="mse"
-CROSS_LOSS="mse"          # mse | ranknet | listnet | bpr | hinge
+CROSS_LOSS="mse"                    # mse | ranknet | listnet | bpr | hinge
 CROSS_LAMBDA="0.50"
-SCORE_KIND="simple_return" # simple_return | log_return
+SCORE_KIND="simple_return"          # simple_return | log_return
+CROSS_SCORE_NORMALIZATION="zscore"  # zscore | none
 
 # ------------------------------------------------------------------------------
 # OPERATIONAL CONFIGURATION
@@ -45,8 +51,8 @@ TFB_ROOT="${TFB_ROOT:-/sonic_home/igor.viveiros/src/TFB}"
 VENV_PATH="${VENV_PATH:-/sonic_home/igor.viveiros/py310/bin/activate}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 CONFIG_FILE="${CONFIG_FILE:-rolling_forecast_config.json}"
-OUT_ROOT="${OUT_ROOT:-/snfs2/igor.viveiros/previsoes/composite_trading_v2}"
-LOG_ROOT="${LOG_ROOT:-${TFB_ROOT}/logs/composite_trading_v2}"
+OUT_ROOT="${OUT_ROOT:-/snfs2/igor.viveiros/previsoes/composite_trading_v3}"
+LOG_ROOT="${LOG_ROOT:-${TFB_ROOT}/logs/composite_trading_v3}"
 GPU_PARTITION="${GPU_PARTITION:-medusas_shr}"
 GPU_TIME="${GPU_TIME:-48:00:00}"
 MAX_GPU_JOBS="${MAX_GPU_JOBS:-6}"
@@ -99,6 +105,7 @@ validate_loss() {
   case "$TEMPORAL_LOSS" in mse|mae|huber) ;; *) echo "ERRO: TEMPORAL_LOSS inválida: $TEMPORAL_LOSS" >&2; exit 2 ;; esac
   case "$CROSS_LOSS" in mse|ranknet|listnet|bpr|hinge) ;; *) echo "ERRO: CROSS_LOSS inválida: $CROSS_LOSS" >&2; exit 2 ;; esac
   case "$SCORE_KIND" in simple_return|log_return) ;; *) echo "ERRO: SCORE_KIND inválido: $SCORE_KIND" >&2; exit 2 ;; esac
+  case "$CROSS_SCORE_NORMALIZATION" in zscore|none) ;; *) echo "ERRO: CROSS_SCORE_NORMALIZATION inválida: $CROSS_SCORE_NORMALIZATION" >&2; exit 2 ;; esac
 }
 
 build_valid_hk_pairs() {
@@ -137,7 +144,7 @@ prepare_worker() {
   cd "$TFB_ROOT"
   mkdir -p "$OUT_ROOT" "$LOG_ROOT"
   [[ -f "${TFB_ROOT}/config/${CONFIG_FILE}" ]] || { echo "ERRO: config não encontrada: ${TFB_ROOT}/config/${CONFIG_FILE}" >&2; exit 2; }
-  [[ -f "scripts/run_benchmark_composite_trading_loss_v2.py" ]] || { echo "ERRO: launcher v2 não encontrado." >&2; exit 2; }
+  [[ -f "scripts/run_benchmark_composite_trading_loss_v3.py" ]] || { echo "ERRO: launcher v3 não encontrado." >&2; exit 2; }
   [[ -f "scripts/convert_composite_trading_predictions.py" ]] || { echo "ERRO: conversor não encontrado." >&2; exit 2; }
   echo "TFB commit: $(git rev-parse HEAD 2>/dev/null || echo desconhecido)"
 }
@@ -150,7 +157,7 @@ model_args() {
   DETERMINISTIC_MODE="full"
 
   local loss_fields
-  loss_fields="\"loss\":\"composite_trading\",\"loss_temporal\":\"${TEMPORAL_LOSS}\",\"loss_cross\":\"${CROSS_LOSS}\",\"loss_trade_window\":${k},\"loss_cross_lambda\":${CROSS_LAMBDA},\"loss_data_kind\":\"${data_kind}\",\"loss_score_kind\":\"${SCORE_KIND}\",\"loss_inverse_norm\":true,\"loss_track_components\":true"
+  loss_fields="\"loss\":\"composite_trading\",\"loss_temporal\":\"${TEMPORAL_LOSS}\",\"loss_cross\":\"${CROSS_LOSS}\",\"loss_trade_window\":${k},\"loss_cross_lambda\":${CROSS_LAMBDA},\"loss_data_kind\":\"${data_kind}\",\"loss_score_kind\":\"${SCORE_KIND}\",\"loss_cross_score_normalization\":\"${CROSS_SCORE_NORMALIZATION}\",\"loss_inverse_norm\":true,\"loss_track_components\":true"
 
   case "$model_key" in
     DUET)
@@ -184,7 +191,7 @@ run_tfb() {
   rm -rf "$result_dir"
   mkdir -p "$result_dir"
 
-  "$PYTHON_BIN" ./scripts/run_benchmark_composite_trading_loss_v2.py \
+  "$PYTHON_BIN" ./scripts/run_benchmark_composite_trading_loss_v3.py \
     --config-path "$CONFIG_FILE" \
     --data-name-list "$data_file" \
     --strategy-args "{\"horizon\":${h},\"tv_ratio\":${TV_RATIO},\"train_ratio_in_tv\":${TRAIN_RATIO_IN_TV},\"stride\":${STRIDE},\"num_rollings\":${NUM_ROLLINGS},\"seed\":${SEED}}" \
@@ -237,9 +244,9 @@ convert_predictions() {
 
 write_manifest() {
   mkdir -p "$OUT_ROOT"
-  local manifest="${OUT_ROOT}/design_composite_trading_v2.csv"
+  local manifest="${OUT_ROOT}/design_composite_trading_v3.csv"
   {
-    echo "dataset,modelo,lookback,pred_len,k,temporal_loss,cross_loss,cross_lambda,score_kind,seed"
+    echo "dataset,modelo,lookback,pred_len,k,temporal_loss,cross_loss,cross_lambda,score_kind,cross_score_normalization,seed"
     local spec label candidates data_kind offset model lb pair h k
     for spec in "${DATASET_SPECS[@]}"; do
       IFS=':' read -r label candidates data_kind offset <<< "$spec"
@@ -247,7 +254,7 @@ write_manifest() {
         for lb in "${LOOKBACKS[@]}"; do
           for pair in "${HK_PAIRS[@]}"; do
             IFS=':' read -r h k <<< "$pair"
-            echo "${label},${model},${lb},${h},${k},${TEMPORAL_LOSS},${CROSS_LOSS},${CROSS_LAMBDA},${SCORE_KIND},${SEED}"
+            echo "${label},${model},${lb},${h},${k},${TEMPORAL_LOSS},${CROSS_LOSS},${CROSS_LAMBDA},${SCORE_KIND},${CROSS_SCORE_NORMALIZATION},${SEED}"
           done
         done
       done
@@ -294,7 +301,7 @@ run_worker() {
   model_args "$model_key" "$lb" "$h" "$k" "$data_kind"
 
   local tag="${dataset_label}_${model_key}_lb${lb}_h${h}_k${k}_task${task_id}"
-  local save_subdir="composite_trading_v2/${tag}"
+  local save_subdir="composite_trading_v3/${tag}"
   local result_dir="${TFB_ROOT}/result/${save_subdir}"
   local decoded_dir="${result_dir}/decoded"
   local final_dir="${OUT_ROOT}/${dataset_label}/${model_key}/lookback_${lb}/pred_len_${h}/k_${k}"
@@ -320,7 +327,7 @@ echo "Lookbacks: ${LOOKBACKS[*]}"
 echo "H        : ${HORIZONS[*]}"
 echo "K        : ${TRADE_WINDOWS[*]}"
 echo "Pares HK : ${HK_PAIRS[*]}"
-echo "Loss     : temporal=${TEMPORAL_LOSS}, cross=${CROSS_LOSS}, lambda=${CROSS_LAMBDA}"
+echo "Loss     : temporal=${TEMPORAL_LOSS}, cross=${CROSS_LOSS}, lambda=${CROSS_LAMBDA}, cross_norm=${CROSS_SCORE_NORMALIZATION}"
 echo "Tarefas  : ${N_TASKS}"
 
 sbatch \
@@ -328,7 +335,7 @@ sbatch \
   --gres=gpu:1 \
   --time="$GPU_TIME" \
   --array="0-$((N_TASKS - 1))%${MAX_GPU_JOBS}" \
-  --job-name="composite_trading_v2" \
+  --job-name="composite_trading_v3" \
   --output="${LOG_ROOT}/%A_%a.out" \
   --error="${LOG_ROOT}/%A_%a.err" \
   "$SCRIPT_PATH" worker
