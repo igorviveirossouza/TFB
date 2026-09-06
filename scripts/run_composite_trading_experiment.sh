@@ -28,20 +28,28 @@ MODELS=(
 
 # Options: retornos_simples log_retornos prices
 DATASETS=(
-  retornos_simples
+  #retornos_simples
   log_retornos
 )
 
 LOOKBACKS=(32 104 246)
+#LOOKBACKS=(32)
+
 HORIZONS=(1 5 10 15 20 24)
+#HORIZONS=(1 20)
+
 TRADE_WINDOWS=(1 5 10 15 20 24)
+#TRADE_WINDOWS=(1 5)
 
 # Composite loss
 TEMPORAL_LOSS="mse"
 CROSS_LOSS="mse"                    # mse | ranknet | listnet | bpr | hinge
-CROSS_LAMBDA="0.50"
+CROSS_LAMBDA="0.0"                 # Peso da tarefa cross-sectional
 SCORE_KIND="simple_return"          # simple_return | log_return
 CROSS_SCORE_NORMALIZATION="zscore"  # zscore | none
+CROSS_SCALE="1.0"                   # Controla a escala (impacto) da loss cross-section
+RANKNET_ALPHA="1.0"                 # controla inclinação/intensidade da penalização pairwise. Quando = 1 -> BRP = ranknet
+LISTNET_TAU="1.0"                   # controla a temperatura na listnet 
 
 # ------------------------------------------------------------------------------
 # OPERATIONAL CONFIGURATION
@@ -51,8 +59,8 @@ TFB_ROOT="${TFB_ROOT:-/sonic_home/igor.viveiros/src/TFB}"
 VENV_PATH="${VENV_PATH:-/sonic_home/igor.viveiros/py310/bin/activate}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 CONFIG_FILE="${CONFIG_FILE:-rolling_forecast_config.json}"
-OUT_ROOT="${OUT_ROOT:-/snfs2/igor.viveiros/previsoes/composite_trading_v3}"
-LOG_ROOT="${LOG_ROOT:-${TFB_ROOT}/logs/composite_trading_v3}"
+OUT_ROOT="${OUT_ROOT:-/snfs2/igor.viveiros/previsoes/composite_trading_v3/mse_lambda_00}"  # Diretório de saída das previsões
+LOG_ROOT="${LOG_ROOT:-${TFB_ROOT}/logs}"
 GPU_PARTITION="${GPU_PARTITION:-medusas_shr}"
 GPU_TIME="${GPU_TIME:-48:00:00}"
 MAX_GPU_JOBS="${MAX_GPU_JOBS:-6}"
@@ -157,7 +165,7 @@ model_args() {
   DETERMINISTIC_MODE="full"
 
   local loss_fields
-  loss_fields="\"loss\":\"composite_trading\",\"loss_temporal\":\"${TEMPORAL_LOSS}\",\"loss_cross\":\"${CROSS_LOSS}\",\"loss_trade_window\":${k},\"loss_cross_lambda\":${CROSS_LAMBDA},\"loss_data_kind\":\"${data_kind}\",\"loss_score_kind\":\"${SCORE_KIND}\",\"loss_cross_score_normalization\":\"${CROSS_SCORE_NORMALIZATION}\",\"loss_inverse_norm\":true,\"loss_track_components\":true"
+  loss_fields="\"loss_cross_scale\":${CROSS_SCALE},\"loss_ranknet_alpha\":${RANKNET_ALPHA},\"loss_listnet_tau\":${LISTNET_TAU},\"loss\":\"composite_trading\",\"loss_temporal\":\"${TEMPORAL_LOSS}\",\"loss_cross\":\"${CROSS_LOSS}\",\"loss_trade_window\":${k},\"loss_cross_lambda\":${CROSS_LAMBDA},\"loss_data_kind\":\"${data_kind}\",\"loss_score_kind\":\"${SCORE_KIND}\",\"loss_cross_score_normalization\":\"${CROSS_SCORE_NORMALIZATION}\",\"loss_inverse_norm\":true,\"loss_track_components\":true"
 
   case "$model_key" in
     DUET)
@@ -335,7 +343,7 @@ sbatch \
   --gres=gpu:1 \
   --time="$GPU_TIME" \
   --array="0-$((N_TASKS - 1))%${MAX_GPU_JOBS}" \
-  --job-name="composite_trading_v3" \
-  --output="${LOG_ROOT}/%A_%a.out" \
-  --error="${LOG_ROOT}/%A_%a.err" \
+  --job-name="mse_lambda_00" \
+  --output="${LOG_ROOT}/mse_lambda_00_%A_%a.out" \
+  --error="${LOG_ROOT}/mse_lambda_00_%A_%a.err" \
   "$SCRIPT_PATH" worker
