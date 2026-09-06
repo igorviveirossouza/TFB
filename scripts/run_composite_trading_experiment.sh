@@ -250,6 +250,29 @@ convert_predictions() {
     --output-dir "$final_dir"
 }
 
+record_completed_task() {
+  local task_id="$1" dataset_label="$2" model_key="$3" lb="$4" h="$5" k="$6" final_dir="$7"
+  local completed_file="${OUT_ROOT}/completed_tasks.csv"
+  local lock_file="${OUT_ROOT}/.completed_tasks.lock"
+  local header="array_index,dataset,model,lookback,pred_len,k,temporal_loss,cross_loss,cross_lambda,cross_scale,ranknet_alpha,listnet_tau,score_kind,cross_score_normalization,seed,slurm_job_id,output_dir"
+  local row="${task_id},${dataset_label},${model_key},${lb},${h},${k},${TEMPORAL_LOSS},${CROSS_LOSS},${CROSS_LAMBDA},${CROSS_SCALE},${RANKNET_ALPHA},${LISTNET_TAU},${SCORE_KIND},${CROSS_SCORE_NORMALIZATION},${SEED},${SLURM_JOB_ID:-},${final_dir}"
+
+  mkdir -p "$OUT_ROOT"
+  (
+    flock -x 200
+
+    if [[ ! -s "$completed_file" ]]; then
+      printf '%s\n' "$header" > "$completed_file"
+    fi
+
+    local tmp_file
+    tmp_file="$(mktemp "${OUT_ROOT}/.completed_tasks.XXXXXX")"
+    awk -F',' -v idx="$task_id" 'NR == 1 || $1 != idx' "$completed_file" > "$tmp_file"
+    printf '%s\n' "$row" >> "$tmp_file"
+    mv "$tmp_file" "$completed_file"
+  ) 200>"$lock_file"
+}
+
 write_manifest() {
   mkdir -p "$OUT_ROOT"
   local manifest="${OUT_ROOT}/design_composite_trading_v3.csv"
@@ -318,6 +341,7 @@ run_worker() {
   run_tfb "$data_file" "$MODEL_NAME" "$MODEL_HYPER_PARAMS" "$DETERMINISTIC_MODE" "$h" "$save_subdir" "${ADAPTER_ARG[@]}"
   decode_predictions "$result_dir" "$h" "$decoded_dir"
   convert_predictions "$decoded_dir" "$original_dataset" "$h" "$lb" "$step_offset" "$final_dir"
+  record_completed_task "$task_id" "$dataset_label" "$model_key" "$lb" "$h" "$k" "$final_dir"
   echo "OK: $final_dir"
 }
 
