@@ -60,6 +60,7 @@ VENV_PATH="${VENV_PATH:-/sonic_home/igor.viveiros/py310/bin/activate}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 CONFIG_FILE="${CONFIG_FILE:-rolling_forecast_config.json}"
 OUT_ROOT="${OUT_ROOT:-/snfs2/igor.viveiros/previsoes/composite_trading_v3/mse_lambda_00}"  # Diretório de saída das previsões
+EXPERIMENT_ID="${EXPERIMENT_ID:-$(basename "${OUT_ROOT%/}")}"  # Isola resultados temporários entre experimentos
 LOG_ROOT="${LOG_ROOT:-${TFB_ROOT}/logs}"
 GPU_PARTITION="${GPU_PARTITION:-medusas_shr}"
 GPU_TIME="${GPU_TIME:-48:00:00}"
@@ -332,12 +333,12 @@ run_worker() {
   model_args "$model_key" "$lb" "$h" "$k" "$data_kind"
 
   local tag="${dataset_label}_${model_key}_lb${lb}_h${h}_k${k}_task${task_id}"
-  local save_subdir="composite_trading_v3/${tag}"
+  local save_subdir="composite_trading_v3/${EXPERIMENT_ID}/${tag}"
   local result_dir="${TFB_ROOT}/result/${save_subdir}"
   local decoded_dir="${result_dir}/decoded"
   local final_dir="${OUT_ROOT}/${dataset_label}/${model_key}/lookback_${lb}/pred_len_${h}/k_${k}"
 
-  echo "TASK=$task_id dataset=$dataset_label model=$model_key lb=$lb H=$h K=$k"
+  echo "TASK=$task_id experiment=$EXPERIMENT_ID dataset=$dataset_label model=$model_key lb=$lb H=$h K=$k"
   run_tfb "$data_file" "$MODEL_NAME" "$MODEL_HYPER_PARAMS" "$DETERMINISTIC_MODE" "$h" "$save_subdir" "${ADAPTER_ARG[@]}"
   decode_predictions "$result_dir" "$h" "$decoded_dir"
   convert_predictions "$decoded_dir" "$original_dataset" "$h" "$lb" "$step_offset" "$final_dir"
@@ -353,6 +354,7 @@ fi
 mkdir -p "$LOG_ROOT" "$OUT_ROOT"
 write_manifest
 
+echo "Experimento: ${EXPERIMENT_ID}"
 echo "Datasets : ${DATASETS[*]}"
 echo "Modelos  : ${MODELS[*]}"
 echo "Lookbacks: ${LOOKBACKS[*]}"
