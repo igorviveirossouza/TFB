@@ -43,11 +43,11 @@ TRADE_WINDOWS=(1 5 10 15 20 24)
 
 # Composite loss
 TEMPORAL_LOSS="mse"
-CROSS_LOSS="mse"                    # mse | ranknet | listnet | bpr | hinge
-CROSS_LAMBDA="0.0"                 # Peso da tarefa cross-sectional
+CROSS_LOSS="listnet"                # mse | ranknet | listnet | bpr | hinge
+CROSS_LAMBDA="0.8"                 # Peso da tarefa cross-sectional
 SCORE_KIND="simple_return"          # simple_return | log_return
 CROSS_SCORE_NORMALIZATION="zscore"  # zscore | none
-CROSS_SCALE="1.0"                   # Controla a escala (impacto) da loss cross-section
+CROSS_SCALE="1"                   # Controla a escala (impacto) da loss cross-section
 RANKNET_ALPHA="1.0"                 # controla inclinação/intensidade da penalização pairwise. Quando = 1 -> BRP = ranknet
 LISTNET_TAU="1.0"                   # controla a temperatura na listnet 
 
@@ -59,7 +59,7 @@ TFB_ROOT="${TFB_ROOT:-/sonic_home/igor.viveiros/src/TFB}"
 VENV_PATH="${VENV_PATH:-/sonic_home/igor.viveiros/py310/bin/activate}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 CONFIG_FILE="${CONFIG_FILE:-rolling_forecast_config.json}"
-OUT_ROOT="${OUT_ROOT:-/snfs2/igor.viveiros/previsoes/composite_trading_v3/mse_lambda_00}"  # Diretório de saída das previsões
+OUT_ROOT="${OUT_ROOT:-/snfs2/igor.viveiros/previsoes/composite_trading_v3/listnet_lambda_08}"  # Diretório de saída das previsões
 EXPERIMENT_ID="${EXPERIMENT_ID:-$(basename "${OUT_ROOT%/}")}"  # Isola resultados temporários entre experimentos
 LOG_ROOT="${LOG_ROOT:-${TFB_ROOT}/logs}"
 GPU_PARTITION="${GPU_PARTITION:-medusas_shr}"
@@ -369,7 +369,7 @@ sbatch \
   --gres=gpu:1 \
   --time="$GPU_TIME" \
   --array="0-$((N_TASKS - 1))%${MAX_GPU_JOBS}" \
-  --job-name="mse_lambda_00" \
-  --output="${LOG_ROOT}/mse_lambda_00_%A_%a.out" \
-  --error="${LOG_ROOT}/mse_lambda_00_%A_%a.err" \
+  --job-name="listnet08" \
+  --output="${LOG_ROOT}/listnet08_%A_%a.out" \
+  --error="${LOG_ROOT}/listnet08_%A_%a.err" \
   "$SCRIPT_PATH" worker
