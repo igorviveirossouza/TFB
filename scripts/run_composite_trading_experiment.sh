@@ -47,9 +47,14 @@ CROSS_LOSS="listnet"                # mse | ranknet | listnet | bpr | hinge
 CROSS_LAMBDA="0.8"                 # Peso da tarefa cross-sectional
 SCORE_KIND="simple_return"          # simple_return | log_return
 CROSS_SCORE_NORMALIZATION="zscore"  # zscore | none
-CROSS_SCALE="1"                   # Controla a escala (impacto) da loss cross-section
+CROSS_SCALE="1"                     # Controla a escala (impacto) da loss cross-section
 RANKNET_ALPHA="1.0"                 # controla inclinação/intensidade da penalização pairwise. Quando = 1 -> BRP = ranknet
-LISTNET_TAU="1.0"                   # controla a temperatura na listnet 
+LISTNET_TAU="1.0"                   # controla a temperatura na listnet
+
+# Saída
+# FALSE (default): salva somente Parquet.
+# TRUE: salva Parquet e também os CSVs janela_*.csv para auditoria/debug.
+MANTER_CSV="${MANTER_CSV:-FALSE}"
 
 # ------------------------------------------------------------------------------
 # OPERATIONAL CONFIGURATION
@@ -60,6 +65,7 @@ VENV_PATH="${VENV_PATH:-/sonic_home/igor.viveiros/py310/bin/activate}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 CONFIG_FILE="${CONFIG_FILE:-rolling_forecast_config.json}"
 OUT_ROOT="${OUT_ROOT:-/snfs2/igor.viveiros/previsoes/composite_trading_v3/listnet_lambda_08}"  # Diretório de saída das previsões
+PARQUET_ROOT="${PARQUET_ROOT:-${OUT_ROOT}/parquet}"
 EXPERIMENT_ID="${EXPERIMENT_ID:-$(basename "${OUT_ROOT%/}")}"  # Isola resultados temporários entre experimentos
 LOG_ROOT="${LOG_ROOT:-${TFB_ROOT}/logs}"
 GPU_PARTITION="${GPU_PARTITION:-medusas_shr}"
@@ -117,6 +123,14 @@ validate_loss() {
   case "$CROSS_SCORE_NORMALIZATION" in zscore|none) ;; *) echo "ERRO: CROSS_SCORE_NORMALIZATION inválida: $CROSS_SCORE_NORMALIZATION" >&2; exit 2 ;; esac
 }
 
+validate_output_config() {
+  MANTER_CSV="${MANTER_CSV^^}"
+  case "$MANTER_CSV" in
+    TRUE|FALSE) ;;
+    *) echo "ERRO: MANTER_CSV deve ser TRUE ou FALSE." >&2; exit 2 ;;
+  esac
+}
+
 build_valid_hk_pairs() {
   HK_PAIRS=()
   local h k
@@ -151,10 +165,14 @@ prepare_worker() {
   # shellcheck disable=SC1090
   source "$VENV_PATH"
   cd "$TFB_ROOT"
-  mkdir -p "$OUT_ROOT" "$LOG_ROOT"
+  mkdir -p "$OUT_ROOT" "$PARQUET_ROOT" "$LOG_ROOT"
   [[ -f "${TFB_ROOT}/config/${CONFIG_FILE}" ]] || { echo "ERRO: config não encontrada: ${TFB_ROOT}/config/${CONFIG_FILE}" >&2; exit 2; }
   [[ -f "scripts/run_benchmark_composite_trading_loss_v3.py" ]] || { echo "ERRO: launcher v3 não encontrado." >&2; exit 2; }
   [[ -f "scripts/convert_composite_trading_predictions.py" ]] || { echo "ERRO: conversor não encontrado." >&2; exit 2; }
+  "$PYTHON_BIN" -c 'import pyarrow' >/dev/null 2>&1 || {
+    echo "ERRO: pyarrow não está instalado no ambiente Python. Instale pyarrow antes de rodar o experimento." >&2
+    exit 2
+  }
   echo "TFB commit: $(git rev-parse HEAD 2>/dev/null || echo desconhecido)"
 }
 
@@ -238,17 +256,33 @@ decode_predictions() {
 }
 
 convert_predictions() {
-  local decoded_dir="$1" original_dataset="$2" h="$3" lb="$4" step_offset="$5" final_dir="$6"
-  rm -rf "$final_dir"
-  mkdir -p "$final_dir"
-  "$PYTHON_BIN" scripts/convert_composite_trading_predictions.py \
-    --decoded-dir "$decoded_dir" \
-    --dataset "$original_dataset" \
-    --pred-len "$h" \
-    --lookback "$lb" \
-    --step-offset "$step_offset" \
-    --tv-ratio "$TV_RATIO" \
-    --output-dir "$final_dir"
+  local decoded_dir="$1" original_dataset="$2" h="$3" lb="$4" step_offset="$5"
+  local dataset_label="$6" model_key="$7" k="$8" csv_dir="$9"
+
+  local cmd=(
+    "$PYTHON_BIN" scripts/convert_composite_trading_predictions.py
+    --decoded-dir "$decoded_dir"
+    --dataset "$original_dataset"
+    --pred-len "$h"
+    --lookback "$lb"
+    --step-offset "$step_offset"
+    --tv-ratio "$TV_RATIO"
+    --parquet-root "$PARQUET_ROOT"
+    --dataset-label "$dataset_label"
+    --model "$model_key"
+    --k "$k"
+  )
+
+  if [[ "$MANTER_CSV" == "TRUE" ]]; then
+    cmd+=(--output-dir "$csv_dir" --keep-csv)
+  fi
+
+  "${cmd[@]}"
+
+  # Em modo Parquet-only, remove eventual CSV antigo dessa configuração.
+  if [[ "$MANTER_CSV" == "FALSE" && -d "$csv_dir" ]]; then
+    rm -rf "$csv_dir"
+  fi
 }
 
 record_completed_task() {
@@ -297,6 +331,7 @@ write_manifest() {
 
 validate_models
 validate_loss
+validate_output_config
 build_dataset_specs
 build_valid_hk_pairs
 
@@ -336,14 +371,15 @@ run_worker() {
   local save_subdir="composite_trading_v3/${EXPERIMENT_ID}/${tag}"
   local result_dir="${TFB_ROOT}/result/${save_subdir}"
   local decoded_dir="${result_dir}/decoded"
-  local final_dir="${OUT_ROOT}/${dataset_label}/${model_key}/lookback_${lb}/pred_len_${h}/k_${k}"
+  local csv_dir="${OUT_ROOT}/${dataset_label}/${model_key}/lookback_${lb}/pred_len_${h}/k_${k}"
+  local parquet_dir="${PARQUET_ROOT}/dataset=${dataset_label}/modelo=${model_key}/lookback=lookback_${lb}/pred_len=pred_len_${h}/k_dir=k_${k}"
 
   echo "TASK=$task_id experiment=$EXPERIMENT_ID dataset=$dataset_label model=$model_key lb=$lb H=$h K=$k"
   run_tfb "$data_file" "$MODEL_NAME" "$MODEL_HYPER_PARAMS" "$DETERMINISTIC_MODE" "$h" "$save_subdir" "${ADAPTER_ARG[@]}"
   decode_predictions "$result_dir" "$h" "$decoded_dir"
-  convert_predictions "$decoded_dir" "$original_dataset" "$h" "$lb" "$step_offset" "$final_dir"
-  record_completed_task "$task_id" "$dataset_label" "$model_key" "$lb" "$h" "$k" "$final_dir"
-  echo "OK: $final_dir"
+  convert_predictions "$decoded_dir" "$original_dataset" "$h" "$lb" "$step_offset" "$dataset_label" "$model_key" "$k" "$csv_dir"
+  record_completed_task "$task_id" "$dataset_label" "$model_key" "$lb" "$h" "$k" "$parquet_dir"
+  echo "OK: $parquet_dir"
 }
 
 if [[ "${1:-}" == "worker" ]]; then
@@ -351,7 +387,7 @@ if [[ "${1:-}" == "worker" ]]; then
   exit 0
 fi
 
-mkdir -p "$LOG_ROOT" "$OUT_ROOT"
+mkdir -p "$LOG_ROOT" "$OUT_ROOT" "$PARQUET_ROOT"
 write_manifest
 
 echo "Experimento: ${EXPERIMENT_ID}"
@@ -362,6 +398,8 @@ echo "H        : ${HORIZONS[*]}"
 echo "K        : ${TRADE_WINDOWS[*]}"
 echo "Pares HK : ${HK_PAIRS[*]}"
 echo "Loss     : temporal=${TEMPORAL_LOSS}, cross=${CROSS_LOSS}, lambda=${CROSS_LAMBDA}, cross_norm=${CROSS_SCORE_NORMALIZATION}"
+echo "Parquet  : ${PARQUET_ROOT}"
+echo "Manter CSV: ${MANTER_CSV}"
 echo "Tarefas  : ${N_TASKS}"
 
 sbatch \
