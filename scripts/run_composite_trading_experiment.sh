@@ -44,12 +44,13 @@ TRADE_WINDOWS=(1 5 10 15 20 24)
 # Composite loss
 TEMPORAL_LOSS="mse"
 CROSS_LOSS="mse"                # mse | ranknet | listnet | bpr | hinge
-CROSS_LAMBDA="0.8"                    # Peso da tarefa cross-sectional
+CROSS_LAMBDA="0.5"                  # Peso da tarefa cross-sectional
 SCORE_KIND="simple_return"          # simple_return | log_return
 CROSS_SCORE_NORMALIZATION="zscore"  # zscore | none
-CROSS_SCALE="0.1"                     # Controla a escala (impacto) da loss cross-section
-RANKNET_ALPHA="1.0"                 # controla inclinação/intensidade da penalização pairwise. Quando = 1 -> BRP = ranknet
+CROSS_SCALE="0.01"                  # Controla a escala (impacto) da loss cross-section
+RANKNET_ALPHA="1.5"                 # controla inclinação/intensidade da penalização pairwise. Quando = 1 -> BRP = ranknet
 LISTNET_TAU="1.0"                   # controla a temperatura na listnet
+HINGE_MARGIN="0.05"                 # margem m da Hinge
 
 # Saída
 # FALSE (default): salva somente Parquet.
@@ -64,13 +65,13 @@ TFB_ROOT="${TFB_ROOT:-/sonic_home/igor.viveiros/src/TFB}"
 VENV_PATH="${VENV_PATH:-/sonic_home/igor.viveiros/py310/bin/activate}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 CONFIG_FILE="${CONFIG_FILE:-rolling_forecast_config.json}"
-OUT_ROOT="${OUT_ROOT:-/snfs2/igor.viveiros/previsoes/parquet/mse_lambda05_cs01}"  # Diretório de saída das previsões
+OUT_ROOT="${OUT_ROOT:-/snfs2/igor.viveiros/previsoes/parquet/mse_lambda05_cs001}"  # Diretório de saída das previsões
 RESULT_ROOT="${RESULT_ROOT:-/snfs2/igor.viveiros/result}"
 PARQUET_ROOT="${PARQUET_ROOT:-${OUT_ROOT}/parquet}"
 EXPERIMENT_ID="${EXPERIMENT_ID:-$(basename "${OUT_ROOT%/}")}"  # Isola resultados temporários entre experimentos
 LOG_ROOT="${LOG_ROOT:-${TFB_ROOT}/logs}"
-GPU_PARTITION="${GPU_PARTITION:-medusas_shr}"
-GPU_TIME="${GPU_TIME:-48:00:00}"
+GPU_PARTITION="${GPU_PARTITION:-medusas_dev}"
+GPU_TIME="${GPU_TIME:-08:00:00}"
 MAX_GPU_JOBS="${MAX_GPU_JOBS:-6}"
 SEED="${SEED:-2026}"
 TV_RATIO="${TV_RATIO:-0.8}"
@@ -185,7 +186,7 @@ model_args() {
   DETERMINISTIC_MODE="full"
 
   local loss_fields
-  loss_fields="\"loss_cross_scale\":${CROSS_SCALE},\"loss_ranknet_alpha\":${RANKNET_ALPHA},\"loss_listnet_tau\":${LISTNET_TAU},\"loss\":\"composite_trading\",\"loss_temporal\":\"${TEMPORAL_LOSS}\",\"loss_cross\":\"${CROSS_LOSS}\",\"loss_trade_window\":${k},\"loss_cross_lambda\":${CROSS_LAMBDA},\"loss_data_kind\":\"${data_kind}\",\"loss_score_kind\":\"${SCORE_KIND}\",\"loss_cross_score_normalization\":\"${CROSS_SCORE_NORMALIZATION}\",\"loss_inverse_norm\":true,\"loss_track_components\":true"
+  loss_fields="\"loss_cross_scale\":${CROSS_SCALE},\"loss_ranknet_alpha\":${RANKNET_ALPHA},\"loss_listnet_tau\":${LISTNET_TAU},\"loss\":\"composite_trading\",\"loss_temporal\":\"${TEMPORAL_LOSS}\",\"loss_cross\":\"${CROSS_LOSS}\",\"loss_trade_window\":${k},\"loss_cross_lambda\":${CROSS_LAMBDA},\"loss_data_kind\":\"${data_kind}\",\"loss_score_kind\":\"${SCORE_KIND}\",\"loss_cross_score_normalization\":\"${CROSS_SCORE_NORMALIZATION}\",\"loss_hinge_margin\":${HINGE_MARGIN},\"loss_inverse_norm\":true,\"loss_track_components\":true"
 
   case "$model_key" in
     DUET)
@@ -398,7 +399,7 @@ echo "Lookbacks: ${LOOKBACKS[*]}"
 echo "H        : ${HORIZONS[*]}"
 echo "K        : ${TRADE_WINDOWS[*]}"
 echo "Pares HK : ${HK_PAIRS[*]}"
-echo "Loss     : temporal=${TEMPORAL_LOSS}, cross=${CROSS_LOSS}, lambda=${CROSS_LAMBDA}, cross_norm=${CROSS_SCORE_NORMALIZATION}"
+echo "Loss     : temporal=${TEMPORAL_LOSS}, cross=${CROSS_LOSS}, lambda=${CROSS_LAMBDA}, cross_norm=${CROSS_SCORE_NORMALIZATION}, CS=${CROSS_SCALE}"
 echo "Parquet  : ${PARQUET_ROOT}"
 echo "Manter CSV: ${MANTER_CSV}"
 echo "Tarefas  : ${N_TASKS}"
@@ -408,7 +409,7 @@ sbatch \
   --gres=gpu:1 \
   --time="$GPU_TIME" \
   --array="0-$((N_TASKS - 1))%${MAX_GPU_JOBS}" \
-  --job-name="mse_lambda05_cs01" \
-  --output="${LOG_ROOT}/mse_lambda05_cs01%A_%a.out" \
-  --error="${LOG_ROOT}/mse_lambda05_cs01%A_%a.err" \
+  --job-name="mse_lambda05_cs001" \
+  --output="${LOG_ROOT}/mse_lambda05_cs001%A_%a.out" \
+  --error="${LOG_ROOT}/mse_lambda05_cs001%A_%a.err" \
   "$SCRIPT_PATH" worker
