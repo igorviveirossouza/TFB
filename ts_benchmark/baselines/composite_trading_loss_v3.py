@@ -69,6 +69,7 @@ def build_loss(config, normalizer_mean=None, normalizer_scale=None):
         ranknet_alpha=float(_cfg(config, "loss_ranknet_alpha", 1.0)),
         listnet_tau=float(_cfg(config, "loss_listnet_tau", 1.0)),
         hinge_margin=float(_cfg(config, "loss_hinge_margin", 0.01)),
+        cross_delta=float(_cfg(config, "loss_cross_delta", 0.0)),
         cross_score_normalization=cross_score_normalization,
         inverse_norm=inverse_norm,
         normalizer_mean=normalizer_mean,
@@ -104,6 +105,7 @@ class CompositeTradingLossV3(CompositeTradingLossV2):
         ranknet_alpha: float = 1.0,
         listnet_tau: float = 1.0,
         hinge_margin: float = 0.01,
+        cross_delta: float = 0.0,
         cross_score_normalization: str = "zscore",
         inverse_norm: bool = True,
         normalizer_mean=None,
@@ -132,6 +134,7 @@ class CompositeTradingLossV3(CompositeTradingLossV2):
             ranknet_alpha=ranknet_alpha,
             listnet_tau=listnet_tau,
             hinge_margin=hinge_margin,
+            cross_delta=cross_delta,
             rank_score_normalization=normalization,
             inverse_norm=inverse_norm,
             normalizer_mean=normalizer_mean,
@@ -162,18 +165,30 @@ class CompositeTradingLossV3(CompositeTradingLossV2):
         target_scores: torch.Tensor,
     ) -> torch.Tensor:
         # [B,M,N] -> [B*M,N]. Each row remains one independent cross-section.
-        pred, target = self._flatten_blocks(pred_scores, target_scores)
-        pred, target = self._normalize_cross_scores(pred, target)
+        # Delta is evaluated on the realized financial score before z-scoring,
+        # so its unit remains the original score unit (e.g. simple return).
+        pred_raw, target_raw = self._flatten_blocks(pred_scores, target_scores)
 
         if self.cross_loss_name == "mse":
+            pred, target = self._normalize_cross_scores(pred_raw, target_raw)
             return F.mse_loss(pred, target)
 
         if self.cross_loss_name == "listnet":
+            pred, target = self._normalize_cross_scores(pred_raw, target_raw)
             p_true = F.softmax(target / self.listnet_tau, dim=1)
             log_p_pred = F.log_softmax(pred / self.listnet_tau, dim=1)
             return -(p_true * log_p_pred).sum(dim=1).mean()
 
-        pred_diff, target_diff, valid = self._pairwise_upper(pred, target)
+        _, target_diff_raw, valid = self._pairwise_upper(pred_raw, target_raw)
+        valid = valid & (target_diff_raw.abs() > self.cross_delta)
+
+        pred, target = self._normalize_cross_scores(pred_raw, target_raw)
+        pred_diff, target_diff, _ = self._pairwise_upper(pred, target)
+
+        if self.cross_loss_name == "pairwise_mse":
+            values = (pred_diff - target_diff).square()
+            return self._masked_mean(values, valid)
+
         sign = torch.sign(target_diff)
 
         if self.cross_loss_name == "ranknet":
