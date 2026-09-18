@@ -24,7 +24,7 @@ from ts_benchmark.baselines.custom_losses import (
 
 COMPOSITE_LOSSES = {"composite_trading"}
 TEMPORAL_LOSSES = {"mse", "mae", "huber"}
-CROSS_LOSSES = {"mse", "ranknet", "listnet", "bpr", "hinge"}
+CROSS_LOSSES = {"mse", "pairwise_mse", "ranknet", "listnet", "bpr", "hinge"}
 
 
 def _cfg(config, name: str, default=None):
@@ -74,6 +74,7 @@ def build_loss(config, normalizer_mean=None, normalizer_scale=None):
         ranknet_alpha=float(_cfg(config, "loss_ranknet_alpha", 1.0)),
         listnet_tau=float(_cfg(config, "loss_listnet_tau", 1.0)),
         hinge_margin=float(_cfg(config, "loss_hinge_margin", 0.01)),
+        cross_delta=float(_cfg(config, "loss_cross_delta", 0.0)),
         rank_score_normalization=str(
             _cfg(config, "loss_rank_score_normalization", "zscore")
         ),
@@ -218,7 +219,6 @@ class TradingBlockScoreAggregatorV2(nn.Module):
         if self.score_kind in self.LOG_RETURN_KINDS:
             return torch.log(ratio)
         return ratio - 1.0
-
     def forward(
         self,
         pred: torch.Tensor,
@@ -258,6 +258,7 @@ class CompositeTradingLossV2(nn.Module):
         ranknet_alpha: float = 1.0,
         listnet_tau: float = 1.0,
         hinge_margin: float = 0.01,
+        cross_delta: float = 0.0,
         rank_score_normalization: str = "zscore",
         inverse_norm: bool = True,
         normalizer_mean=None,
@@ -274,6 +275,7 @@ class CompositeTradingLossV2(nn.Module):
         self.ranknet_alpha = float(ranknet_alpha)
         self.listnet_tau = float(listnet_tau)
         self.hinge_margin = float(hinge_margin)
+        self.cross_delta = float(cross_delta)
         self.rank_score_normalization = rank_score_normalization.lower()
         self.track_components = bool(track_components)
         self.eps = float(eps)
@@ -295,6 +297,8 @@ class CompositeTradingLossV2(nn.Module):
             raise ValueError("loss_listnet_tau deve ser positivo.")
         if self.hinge_margin < 0:
             raise ValueError("loss_hinge_margin deve ser não-negativo.")
+        if self.cross_delta < 0:
+            raise ValueError("loss_cross_delta deve ser não-negativo.")
         if self.rank_score_normalization not in {"none", "zscore"}:
             raise ValueError("loss_rank_score_normalization deve ser none ou zscore.")
 
@@ -368,15 +372,26 @@ class CompositeTradingLossV2(nn.Module):
         if self.cross_loss_name == "mse":
             return F.mse_loss(pred_scores, target_scores)
 
-        pred, target = self._flatten_blocks(pred_scores, target_scores)
-        pred, target = self._normalize_rank_scores(pred, target)
+        # Delta is defined on the realized financial scores in their original
+        # scale, before any cross-sectional z-score transformation.
+        pred_raw, target_raw = self._flatten_blocks(pred_scores, target_scores)
 
         if self.cross_loss_name == "listnet":
+            pred, target = self._normalize_rank_scores(pred_raw, target_raw)
             p_true = F.softmax(target / self.listnet_tau, dim=1)
             log_p_pred = F.log_softmax(pred / self.listnet_tau, dim=1)
             return -(p_true * log_p_pred).sum(dim=1).mean()
 
-        pred_diff, target_diff, valid = self._pairwise_upper(pred, target)
+        _, target_diff_raw, valid = self._pairwise_upper(pred_raw, target_raw)
+        valid = valid & (target_diff_raw.abs() > self.cross_delta)
+
+        pred, target = self._normalize_rank_scores(pred_raw, target_raw)
+        pred_diff, target_diff, _ = self._pairwise_upper(pred, target)
+
+        if self.cross_loss_name == "pairwise_mse":
+            values = (pred_diff - target_diff).square()
+            return self._masked_mean(values, valid)
+
         sign = torch.sign(target_diff)
 
         if self.cross_loss_name == "ranknet":
@@ -407,6 +422,7 @@ class CompositeTradingLossV2(nn.Module):
             "K": int(self.trade_window),
             "n_blocks": int(pred_scores.shape[1]),
             "n_assets": int(pred_scores.shape[2]),
+            "cross_delta": float(self.cross_delta),
         }
 
     def forward(
