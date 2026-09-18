@@ -43,7 +43,7 @@ TRADE_WINDOWS=(1 5 10 15 20 24)
 
 # Composite loss
 TEMPORAL_LOSS="mse"
-CROSS_LOSS="mse"                # mse | ranknet | listnet | bpr | hinge
+CROSS_LOSS="mse"                # mse | pairwise_mse | ranknet | listnet | bpr | hinge
 CROSS_LAMBDA="0.5"                  # Peso da tarefa cross-sectional
 SCORE_KIND="simple_return"          # simple_return | log_return
 CROSS_SCORE_NORMALIZATION="zscore"  # zscore | none
@@ -51,6 +51,7 @@ CROSS_SCALE="0.01"                  # Controla a escala (impacto) da loss cross-
 RANKNET_ALPHA="1.5"                 # controla inclinação/intensidade da penalização pairwise. Quando = 1 -> BRP = ranknet
 LISTNET_TAU="1.0"                   # controla a temperatura na listnet
 HINGE_MARGIN="0.05"                 # margem m da Hinge
+CROSS_DELTA="0.0"                     # zona morta pairwise; ignora pares com |d_ij| <= delta
 
 # Saída
 # FALSE (default): salva somente Parquet.
@@ -120,7 +121,7 @@ validate_models() {
 
 validate_loss() {
   case "$TEMPORAL_LOSS" in mse|mae|huber) ;; *) echo "ERRO: TEMPORAL_LOSS inválida: $TEMPORAL_LOSS" >&2; exit 2 ;; esac
-  case "$CROSS_LOSS" in mse|ranknet|listnet|bpr|hinge) ;; *) echo "ERRO: CROSS_LOSS inválida: $CROSS_LOSS" >&2; exit 2 ;; esac
+  case "$CROSS_LOSS" in mse|pairwise_mse|ranknet|listnet|bpr|hinge) ;; *) echo "ERRO: CROSS_LOSS inválida: $CROSS_LOSS" >&2; exit 2 ;; esac
   case "$SCORE_KIND" in simple_return|log_return) ;; *) echo "ERRO: SCORE_KIND inválido: $SCORE_KIND" >&2; exit 2 ;; esac
   case "$CROSS_SCORE_NORMALIZATION" in zscore|none) ;; *) echo "ERRO: CROSS_SCORE_NORMALIZATION inválida: $CROSS_SCORE_NORMALIZATION" >&2; exit 2 ;; esac
 }
@@ -186,7 +187,7 @@ model_args() {
   DETERMINISTIC_MODE="full"
 
   local loss_fields
-  loss_fields="\"loss_cross_scale\":${CROSS_SCALE},\"loss_ranknet_alpha\":${RANKNET_ALPHA},\"loss_listnet_tau\":${LISTNET_TAU},\"loss\":\"composite_trading\",\"loss_temporal\":\"${TEMPORAL_LOSS}\",\"loss_cross\":\"${CROSS_LOSS}\",\"loss_trade_window\":${k},\"loss_cross_lambda\":${CROSS_LAMBDA},\"loss_data_kind\":\"${data_kind}\",\"loss_score_kind\":\"${SCORE_KIND}\",\"loss_cross_score_normalization\":\"${CROSS_SCORE_NORMALIZATION}\",\"loss_hinge_margin\":${HINGE_MARGIN},\"loss_inverse_norm\":true,\"loss_track_components\":true"
+  loss_fields="\"loss_cross_scale\":${CROSS_SCALE},\"loss_ranknet_alpha\":${RANKNET_ALPHA},\"loss_listnet_tau\":${LISTNET_TAU},\"loss\":\"composite_trading\",\"loss_temporal\":\"${TEMPORAL_LOSS}\",\"loss_cross\":\"${CROSS_LOSS}\",\"loss_trade_window\":${k},\"loss_cross_lambda\":${CROSS_LAMBDA},\"loss_data_kind\":\"${data_kind}\",\"loss_score_kind\":\"${SCORE_KIND}\",\"loss_cross_score_normalization\":\"${CROSS_SCORE_NORMALIZATION}\",\"loss_hinge_margin\":${HINGE_MARGIN},\"loss_cross_delta\":${CROSS_DELTA},\"loss_inverse_norm\":true,\"loss_track_components\":true"
 
   case "$model_key" in
     DUET)
@@ -247,8 +248,7 @@ decode_predictions() {
     "$PYTHON_BIN" ts_benchmark/utils/decode_prediction.py "$tarfile"
     extracted_dir="$(dirname "$tarfile")/$(basename "$tarfile" .tar.gz)_extracted"
     [[ -d "$extracted_dir" ]] || { echo "ERRO: pasta extraída não encontrada: $extracted_dir" >&2; exit 4; }
-    while IFS= read -r decoded_csv; do
-      rows=$(($(wc -l < "$decoded_csv") - 1))
+    while IFS= read -r decoded_csv; do      rows=$(($(wc -l < "$decoded_csv") - 1))
       [[ "$rows" -eq "$h" ]] || continue
       cp "$decoded_csv" "${decoded_dir}/csv_sample_${copy_index}_inference_data.csv"
       copy_index=$((copy_index + 1))
@@ -291,8 +291,8 @@ record_completed_task() {
   local task_id="$1" dataset_label="$2" model_key="$3" lb="$4" h="$5" k="$6" final_dir="$7"
   local completed_file="${OUT_ROOT}/completed_tasks.csv"
   local lock_file="${OUT_ROOT}/.completed_tasks.lock"
-  local header="array_index,dataset,model,lookback,pred_len,k,temporal_loss,cross_loss,cross_lambda,cross_scale,ranknet_alpha,listnet_tau,score_kind,cross_score_normalization,seed,slurm_job_id,output_dir"
-  local row="${task_id},${dataset_label},${model_key},${lb},${h},${k},${TEMPORAL_LOSS},${CROSS_LOSS},${CROSS_LAMBDA},${CROSS_SCALE},${RANKNET_ALPHA},${LISTNET_TAU},${SCORE_KIND},${CROSS_SCORE_NORMALIZATION},${SEED},${SLURM_JOB_ID:-},${final_dir}"
+  local header="array_index,dataset,model,lookback,pred_len,k,temporal_loss,cross_loss,cross_lambda,cross_scale,ranknet_alpha,listnet_tau,cross_delta,score_kind,cross_score_normalization,seed,slurm_job_id,output_dir"
+  local row="${task_id},${dataset_label},${model_key},${lb},${h},${k},${TEMPORAL_LOSS},${CROSS_LOSS},${CROSS_LAMBDA},${CROSS_SCALE},${RANKNET_ALPHA},${LISTNET_TAU},${CROSS_DELTA},${SCORE_KIND},${CROSS_SCORE_NORMALIZATION},${SEED},${SLURM_JOB_ID:-},${final_dir}"
 
   mkdir -p "$OUT_ROOT"
   (
@@ -314,7 +314,7 @@ write_manifest() {
   mkdir -p "$OUT_ROOT"
   local manifest="${OUT_ROOT}/design_composite_trading_v3.csv"
   {
-    echo "dataset,modelo,lookback,pred_len,k,temporal_loss,cross_loss,cross_lambda,score_kind,cross_score_normalization,seed"
+    echo "dataset,modelo,lookback,pred_len,k,temporal_loss,cross_loss,cross_lambda,cross_delta,score_kind,cross_score_normalization,seed"
     local spec label candidates data_kind offset model lb pair h k
     for spec in "${DATASET_SPECS[@]}"; do
       IFS=':' read -r label candidates data_kind offset <<< "$spec"
@@ -322,7 +322,7 @@ write_manifest() {
         for lb in "${LOOKBACKS[@]}"; do
           for pair in "${HK_PAIRS[@]}"; do
             IFS=':' read -r h k <<< "$pair"
-            echo "${label},${model},${lb},${h},${k},${TEMPORAL_LOSS},${CROSS_LOSS},${CROSS_LAMBDA},${SCORE_KIND},${CROSS_SCORE_NORMALIZATION},${SEED}"
+            echo "${label},${model},${lb},${h},${k},${TEMPORAL_LOSS},${CROSS_LOSS},${CROSS_LAMBDA},${CROSS_DELTA},${SCORE_KIND},${CROSS_SCORE_NORMALIZATION},${SEED}"
           done
         done
       done
@@ -399,7 +399,7 @@ echo "Lookbacks: ${LOOKBACKS[*]}"
 echo "H        : ${HORIZONS[*]}"
 echo "K        : ${TRADE_WINDOWS[*]}"
 echo "Pares HK : ${HK_PAIRS[*]}"
-echo "Loss     : temporal=${TEMPORAL_LOSS}, cross=${CROSS_LOSS}, lambda=${CROSS_LAMBDA}, cross_norm=${CROSS_SCORE_NORMALIZATION}, CS=${CROSS_SCALE}"
+echo "Loss     : temporal=${TEMPORAL_LOSS}, cross=${CROSS_LOSS}, lambda=${CROSS_LAMBDA}, cross_norm=${CROSS_SCORE_NORMALIZATION}, CS=${CROSS_SCALE}, delta=${CROSS_DELTA}"
 echo "Parquet  : ${PARQUET_ROOT}"
 echo "Manter CSV: ${MANTER_CSV}"
 echo "Tarefas  : ${N_TASKS}"
