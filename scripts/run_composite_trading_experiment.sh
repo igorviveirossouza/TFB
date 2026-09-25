@@ -43,15 +43,17 @@ TRADE_WINDOWS=(1 5 10 15 20 24)
 
 # Composite loss
 TEMPORAL_LOSS="mse"
-CROSS_LOSS="mse"                # mse | pairwise_mse | ranknet | listnet | bpr | hinge
-CROSS_LAMBDA="0.5"                  # Peso da tarefa cross-sectional
+CROSS_LOSS="hinge"                    # mse | pairwise_mse | ranknet | listnet | bpr | hinge
+CROSS_LAMBDA="0.999"                  # Peso da tarefa cross-sectional
 SCORE_KIND="simple_return"          # simple_return | log_return
 CROSS_SCORE_NORMALIZATION="zscore"  # zscore | none
-CROSS_SCALE="0.01"                  # Controla a escala (impacto) da loss cross-section
-RANKNET_ALPHA="1.5"                 # controla inclinação/intensidade da penalização pairwise. Quando = 1 -> BRP = ranknet
+CROSS_SCALE="1"                     # Controla a escala (impacto) da loss cross-section
+#------------------------------------------------------------------------------------------------
+RANKNET_ALPHA="5"                 # controla inclinação/intensidade da penalização pairwise. Quando = 1 -> BRP = ranknet
 LISTNET_TAU="1.0"                   # controla a temperatura na listnet
-HINGE_MARGIN="0.05"                 # margem m da Hinge
-CROSS_DELTA="0.0"                     # zona morta pairwise; ignora pares com |d_ij| <= delta
+HINGE_MARGIN="0.1"                  # margem m da Hinge
+#------------------------------------------------------------------------------------------------
+CROSS_DELTA="0.0"                   # zona morta pairwise; ignora pares com |d_ij| <= delta
 
 # Saída
 # FALSE (default): salva somente Parquet.
@@ -66,7 +68,7 @@ TFB_ROOT="${TFB_ROOT:-/sonic_home/igor.viveiros/src/TFB}"
 VENV_PATH="${VENV_PATH:-/sonic_home/igor.viveiros/py310/bin/activate}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 CONFIG_FILE="${CONFIG_FILE:-rolling_forecast_config.json}"
-OUT_ROOT="${OUT_ROOT:-/snfs2/igor.viveiros/previsoes/parquet/mse_lambda05_cs001}"  # Diretório de saída das previsões
+OUT_ROOT="${OUT_ROOT:-/snfs2/igor.viveiros/previsoes/parquet/hinge_lambda0999}"  # Diretório de saída das previsões
 RESULT_ROOT="${RESULT_ROOT:-/snfs2/igor.viveiros/result}"
 PARQUET_ROOT="${PARQUET_ROOT:-${OUT_ROOT}/parquet}"
 EXPERIMENT_ID="${EXPERIMENT_ID:-$(basename "${OUT_ROOT%/}")}"  # Isola resultados temporários entre experimentos
@@ -292,8 +294,8 @@ record_completed_task() {
   local task_id="$1" dataset_label="$2" model_key="$3" lb="$4" h="$5" k="$6" final_dir="$7"
   local completed_file="${OUT_ROOT}/completed_tasks.csv"
   local lock_file="${OUT_ROOT}/.completed_tasks.lock"
-  local header="array_index,dataset,model,lookback,pred_len,k,temporal_loss,cross_loss,cross_lambda,cross_scale,ranknet_alpha,listnet_tau,cross_delta,score_kind,cross_score_normalization,seed,slurm_job_id,output_dir"
-  local row="${task_id},${dataset_label},${model_key},${lb},${h},${k},${TEMPORAL_LOSS},${CROSS_LOSS},${CROSS_LAMBDA},${CROSS_SCALE},${RANKNET_ALPHA},${LISTNET_TAU},${CROSS_DELTA},${SCORE_KIND},${CROSS_SCORE_NORMALIZATION},${SEED},${SLURM_JOB_ID:-},${final_dir}"
+  local header="array_index,dataset,model,lookback,pred_len,k,temporal_loss,cross_loss,cross_lambda,cross_scale,ranknet_alpha,hinge_margin,listnet_tau,cross_delta,score_kind,cross_score_normalization,seed,slurm_job_id,output_dir"
+  local row="${task_id},${dataset_label},${model_key},${lb},${h},${k},${TEMPORAL_LOSS},${CROSS_LOSS},${CROSS_LAMBDA},${CROSS_SCALE},${RANKNET_ALPHA},${HINGE_MARGIN},${LISTNET_TAU},${CROSS_DELTA},${SCORE_KIND},${CROSS_SCORE_NORMALIZATION},${SEED},${SLURM_JOB_ID:-},${final_dir}"
 
   mkdir -p "$OUT_ROOT"
   (
@@ -405,12 +407,14 @@ echo "Parquet  : ${PARQUET_ROOT}"
 echo "Manter CSV: ${MANTER_CSV}"
 echo "Tarefas  : ${N_TASKS}"
 
+#TODO O ARRAy--array="0-$((N_TASKS - 1))%${MAX_GPU_JOBS}" \
+
 sbatch \
   -p "$GPU_PARTITION" \
   --gres=gpu:1 \
   --time="$GPU_TIME" \
   --array="0-$((N_TASKS - 1))%${MAX_GPU_JOBS}" \
-  --job-name="mse_lambda05_cs001" \
-  --output="${LOG_ROOT}/mse_lambda05_cs001%A_%a.out" \
-  --error="${LOG_ROOT}/mse_lambda05_cs001%A_%a.err" \
+  --job-name="hinge_lambda0999" \
+  --output="${LOG_ROOT}/hinge_lambda0999%A_%a.out" \
+  --error="${LOG_ROOT}/hinge_lambda0999%A_%a.err" \
   "$SCRIPT_PATH" worker
