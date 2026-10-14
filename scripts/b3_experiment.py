@@ -90,7 +90,7 @@ def make_tasks(config, mode):
         horizons = config['horizons'] if mode != 'var' else [max(config['horizons'])]
         for loss, lam, delta, model, lb, horizon in itertools.product(
                 losses, lambdas, deltas, models, lookbacks, horizons):
-            ks = [k for k in config['trade_windows'] if k <= horizon] if mode == 'composto' else [None]
+            ks = [k for k in config['trade_windows'] if k <= horizon and horizon % k == 0] if mode == 'composto' else [None]
             for k in ks:
                 tasks.append(dict(array_index=len(tasks), treino=pct, experimento=mode,
                                   loss=loss, cross_lambda=lam, cross_delta=delta,
@@ -478,7 +478,7 @@ def main():
     if args.mode == 'var':
         print(f'Um ajuste por corte; os horizontes saem do mesmo VAR: {config["horizons"]}.', flush=True)
     if args.mode == 'composto':
-        pairs = sum(k <= h for h in config['horizons'] for k in config['trade_windows'])
+        pairs = sum(k <= h and h % k == 0 for h in config['horizons'] for k in config['trade_windows'])
         factors = [len(config[key]) for key in ('train_percentages', 'models', 'lookbacks')]
         factors += [pairs] + [len(config[key]) for key in ('cross_losses', 'lambdas', 'deltas')]
         print('Grade: ' + ' × '.join(map(str, factors)) + f' = {len(tasks)} treinamentos.', flush=True)

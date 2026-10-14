@@ -32,7 +32,7 @@ def config():
     return json.loads(result.stdout)
 
 
-@pytest.mark.parametrize("mode,count", [("temporal", 324), ("composto", 54432), ("var", 3)])
+@pytest.mark.parametrize("mode,count", [("temporal", 324), ("composto", 41472), ("var", 3)])
 def test_full_design_has_unique_destinations_and_contiguous_global_ids(config, mode, count):
     tasks = experiment.make_tasks(config, mode)
     paths = [experiment.output_path(task) for task in tasks]
@@ -52,7 +52,7 @@ def test_full_design_has_unique_destinations_and_contiguous_global_ids(config, m
 def test_full_grid_preserves_training_parameters_and_valid_hk_pairs(config):
     expected_pairs = {
         1: {1}, 5: {1, 5}, 10: {1, 5, 10},
-        15: {1, 5, 10, 15}, 20: {1, 5, 10, 15, 20}, 25: {1, 5, 10, 15, 20, 25},
+        15: {1, 5, 15}, 20: {1, 5, 10, 20}, 25: {1, 5, 25},
     }
     observed_pairs = {h: set() for h in expected_pairs}
     observed_models = set()
@@ -128,16 +128,16 @@ def test_cutoffs_match_integer_floor_even_at_float_roundoff_edges(config):
 
 
 def test_composite_chunks_cover_each_task_once():
-    chunks = experiment.array_chunks(54432)
-    assert len(chunks) == 55
-    assert chunks[-1] == (54000, 432)
+    chunks = experiment.array_chunks(41472)
+    assert len(chunks) == 42
+    assert chunks[-1] == (41000, 472)
     assert all(count == 1000 for _, count in chunks[:-1])
-    assert [offset + local for offset, count in chunks for local in range(count)] == list(range(54432))
+    assert [offset + local for offset, count in chunks for local in range(count)] == list(range(41472))
     with pytest.raises(ValueError):
-        experiment.array_chunks(54432, 0)
+        experiment.array_chunks(41472, 0)
 
 
-@pytest.mark.parametrize("mode,count,expected_chunks", [("temporal", 324, 1), ("composto", 54432, 55), ("var", 3, 1)])
+@pytest.mark.parametrize("mode,count,expected_chunks", [("temporal", 324, 1), ("composto", 41472, 42), ("var", 3, 1)])
 def test_submission_resources_offsets_dependencies_and_export(monkeypatch, tmp_path, mode, count, expected_chunks):
     monkeypatch.setattr(experiment.shutil, "which", lambda name: "/fake/sbatch" if name == "sbatch" else None)
     for name, value in {"LOG_ROOT": str(tmp_path / "logs"), "ARRAY_CHUNK_SIZE": "1000", "MAX_GPU_JOBS": "6", "GPU_PARTITION": "medusas_dev", "GPU_TIME": "08:00:00", "VENV_PATH": "/env/activate", "PYTHON_BIN": "/env/python"}.items():
@@ -292,7 +292,7 @@ def test_dry_run_and_task_inspection_make_no_output(tmp_path):
     import os
 
     env = dict(os.environ, OUT_ROOT=str(tmp_path / "absent"), DATASET_PATH=str(tmp_path / "missing.csv"))
-    for options in (["--dry-run"], ["--task", "54431"]):
+    for options in (["--dry-run"], ["--task", "41471"]):
         result = subprocess.run(["bash", str(REPO / "scripts/run_composite_trading_experiment.sh"), *options], env=env, check=True, text=True, capture_output=True)
         assert result.stdout.strip()
         assert not (tmp_path / "absent").exists()
@@ -369,7 +369,7 @@ def test_editable_shell_parameters_reach_python_without_json(tmp_path):
     assert not (tmp_path / 'out').exists()
     original = subprocess.run(['bash', str(script), '--dry-run'], env=env,
                               check=True, text=True, capture_output=True)
-    assert '54432 tarefas' in original.stdout
+    assert '41472 tarefas' in original.stdout
 
 
 def test_cluster_node_cpu_and_memory_fields_reach_sbatch(monkeypatch, tmp_path):

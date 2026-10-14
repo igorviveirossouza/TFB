@@ -14,7 +14,7 @@ alterá-los para ajustar um experimento.
 | Script | Experimento | Configurações |
 | --- | --- | ---: |
 | `scripts/run_temporal_experiment.sh` | MSE temporal, seis redes | 324 |
-| `scripts/run_composite_trading_experiment.sh` | MSE temporal + loss cross-sectional, seis redes | 54.432 |
+| `scripts/run_composite_trading_experiment.sh` | MSE temporal + loss cross-sectional, seis redes | 41.472 |
 | `scripts/run_var_experiment.sh` | VAR com 32 lags, um ajuste por corte | 3 |
 
 Os scripts submetem o experimento completo quando chamados sem argumentos.
@@ -126,29 +126,28 @@ delta é avaliada nos retornos simples realizados antes do z-score.
 | LISTNET_TAU | 1 |
 | HINGE_MARGIN | 0.1 |
 
-São válidos todos os pares com `K ≤ H`, sem exigir divisibilidade. Há 21 pares:
+São válidos os pares com `K ≤ H` e `H % K == 0`. Há 16 pares:
 
 | H | K válidos |
 | --- | --- |
 | 1 | 1 |
 | 5 | 1, 5 |
 | 10 | 1, 5, 10 |
-| 15 | 1, 5, 10, 15 |
-| 20 | 1, 5, 10, 15, 20 |
-| 25 | 1, 5, 10, 15, 20, 25 |
+| 15 | 1, 5, 15 |
+| 20 | 1, 5, 10, 20 |
+| 25 | 1, 5, 25 |
 
-Quando K não divide H, a componente cross-sectional usa `floor(H/K)` blocos
-completos de K passos. A cauda de `H % K` passos participa da loss temporal,
-que sempre usa todos os H passos. Por exemplo, `(H=15,K=10)` contém um bloco
-cross-sectional de 10 passos e 5 passos restantes na parte temporal. A auditoria
-registra `cross_blocks`, `cross_steps` e `cross_tail_steps`. A versão legada V2
-mantém sua regra anterior; o experimento principal usa V3 com os 21 pares.
+A divisibilidade é exigida na grade e no cálculo da loss, inclusive em
+chamadas diretas à V3. Assim, os blocos de K passos cobrem todos os H passos;
+não há cauda excluída da componente cross-sectional. Pares como `(H=20,K=15)`
+são rejeitados antes do backpropagation. A auditoria registra `cross_blocks`,
+`cross_steps=H` e `cross_tail_steps=0`.
 
 Assim, a grade é:
 
 ```text
-3 cortes × 6 modelos × 3 lookbacks × 21 pares (H,K)
-× 3 lambdas × 4 deltas × 4 losses = 54.432 configurações
+3 cortes × 6 modelos × 3 lookbacks × 16 pares (H,K)
+× 3 lambdas × 4 deltas × 4 losses = 41.472 configurações
 ```
 
 **ListNet não utiliza delta na implementação v3.** Seus quatro valores são
@@ -261,9 +260,9 @@ Por padrão, a partição é `medusas_dev`, com limite de oito horas por job e
 até seis tarefas simultâneas por array. As redes solicitam uma GPU por
 tarefa; o VAR usa CPU. Os arrays são limitados a 1.000 tarefas por submissão,
 e esse tamanho é reduzido se o Slurm informar um limite menor. No
-experimento composto, o script submete 55 arrays: 54 com 1.000 tarefas
-(`0-999`) e o último com 432 (`0-431`). Os arrays são encadeados com
-`afterany`, mantendo os índices globais de 0 a 54.431 e evitando que o
+experimento composto, o script submete 42 arrays: 41 com 1.000 tarefas
+(`0-999`) e o último com 472 (`0-471`). Os arrays são encadeados com
+`afterany`, mantendo os índices globais de 0 a 41.471 e evitando que o
 limite de seis tarefas seja multiplicado pelo número de arrays. Os
 experimentos temporal e VAR usam, respectivamente, arrays `0-323` e `0-2`.
 

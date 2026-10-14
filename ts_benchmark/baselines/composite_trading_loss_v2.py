@@ -115,7 +115,6 @@ class TradingBlockScoreAggregatorV2(nn.Module):
         normalizer_mean=None,
         normalizer_scale=None,
         eps: float = 1e-8,
-        allow_nondivisible_horizon: bool = False,
     ) -> None:
         super().__init__()
         self.trade_window = int(trade_window)
@@ -123,7 +122,6 @@ class TradingBlockScoreAggregatorV2(nn.Module):
         self.score_kind = score_kind.lower()
         self.inverse_norm = bool(inverse_norm)
         self.eps = float(eps)
-        self.allow_nondivisible_horizon = bool(allow_nondivisible_horizon)
 
         valid_data = self.LOG_RETURN_KINDS | self.SIMPLE_RETURN_KINDS | self.PRICE_KINDS
         valid_score = self.LOG_RETURN_KINDS | self.SIMPLE_RETURN_KINDS
@@ -163,7 +161,7 @@ class TradingBlockScoreAggregatorV2(nn.Module):
         batch, horizon, n_assets = pred.shape
         if self.trade_window > horizon:
             raise ValueError(f"K={self.trade_window} não pode ser maior que H={horizon}.")
-        if horizon % self.trade_window != 0 and not self.allow_nondivisible_horizon:
+        if horizon % self.trade_window != 0:
             raise ValueError(
                 "composite_trading exige K divisor exato de H: "
                 f"H={horizon}, K={self.trade_window}, resto={horizon % self.trade_window}."
@@ -187,9 +185,7 @@ class TradingBlockScoreAggregatorV2(nn.Module):
     def _aggregate_returns(self, x: torch.Tensor) -> torch.Tensor:
         batch, horizon, n_assets = x.shape
         n_blocks = horizon // self.trade_window
-        # V3 may use H not divisible by K. Only complete K-step blocks enter
-        # the cross-sectional term; the temporal term still covers every step.
-        blocks = x[:, :n_blocks * self.trade_window, :].reshape(batch, n_blocks, self.trade_window, n_assets)
+        blocks = x.reshape(batch, n_blocks, self.trade_window, n_assets)
 
         if self.data_kind in self.LOG_RETURN_KINDS:
             block_log = blocks.sum(dim=2)

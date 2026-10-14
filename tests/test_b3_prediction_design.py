@@ -1,4 +1,4 @@
-"""21-pair loss coverage and one fitted VAR producing every forecast horizon."""
+"""16-pair loss coverage and one fitted VAR producing every forecast horizon."""
 import copy
 import csv
 import json
@@ -20,7 +20,7 @@ import b3_experiment as experiment
 import b3_experiment_io as experiment_io
 
 HORIZONS = [1, 5, 10, 15, 20, 25]
-PAIRS = [(h, k) for h in HORIZONS for k in HORIZONS if k <= h]
+PAIRS = [(h, k) for h in HORIZONS for k in HORIZONS if k <= h and h % k == 0]
 
 
 @pytest.fixture(scope='module')
@@ -52,36 +52,27 @@ def test_every_requested_pair_runs_forward_and_backward(config, horizon, k, cros
     assert components['K'] == k
     assert components['n_blocks'] == horizon//k
     assert components['cross_steps'] == horizon//k*k
-    assert components['cross_tail_steps'] == horizon%k
+    assert components['cross_tail_steps'] == 0
+    assert components['cross_steps'] == horizon
 
 
-def test_incomplete_tail_is_only_excluded_from_cross_not_temporal_loss():
+@pytest.mark.parametrize('horizon,k', [(15,10), (20,15), (25,10), (25,15), (25,20)])
+@pytest.mark.parametrize('cross_loss', ['ranknet', 'hinge', 'listnet', 'pairwise_mse'])
+def test_nondivisible_pairs_are_rejected_before_backpropagation(horizon, k, cross_loss):
     torch = pytest.importorskip('torch')
     from ts_benchmark.baselines.composite_trading_loss_v3 import CompositeTradingLossV3
     from ts_benchmark.baselines.composite_trading_loss_v2 import TradingBlockScoreAggregatorV2
-    criterion = CompositeTradingLossV3(trade_window=10, data_kind='log_return',
-                                      score_kind='log_return', cross_loss='pairwise_mse',
-                                      cross_lambda=.5, inverse_norm=False, track_components=True)
-    prediction = torch.zeros(1, 15, 2, requires_grad=True)
+    prediction = torch.zeros(1, horizon, 3, requires_grad=True)
     target = torch.zeros_like(prediction)
-    target[:, :10, 1] = .01
-    target[:, 10:, :] = .02
-    scores, _ = criterion.aggregator(prediction, target)
-    assert scores.shape == (1, 1, 2)
-    loss = criterion(prediction, target)
-    cross_before = criterion.last_components['cross']
-    loss.backward()
-    expected_tail_gradient = .5 * 2*(prediction.detach()-target)/prediction.numel()
-    torch.testing.assert_close(prediction.grad[:, 10:], expected_tail_gradient[:, 10:])
-    changed_tail = prediction.detach().clone()
-    changed_tail[:, 10:] = 999
-    criterion(changed_tail, target)
-    assert criterion.last_components['cross'] == cross_before
-    assert criterion.last_components['H'] == 15
-    # Legacy V2 keeps its original strict-divisibility contract.
-    legacy = TradingBlockScoreAggregatorV2(trade_window=10, data_kind='log_return',
+    criterion = CompositeTradingLossV3(trade_window=k, data_kind='log_return',
+                                      cross_loss=cross_loss, cross_lambda=.5,
+                                      inverse_norm=False)
+    with pytest.raises(ValueError, match='divisor exato'):
+        criterion(prediction, target)
+    assert prediction.grad is None
+    legacy = TradingBlockScoreAggregatorV2(trade_window=k, data_kind='log_return',
                                          score_kind='log_return', inverse_norm=False)
-    with pytest.raises(ValueError, match='divisor'):
+    with pytest.raises(ValueError, match='divisor exato'):
         legacy(prediction, target)
 
 
