@@ -24,7 +24,12 @@ import b3_experiment_io as experiment_io
 
 @pytest.fixture
 def config():
-    return json.loads((REPO / "config/b3_experiments.json").read_text())
+    result = subprocess.run(
+        ["bash", str(REPO / "scripts/run_composite_trading_experiment.sh"), "--print-config"],
+        env=dict(__import__("os").environ, TFB_ROOT=str(REPO), PYTHON_BIN=sys.executable),
+        check=True, capture_output=True, text=True,
+    )
+    return json.loads(result.stdout)
 
 
 @pytest.mark.parametrize("mode,count", [("temporal", 324), ("composto", 41472), ("var", 18)])
@@ -286,9 +291,9 @@ def test_completed_task_is_replaced_by_global_id_without_duplicate_rows(prepared
 def test_dry_run_and_task_inspection_make_no_output(tmp_path):
     import os
 
-    env = dict(os.environ, OUT_ROOT=str(tmp_path / "absent"), DATASET_PATH=str(tmp_path / "missing.csv"), B3_CONFIG=str(REPO / "config/b3_experiments.json"))
+    env = dict(os.environ, OUT_ROOT=str(tmp_path / "absent"), DATASET_PATH=str(tmp_path / "missing.csv"))
     for options in (["--dry-run"], ["--task", "41471"]):
-        result = subprocess.run([sys.executable, str(REPO / "scripts/b3_experiment.py"), "composto", *options], env=env, check=True, text=True, capture_output=True)
+        result = subprocess.run(["bash", str(REPO / "scripts/run_composite_trading_experiment.sh"), *options], env=env, check=True, text=True, capture_output=True)
         assert result.stdout.strip()
         assert not (tmp_path / "absent").exists()
 
@@ -319,3 +324,68 @@ def test_actual_tfb_data_source_loads_prepared_returns_and_does_not_scan_sidecar
     assert loader.dataset.get_series_meta_info(destination.name)["length"] == 4
     assert meta_path.read_bytes() == registered_bytes
     assert {destination.name, source.name} == set(loader.dataset.metadata.index)
+
+
+def test_editable_shell_parameters_reach_python_without_json(tmp_path):
+    import os
+
+    script = REPO / 'scripts/run_composite_trading_experiment.sh'
+    edited = tmp_path / script.name
+    content = script.read_text()
+    substitutions = {
+        'TRAIN_PERCENTAGES=(70 80 90)': 'TRAIN_PERCENTAGES=(80)',
+        'MODELS=(DUET Nonstationary_Transformer FEDformer TimesNet simpleFORMER simpleMLP)': 'MODELS=(simpleMLP)',
+        'LOOKBACKS=(32 128 256)': 'LOOKBACKS=(64)',
+        'HORIZONS=(1 5 10 15 20 25)': 'HORIZONS=(5)',
+        'TRADE_WINDOWS=(1 5 10 15 20 25)': 'TRADE_WINDOWS=(5)',
+        'CROSS_LOSSES=(ranknet hinge listnet pairwise_mse)': 'CROSS_LOSSES=(hinge)',
+        'LAMBDAS=(0.1 0.5 0.8)': 'LAMBDAS=(0.8)',
+        'DELTAS=(0 0.025 0.05 0.1)': 'DELTAS=(0.05)',
+        'NUM_EPOCHS=100': 'NUM_EPOCHS=77',
+        'PATIENCE=10': 'PATIENCE=9',
+        'LEARNING_RATE=0.0001': 'LEARNING_RATE=0.0002',
+        'CROSS_SCALE=1': 'CROSS_SCALE=2',
+        'RANKNET_ALPHA=1': 'RANKNET_ALPHA=3',
+        'LISTNET_TAU=1': 'LISTNET_TAU=2',
+        'HINGE_MARGIN=0.1': 'HINGE_MARGIN=0.2',
+    }
+    for before, after in substitutions.items():
+        assert before in content
+        content = content.replace(before, after)
+    edited.write_text(content)
+    env = dict(os.environ, TFB_ROOT=str(REPO), PYTHON_BIN=sys.executable,
+               OUT_ROOT=str(tmp_path / 'out'), DATASET_PATH=str(tmp_path / 'missing.csv'))
+    result = subprocess.run(['bash', str(edited), '--task', '0'], env=env,
+                            check=True, text=True, capture_output=True)
+    task = json.loads(result.stdout)
+    hyper = task['model_spec'][1]
+    assert (task['treino'], task['modelo'], task['lookback'], task['pred_len'], task['k']) == (80, 'simpleMLP', 64, 5, 5)
+    assert (task['cross_lambda'], task['cross_delta']) == (0.8, 0.05)
+    assert (hyper['num_epochs'], hyper['patience'], hyper['lr']) == (77, 9, 0.0002)
+    assert (hyper['loss_cross_scale'], hyper['loss_ranknet_alpha'], hyper['loss_listnet_tau'], hyper['loss_hinge_margin']) == (2, 3, 2, 0.2)
+    preview = subprocess.run(['bash', str(edited), '--dry-run'], env=env,
+                             check=True, text=True, capture_output=True)
+    assert '1 tarefas' in preview.stdout
+    assert not (tmp_path / 'out').exists()
+    original = subprocess.run(['bash', str(script), '--dry-run'], env=env,
+                              check=True, text=True, capture_output=True)
+    assert '41472 tarefas' in original.stdout
+
+
+def test_cluster_node_cpu_and_memory_fields_reach_sbatch(monkeypatch, tmp_path):
+    monkeypatch.setattr(experiment.shutil, 'which', lambda name: '/fake/sbatch' if name == 'sbatch' else None)
+    monkeypatch.setenv('LOG_ROOT', str(tmp_path / 'logs'))
+    monkeypatch.setenv('GPU_PARTITION', 'medusas_dev')
+    monkeypatch.setenv('GPU_TIME', '08:00:00')
+    monkeypatch.setenv('NODELIST', 'medusa3')
+    monkeypatch.setenv('CPUS_PER_TASK', '4')
+    monkeypatch.setenv('MEMORY', '16G')
+    calls = []
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        return SimpleNamespace(stdout='12345')
+    monkeypatch.setattr(experiment.subprocess, 'run', fake_run)
+    experiment.submit('temporal', [None], tmp_path / 'out', REPO / 'scripts/run_temporal_experiment.sh')
+    assert '--nodelist=medusa3' in calls[0]
+    assert '--cpus-per-task=4' in calls[0]
+    assert '--mem=16G' in calls[0]

@@ -1,9 +1,15 @@
 # Experimentos principais B3
 
-Os três scripts abaixo usam a mesma configuração em
-`config/b3_experiments.json`. A coordenação fica em
-`scripts/b3_experiment.py` e a preparação dos dados e conversão das previsões
-em `scripts/b3_experiment_io.py`.
+**Edite diretamente o `.sh` do experimento.** Cada script contém sua própria
+grade, hiperparâmetros, caminhos e recursos do cluster no início do arquivo:
+
+- `scripts/run_temporal_experiment.sh`: seis redes com loss temporal;
+- `scripts/run_composite_trading_experiment.sh`: seis redes com loss composta;
+- `scripts/run_var_experiment.sh`: VAR com 32 lags.
+
+Não há arquivo JSON externo para editar. Os arquivos Python e
+`b3_experiment_env.sh` implementam a execução compartilhada; não é necessário
+alterá-los para ajustar um experimento.
 
 | Script | Experimento | Configurações |
 | --- | --- | ---: |
@@ -72,8 +78,8 @@ FEDformer e TimesNet mantêm `d_model=256` e `d_ff=512`; Nonstationary Transform
 mantém `d_model=128`, `d_ff=256` e `p_hidden_dims=[32,32]`. SimpleFormer e
 SimpleMLP mantêm `d_model=512`, duas camadas e dropout de 0.1; SimpleFormer
 mantém oito cabeças e `d_ff=2048`, e SimpleMLP mantém a largura temporal
-automática `2 × lookback`. A configuração central é a referência executável
-para os valores completos.
+automática `2 × lookback`. O bloco `MODEL_DEFAULTS_JSON` de cada script de redes contém os valores
+completos e pode ser editado no próprio `.sh`.
 
 A agenda `lradj=type1`, a normalização e os demais parâmetros preservados
 continuam conforme os experimentos anteriores. A taxa inicial de DUET,
@@ -198,6 +204,14 @@ bash scripts/run_composite_trading_experiment.sh --dry-run
 bash scripts/run_var_experiment.sh --dry-run
 ```
 
+Depois de editar os vetores, `--dry-run` recalcula a quantidade de tarefas.
+Por exemplo, reduzir `CROSS_LOSSES`, `LAMBDAS` ou `DELTAS` reduz a grade composta.
+Para visualizar todos os parâmetros efetivos definidos no `.sh`:
+
+```bash
+bash scripts/run_composite_trading_experiment.sh --print-config
+```
+
 Para inspecionar uma configuração pelo índice global, também sem executá-la:
 
 ```bash
@@ -244,24 +258,26 @@ verificados por hash. Uma nova configuração requer outra `OUT_ROOT`;
 alterar a fonte de preços exige ainda preparar um novo conjunto de dados
 derivados, sem sobrescrever silenciosamente o conjunto já registrado.
 
-As variáveis de ambiente abaixo permitem ajustar caminhos e recursos sem
-editar os scripts:
+Os campos abaixo estão no próprio `.sh`. Caminhos e recursos também podem
+ser sobrescritos pelo ambiente:
 
 | Variável | Uso |
 | --- | --- |
 | `TFB_ROOT` | Caminho do checkout do TFB |
 | `VENV_PATH` | Arquivo `bin/activate` do ambiente Python |
 | `PYTHON_BIN` | Executável Python |
-| `B3_CONFIG` | Caminho de uma configuração alternativa à configuração central |
 | `DATASET_PATH` | Caminho de `b3_daily_tfb_new.csv` |
 | `OUT_ROOT` | Raiz dos resultados Parquet e auditorias |
 | `RESULT_ROOT` | Raiz dos resultados temporários do TFB |
 | `LOG_ROOT` | Diretório dos logs Slurm |
 | `MANTER_CSV` | `TRUE` mantém também as janelas CSV; padrão `FALSE` |
 | `ARRAY_CHUNK_SIZE` | Máximo de tarefas por array; padrão 1.000 |
-| `MAX_GPU_JOBS` | Máximo de tarefas simultâneas por array; padrão 6 |
-| `GPU_PARTITION` | Partição Slurm; padrão `medusas_dev` |
-| `GPU_TIME` | Limite por job; padrão `08:00:00` |
+| `MAX_CONCURRENT_JOBS` | Máximo de tarefas simultâneas por array; padrão 6 |
+| `PARTITION` | Partição Slurm; padrão `medusas_dev` |
+| `TIME_LIMIT` | Limite por job; padrão `08:00:00` |
+| `NODELIST` | Nó(s) específicos; vazio permite a escolha pelo Slurm |
+| `CPUS_PER_TASK` | CPUs por tarefa; padrão 3 |
+| `MEMORY` | Memória solicitada, ex.: `16G`; vazio usa o padrão da partição |
 
 Exemplo com caminhos explícitos:
 

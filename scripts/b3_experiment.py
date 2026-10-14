@@ -42,8 +42,15 @@ def file_hash(path):
 
 
 def load_config():
-    path = Path(os.environ.get('B3_CONFIG', ROOT / 'config/b3_experiments.json')).resolve()
-    config = json.loads(path.read_text())
+    if os.environ.get('B3_INLINE_CONFIG'):
+        path = Path(os.environ['B3_CONFIG_SOURCE']).resolve()
+        config = json.loads(os.environ['B3_INLINE_CONFIG'])
+    elif os.environ.get('B3_CONFIG'):
+        # Explicit JSON inputs remain available for programmatic callers.
+        path = Path(os.environ['B3_CONFIG']).resolve()
+        config = json.loads(path.read_text())
+    else:
+        raise ValueError('Execute um dos três run*.sh; os hiperparâmetros ficam no próprio script.')
     for key in ('train_percentages', 'models', 'lookbacks', 'horizons',
                 'trade_windows', 'cross_losses', 'lambdas', 'deltas'):
         values = config[key]
@@ -114,7 +121,7 @@ def model_spec(config, task):
     # Ordinary MSE is exactly the composite's temporal term. Do not evaluate
     # unused cross scores at lambda=0 (0 * NaN would still contaminate the loss).
     hyper.update(config['loss'])
-    hyper.update(loss='composite_trading' if task['experimento'] == 'composto' else 'mse', loss_cross=task['loss'],
+    hyper.update(loss='composite_trading' if task['experimento'] == 'composto' else config['loss']['loss_temporal'], loss_cross=task['loss'],
                  loss_trade_window=task['k'] or 1,
                  loss_cross_lambda=task['cross_lambda'], loss_cross_delta=task['cross_delta'])
     qualified = 'duet.DUET' if name == 'DUET' else f'time_series_library.{name}'
@@ -361,6 +368,9 @@ def submit(mode, tasks, out_root, config_path):
                    '--time='+os.environ.get('GPU_TIME','08:00:00'),
                    f'--array=0-{count-1}%{max_jobs}', f'--job-name=b3_{mode}',
                    f'--output={logs}/{mode}_%A_%a.out', f'--error={logs}/{mode}_%A_%a.err']
+        for variable, flag in [('NODELIST', '--nodelist'), ('CPUS_PER_TASK', '--cpus-per-task'), ('MEMORY', '--mem')]:
+            if os.environ.get(variable):
+                command.append(f'{flag}={os.environ[variable]}')
         if mode != 'var':
             command += ['--gres=gpu:1']
         if previous:
@@ -381,9 +391,13 @@ def main():
     choice.add_argument('--dry-run', action='store_true')
     choice.add_argument('--task', type=int, help='Inspeciona uma tarefa; não treina nem grava')
     choice.add_argument('--prepare', action='store_true', help='Prepara dados e auditoria sem submeter')
+    choice.add_argument('--print-config', action='store_true', help='Exibe a configuração definida no .sh')
     parser.add_argument('--offset', type=int, default=0)
     args = parser.parse_args()
     config_path, config = load_config()
+    if args.print_config:
+        print(json.dumps(config, indent=2))
+        return
     tasks = make_tasks(config, args.mode)
     out_root = Path(os.environ.get('OUT_ROOT','/snfs2/igor.viveiros/previsoes/novas_previsoes')).resolve()
     if args.task is not None:
@@ -399,10 +413,16 @@ def main():
         return
     print(f'{args.mode}: {len(tasks)} tarefas; índices globais 0-{len(tasks)-1}', flush=True)
     print(f'Saída: {out_root/output_path(tasks[0])}', flush=True)
-    print('Cortes: floor(N × p), p em {0.7,0.8,0.9}; N = pregões dos log-retornos.', flush=True)
-    print('VAR usa todo o pré-teste.' if args.mode == 'var' else 'Validação interna: 12.5% do bloco pré-teste.', flush=True)
+    cuts = ', '.join(f'{pct/100:g}' for pct in config['train_percentages'])
+    print(f'Cortes: floor(N × p), p em {{{cuts}}}; N = pregões dos log-retornos.', flush=True)
+    validation = 100 * (1 - config['strategy']['train_ratio_in_tv'])
+    print('VAR usa todo o pré-teste.' if args.mode == 'var' else f'Validação interna: {validation:g}% do bloco pré-teste.', flush=True)
     if args.mode == 'composto':
-        print('16 pares H/K na grade padrão; delta não altera ListNet (mantida a grade solicitada).', flush=True)
+        pairs = sum(k <= h and h % k == 0 for h in config['horizons'] for k in config['trade_windows'])
+        factors = [len(config[key]) for key in ('train_percentages', 'models', 'lookbacks')]
+        factors += [pairs] + [len(config[key]) for key in ('cross_losses', 'lambdas', 'deltas')]
+        print('Grade: ' + ' × '.join(map(str, factors)) + f' = {len(tasks)} treinamentos.', flush=True)
+        print(f'{pairs} pares H/K válidos; delta não altera ListNet.', flush=True)
     if args.dry_run:
         chunks = array_chunks(len(tasks), int(os.environ.get('ARRAY_CHUNK_SIZE','1000')))
         print(f'{len(chunks)} array(s), tamanho máximo {max(c for _,c in chunks)}; último: 0-{chunks[-1][1]-1}')
