@@ -87,9 +87,10 @@ def make_tasks(config, mode):
         deltas = config['deltas'] if mode == 'composto' else [0]
         models = config['models'] if mode != 'var' else ['VAR']
         lookbacks = config['lookbacks'] if mode != 'var' else [config['var_lags']]
+        horizons = config['horizons'] if mode != 'var' else [max(config['horizons'])]
         for loss, lam, delta, model, lb, horizon in itertools.product(
-                losses, lambdas, deltas, models, lookbacks, config['horizons']):
-            ks = [k for k in config['trade_windows'] if k <= horizon and horizon % k == 0] if mode == 'composto' else [None]
+                losses, lambdas, deltas, models, lookbacks, horizons):
+            ks = [k for k in config['trade_windows'] if k <= horizon] if mode == 'composto' else [None]
             for k in ks:
                 tasks.append(dict(array_index=len(tasks), treino=pct, experimento=mode,
                                   loss=loss, cross_lambda=lam, cross_delta=delta,
@@ -110,6 +111,11 @@ def output_path(task):
     if task['k'] is not None:
         path /= f"k_dir={task['k']}"
     return path
+
+
+def task_output_paths(config, task, out_root):
+    horizons = config['horizons'] if task['modelo'] == 'VAR' else [task['pred_len']]
+    return {str(h): out_root / output_path(dict(task, pred_len=h)) for h in horizons}
 
 
 def model_spec(config, task):
@@ -179,12 +185,21 @@ def csv_text(rows):
 
 def audit_row(config, task, metadata, out_root, signature):
     _, hyper, _, deterministic = model_spec(config, task)
+    paths = task_output_paths(config, task, out_root)
+    cut = split_counts(config, task, metadata['n_rows'])['n_pretest']
+    cross_blocks = task['pred_len'] // task['k'] if task['k'] is not None else ''
     return dict(task, **split_counts(config, task, metadata['n_rows']),
                 dataset='log_retornos', data_source=metadata['source'],
                 source_sha256=metadata['source_sha256'], dataset_sha256=metadata['dataset_sha256'],
                 n_assets=metadata['n_assets'], seed=config['strategy']['seed'],
                 temporal_loss=config['loss']['loss_temporal'],
                 delta_effective=task['experimento'] == 'composto' and task['loss'] != 'listnet',
+                cross_blocks=cross_blocks,
+                cross_steps=cross_blocks * task['k'] if task['k'] is not None else '',
+                cross_tail_steps=task['pred_len'] % task['k'] if task['k'] is not None else '',
+                forecast_horizons=json.dumps([int(h) for h in paths]),
+                n_windows_by_horizon=json.dumps({h:metadata['n_rows']-cut-int(h)+1 for h in paths}),
+                output_dirs=json.dumps({h:str(path) for h, path in paths.items()}),
                 model_hyper_params=json.dumps(hyper, sort_keys=True),
                 strategy_args=json.dumps(strategy_args(config, task, metadata['n_rows']), sort_keys=True),
                 deterministic=deterministic, design_sha256=signature,
@@ -194,7 +209,8 @@ def audit_row(config, task, metadata, out_root, signature):
 def validate_lengths(config, tasks, metadata):
     for task in tasks:
         split = split_counts(config, task, metadata['n_rows'])
-        if split['n_windows'] < 1 or split['n_windows'] > config['strategy']['num_rollings']:
+        max_windows = metadata['n_rows'] - split['n_pretest'] - min(config['horizons']) + 1 if task['modelo'] == 'VAR' else split['n_windows']
+        if split['n_windows'] < 1 or max_windows > config['strategy']['num_rollings']:
             raise ValueError('Teste sem janelas ou NUM_ROLLINGS insuficiente para cobrir todo o teste')
         if split['n_train'] < task['lookback'] + task['pred_len'] + 31:
             raise ValueError('Treino insuficiente para contexto, horizonte e batch de 32')
@@ -203,7 +219,7 @@ def validate_lengths(config, tasks, metadata):
         if task['modelo'] == 'VAR':
             regressors = 1 + config['var_lags'] * metadata['n_assets']
             if split['n_train'] - config['var_lags'] <= regressors:
-                raise ValueError(f"VAR(32) não identificado: {split['n_train']-config['var_lags']} observações para {regressors} regressores por equação")
+                raise ValueError(f"VAR({config['var_lags']}) não identificado: {split['n_train']-config['var_lags']} observações para {regressors} regressores por equação")
 
 
 def register_dataset(dataset, metadata):
@@ -229,7 +245,9 @@ def register_dataset(dataset, metadata):
 def provenance(config, metadata):
     code_files = ['scripts/b3_experiment.py', 'scripts/b3_experiment_io.py',
                   'scripts/run_benchmark_composite_trading_loss_v3.py',
+                  'ts_benchmark/baselines/composite_trading_loss_v2.py',
                   'ts_benchmark/baselines/composite_trading_loss_v3.py',
+                  'ts_benchmark/baselines/self_impl/VAR/VAR.py',
                   'ts_benchmark/baselines/deep_forecasting_model_base.py']
     return dict(config=config, source_sha256=metadata['source_sha256'],
                 dataset_sha256=metadata['dataset_sha256'],
@@ -292,8 +310,33 @@ def record_completed(directory, row):
         atomic_text(path, csv_text(rows))
 
 
+def var_forecasts(config, panel, cut):
+    """Fit once before the test and forecast all origins with fixed coefficients."""
+    import numpy as np
+    from sklearn.preprocessing import StandardScaler
+    from statsmodels.tsa.tsatools import lagmat
+    sys.path.insert(0, str(ROOT))
+    from ts_benchmark.baselines.self_impl.VAR.VAR import VAR
+
+    lags = config['var_lags']
+    train = panel.iloc[:cut]
+    values = StandardScaler().fit_transform(train.to_numpy())
+    z = lagmat(values, maxlag=lags, trim='both', original='ex')
+    z = np.column_stack([np.ones(len(z)), z])
+    if len(z) <= z.shape[1] or np.linalg.matrix_rank(z) < z.shape[1]:
+        raise ValueError(f'VAR({lags}): regressores sem posto completo ou graus de liberdade insuficientes')
+    model = VAR(lags=lags)
+    model.forecast_fit(train, train_ratio_in_tv=1.0)
+    maximum = max(config['horizons'])
+    forecasts = np.empty((len(panel)-cut, maximum, panel.shape[1]))
+    for i, origin in enumerate(range(cut, len(panel))):
+        # Only already-observed lags are inputs; the model is never refitted.
+        forecasts[i] = model.forecast(maximum, panel.iloc[origin-lags:origin])
+    return forecasts
+
+
 def worker(config, tasks, out_root, index):
-    from b3_experiment_io import export_predictions, load_panel
+    from b3_experiment_io import export_predictions, export_prediction_windows, load_panel
     if index < 0 or index >= len(tasks):
         raise ValueError(f'Índice fora da grade: {index}')
     task = tasks[index]
@@ -307,38 +350,52 @@ def worker(config, tasks, out_root, index):
         if file_hash(metadata[key]) != metadata[hash_key]:
             raise ValueError(f'{key} alterado após preparar a grade')
     output = out_root / output_path(task)
+    paths = task_output_paths(config, task, out_root)
     with locked(output / '.task.lock'):
         parquet = output / 'part.parquet'
         with locked(directory / '.completed_tasks.lock'):
             with (directory / 'completed_tasks.csv').open(newline='') as f:
                 prior = next((r for r in csv.DictReader(f) if int(r['array_index']) == index), None)
-        if prior and parquet.exists() and file_hash(parquet) == prior['parquet_sha256']:
+        if task['modelo'] == 'VAR':
+            try:
+                prior_hashes = json.loads(prior['parquet_sha256']) if prior else {}
+            except (ValueError, TypeError):
+                prior_hashes = {}
+            finished = bool(prior) and all((path/'part.parquet').exists() and
+                       file_hash(path/'part.parquet') == prior_hashes.get(h) for h, path in paths.items())
+        else:
+            finished = bool(prior) and parquet.exists() and file_hash(parquet) == prior['parquet_sha256']
+        if finished:
             print(f'Já concluído: {output}', flush=True)
             return
         panel = load_panel(Path(metadata['dataset']))
         split = split_counts(config, task, len(panel))
         if task['modelo'] == 'VAR':
-            # A coefficient matrix can be singular even when dimensions suffice.
             import numpy as np
-            from sklearn.preprocessing import StandardScaler
-            from statsmodels.tsa.tsatools import lagmat
-            values = StandardScaler().fit_transform(panel.iloc[:split['n_train']].to_numpy())
-            z = lagmat(values, maxlag=config['var_lags'], trim='both', original='ex')
-            z = np.column_stack([np.ones(len(z)), z])
-            if np.linalg.matrix_rank(z) < z.shape[1]:
-                raise ValueError('VAR(32): matriz de regressores sem posto completo; nenhum ajuste regularizado foi feito')
-        result_root = Path(os.environ.get('RESULT_ROOT', '/snfs2/igor.viveiros/result/b3_new'))
-        result_root.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(prefix='task_', dir=result_root) as temporary:
-            command = benchmark_command(config, task, metadata['dataset'], len(panel), Path(temporary))
-            print(f'TASK={index}: {output}', flush=True)
-            subprocess.run(command, cwd=ROOT, check=True)
-            export_predictions(Path(temporary), panel, split['n_pretest'], task['pred_len'], output,
-                               keep_csv=os.environ.get('MANTER_CSV','FALSE').upper() == 'TRUE')
+            cut = split['n_pretest']
+            print(f'TASK={index}: VAR({config["var_lags"]}), um ajuste; horizontes={config["horizons"]}', flush=True)
+            forecasts = var_forecasts(config, panel, cut)
+            for h, path in paths.items():
+                horizon = int(h)
+                count = len(panel) - cut - horizon + 1
+                actual = np.stack([panel.iloc[origin:origin+horizon].to_numpy() for origin in range(cut, cut+count)])
+                export_prediction_windows(actual, forecasts[:count, :horizon], panel, cut, horizon, path,
+                                          keep_csv=os.environ.get('MANTER_CSV','FALSE').upper() == 'TRUE')
+            parquet_hash = json.dumps({h:file_hash(path/'part.parquet') for h, path in paths.items()}, sort_keys=True)
+        else:
+            result_root = Path(os.environ.get('RESULT_ROOT', '/snfs2/igor.viveiros/result/b3_new'))
+            result_root.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(prefix='task_', dir=result_root) as temporary:
+                command = benchmark_command(config, task, metadata['dataset'], len(panel), Path(temporary))
+                print(f'TASK={index}: {output}', flush=True)
+                subprocess.run(command, cwd=ROOT, check=True)
+                export_predictions(Path(temporary), panel, split['n_pretest'], task['pred_len'], output,
+                                   keep_csv=os.environ.get('MANTER_CSV','FALSE').upper() == 'TRUE')
+            parquet_hash = file_hash(parquet)
         row = audit_row(config, task, metadata, out_root, signature)
-        row.update(slurm_job_id=os.environ.get('SLURM_JOB_ID',''), parquet_sha256=file_hash(parquet))
+        row.update(slurm_job_id=os.environ.get('SLURM_JOB_ID',''), parquet_sha256=parquet_hash)
         record_completed(directory, row)
-        print(f'OK: {parquet}', flush=True)
+        print(f'OK: {len(paths)} arquivo(s) Parquet em {directory}', flush=True)
 
 
 def array_chunks(n_tasks, chunk_size=1000):
@@ -405,6 +462,7 @@ def main():
             parser.error('Tarefa fora da grade')
         task = tasks[args.task]
         print(json.dumps(dict(task, output_dir=str(out_root/output_path(task)),
+                              forecast_horizons=config['horizons'] if task['modelo'] == 'VAR' else [task['pred_len']],
                               model_spec=model_spec(config,task)), indent=2))
         return
     if args.action == 'worker':
@@ -417,8 +475,10 @@ def main():
     print(f'Cortes: floor(N × p), p em {{{cuts}}}; N = pregões dos log-retornos.', flush=True)
     validation = 100 * (1 - config['strategy']['train_ratio_in_tv'])
     print('VAR usa todo o pré-teste.' if args.mode == 'var' else f'Validação interna: {validation:g}% do bloco pré-teste.', flush=True)
+    if args.mode == 'var':
+        print(f'Um ajuste por corte; os horizontes saem do mesmo VAR: {config["horizons"]}.', flush=True)
     if args.mode == 'composto':
-        pairs = sum(k <= h and h % k == 0 for h in config['horizons'] for k in config['trade_windows'])
+        pairs = sum(k <= h for h in config['horizons'] for k in config['trade_windows'])
         factors = [len(config[key]) for key in ('train_percentages', 'models', 'lookbacks')]
         factors += [pairs] + [len(config[key]) for key in ('cross_losses', 'lambdas', 'deltas')]
         print('Grade: ' + ' × '.join(map(str, factors)) + f' = {len(tasks)} treinamentos.', flush=True)

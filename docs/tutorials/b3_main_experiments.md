@@ -14,11 +14,14 @@ alterá-los para ajustar um experimento.
 | Script | Experimento | Configurações |
 | --- | --- | ---: |
 | `scripts/run_temporal_experiment.sh` | MSE temporal, seis redes | 324 |
-| `scripts/run_composite_trading_experiment.sh` | MSE temporal + loss cross-sectional, seis redes | 41.472 |
-| `scripts/run_var_experiment.sh` | VAR com 32 lags | 18 |
+| `scripts/run_composite_trading_experiment.sh` | MSE temporal + loss cross-sectional, seis redes | 54.432 |
+| `scripts/run_var_experiment.sh` | VAR com 32 lags, um ajuste por corte | 3 |
 
 Os scripts submetem o experimento completo quando chamados sem argumentos.
 Não é necessário submeter separadamente SimpleMLP e SimpleFormer.
+
+Este exercício produz apenas previsões. K participa somente da loss composta;
+não há etapa de backtest ou formação de carteiras.
 
 ## Dados e cortes temporais
 
@@ -95,9 +98,8 @@ lookback e horizonte é treinada uma vez:
 3 cortes × 6 modelos × 3 lookbacks × 6 horizontes = 324 configurações
 ```
 
-K é uma escolha posterior de avaliação das previsões temporais e não cria
-treinamentos adicionais. Por isso, não existe uma pasta `k_dir` nesse
-experimento. `lambda=00` registra a equivalência com peso cross-sectional
+K não participa desse experimento: cada rede é ajustada para prever H passos
+com loss puramente temporal. Não há pasta `k_dir`. `lambda=00` registra a equivalência com peso cross-sectional
 nulo. O treinamento chama a MSE diretamente, que é o mesmo termo temporal
 da loss composta, sem calcular a componente cross-sectional descartada.
 
@@ -124,22 +126,29 @@ delta é avaliada nos retornos simples realizados antes do z-score.
 | LISTNET_TAU | 1 |
 | HINGE_MARGIN | 0.1 |
 
-Mantém-se a regra anterior: `K ≤ H` e `H % K == 0`. Ela produz 16 pares:
+São válidos todos os pares com `K ≤ H`, sem exigir divisibilidade. Há 21 pares:
 
 | H | K válidos |
 | --- | --- |
 | 1 | 1 |
 | 5 | 1, 5 |
 | 10 | 1, 5, 10 |
-| 15 | 1, 5, 15 |
-| 20 | 1, 5, 10, 20 |
-| 25 | 1, 5, 25 |
+| 15 | 1, 5, 10, 15 |
+| 20 | 1, 5, 10, 15, 20 |
+| 25 | 1, 5, 10, 15, 20, 25 |
+
+Quando K não divide H, a componente cross-sectional usa `floor(H/K)` blocos
+completos de K passos. A cauda de `H % K` passos participa da loss temporal,
+que sempre usa todos os H passos. Por exemplo, `(H=15,K=10)` contém um bloco
+cross-sectional de 10 passos e 5 passos restantes na parte temporal. A auditoria
+registra `cross_blocks`, `cross_steps` e `cross_tail_steps`. A versão legada V2
+mantém sua regra anterior; o experimento principal usa V3 com os 21 pares.
 
 Assim, a grade é:
 
 ```text
-3 cortes × 6 modelos × 3 lookbacks × 16 pares (H,K)
-× 3 lambdas × 4 deltas × 4 losses = 41.472 configurações
+3 cortes × 6 modelos × 3 lookbacks × 21 pares (H,K)
+× 3 lambdas × 4 deltas × 4 losses = 54.432 configurações
 ```
 
 **ListNet não utiliza delta na implementação v3.** Seus quatro valores são
@@ -149,14 +158,27 @@ atribuir artificialmente um efeito a esse parâmetro.
 
 ### VAR
 
-O script usa `lags=32`, os três cortes e os seis horizontes:
+O script usa `lags=32` e ajusta o VAR **uma única vez por corte**:
 
 ```text
-3 cortes × 6 horizontes = 18 configurações
+3 cortes = 3 tarefas, array 0-2
 ```
 
-O contexto de 32 lags é fixo e aparece como `lookback=32` nas saídas.
-Não há lambda ajustável nem treinamento específico por K.
+Os coeficientes estimados ficam fixos durante todo o teste. Em cada origem de
+previsão, os últimos 32 valores já observados alimentam uma previsão de 25
+passos. Dessa trajetória saem os prefixos dos horizontes 1, 5, 10, 15, 20 e 25,
+sem novos ajustes do modelo. As origens finais do teste também são incluídas
+quando há alvos observados suficientes para o horizonte correspondente.
+
+Cada tarefa gera seis arquivos Parquet, um por horizonte, e uma única linha
+em `completed_tasks.csv`. `forecast_horizons`, `n_windows_by_horizon` e
+`output_dirs` identificam as seis saídas; `parquet_sha256` armazena o hash de
+cada uma. A retomada só pula o ajuste se os seis arquivos estiverem completos
+com hashes corretos.
+
+O contexto de 32 lags aparece como `lookback=32` nas saídas. Não há variação
+de loss, lambda ou K no ajuste do VAR. Os rótulos `loss=mse/lambda=00` apenas
+mantêm a organização dos diretórios.
 
 ## Diretórios e auditoria
 
@@ -239,11 +261,11 @@ Por padrão, a partição é `medusas_dev`, com limite de oito horas por job e
 até seis tarefas simultâneas por array. As redes solicitam uma GPU por
 tarefa; o VAR usa CPU. Os arrays são limitados a 1.000 tarefas por submissão,
 e esse tamanho é reduzido se o Slurm informar um limite menor. No
-experimento composto, o script submete 42 arrays: 41 com 1.000 tarefas
-(`0-999`) e o último com 472 (`0-471`). Os arrays são encadeados com
-`afterany`, mantendo os índices globais de 0 a 41.471 e evitando que o
+experimento composto, o script submete 55 arrays: 54 com 1.000 tarefas
+(`0-999`) e o último com 432 (`0-431`). Os arrays são encadeados com
+`afterany`, mantendo os índices globais de 0 a 54.431 e evitando que o
 limite de seis tarefas seja multiplicado pelo número de arrays. Os
-experimentos temporal e VAR usam, respectivamente, arrays `0-323` e `0-17`.
+experimentos temporal e VAR usam, respectivamente, arrays `0-323` e `0-2`.
 
 `afterany` permite que o próximo array comece quando o anterior terminar,
 mesmo que alguma tarefa tenha falhado. Uma tarefa só entra em

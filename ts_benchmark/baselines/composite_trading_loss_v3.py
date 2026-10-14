@@ -3,7 +3,8 @@
 The model still predicts the full path [B,H,N]. The temporal component is
 computed on the complete model-space path. The cross-sectional component first
 aggregates financially meaningful block scores of length K and only then
-standardizes each block across the N assets.
+standardizes each block across the N assets. Every K <= H is accepted; only
+complete K-step blocks enter cross scores, while the temporal term covers H.
 
 For each batch element b and trading block j:
     Z[b,j,i] = (S[b,j,i] - mean_i S[b,j,i]) / std_i S[b,j,i]
@@ -143,6 +144,9 @@ class CompositeTradingLossV3(CompositeTradingLossV2):
             eps=eps,
         )
         self.cross_score_normalization = normalization
+        # All pairs K <= H are valid. The incomplete trailing block, if any,
+        # is kept in the temporal loss and excluded only from cross scores.
+        self.aggregator.allow_nondivisible_horizon = True
 
     def _normalize_cross_scores(
         self,
@@ -224,4 +228,8 @@ class CompositeTradingLossV3(CompositeTradingLossV2):
             + self.cross_lambda * self.cross_scale * cross
         )
         self._remember(temporal, cross, total, pred_scores)
+        if self.track_components:
+            self.last_components.update(H=int(pred.shape[1]),
+                                        cross_steps=int(pred_scores.shape[1] * self.trade_window),
+                                        cross_tail_steps=int(pred.shape[1] % self.trade_window))
         return total

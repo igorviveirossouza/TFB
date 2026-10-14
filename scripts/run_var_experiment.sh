@@ -9,7 +9,8 @@ EXPERIMENT="var"
 # GRADE E HIPERPARÂMETROS DO VAR
 # -----------------------------------------------------------------------------
 TRAIN_PERCENTAGES=(70 80 90)
-HORIZONS=(1 5 10 15 20 25)
+HORIZONS=(1 5 10 15 20 25)   # Seis saídas do MESMO ajuste por corte
+# Há apenas 3 tarefas: um ajuste para cada corte acima. Sem loss ou K.
 VAR_LAGS=32
 SEED=2026
 STRIDE=1

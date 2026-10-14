@@ -273,13 +273,26 @@ def export_predictions(
     lexicographic sample_1/sample_10/sample_2 sorting bug. Actual targets must
     match the frozen input (float32 roundoff is allowed).
     """
+    actual, prediction = _read_payload(Path(result_dir))
+    return export_prediction_windows(actual, prediction, panel, cut, horizon, output_dir, keep_csv)
+
+
+def export_prediction_windows(
+    actual: Any,
+    prediction: Any,
+    panel: pd.DataFrame,
+    cut: int,
+    horizon: int,
+    output_dir: Path,
+    keep_csv: bool = False,
+) -> dict:
+    """Export validated windows supplied directly (e.g. one fitted VAR)."""
     if cut <= 0 or horizon <= 0 or cut + horizon > len(panel):
         raise ValueError("Invalid test cutoff/horizon for the supplied panel.")
     if not panel.index.is_unique or not panel.index.is_monotonic_increasing:
         raise ValueError("The supplied panel must have a unique chronological index.")
     if not np.isfinite(panel.to_numpy()).all():
         raise ValueError("The supplied panel contains missing/nonfinite observations.")
-    actual, prediction = _read_payload(Path(result_dir))
     actual = _windows_array(actual, panel, cut, horizon, "actual_data")
     prediction = _windows_array(prediction, panel, cut, horizon, "inference_data")
     count = len(prediction)
