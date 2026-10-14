@@ -18,6 +18,7 @@ import math
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -411,6 +412,30 @@ def array_chunks(n_tasks, chunk_size=1000):
     return [(offset, min(chunk_size, n_tasks-offset)) for offset in range(0,n_tasks,chunk_size)]
 
 
+def sbatch_command(mode, offset, count, previous=None):
+    """Build the same resource request for submission and dry-run, without I/O."""
+    max_jobs = int(os.environ.get('MAX_GPU_JOBS','6'))
+    if max_jobs < 1:
+        raise ValueError('MAX_GPU_JOBS deve ser positivo')
+    logs = Path(os.environ.get('LOG_ROOT', ROOT / 'logs/b3_new'))
+    command = ['sbatch','--parsable','--export=ALL', '-p',os.environ.get('GPU_PARTITION','medusas_dev'),
+               '--time='+os.environ.get('GPU_TIME','08:00:00'),
+               f'--array=0-{count-1}%{max_jobs}', f'--job-name=b3_{mode}',
+               f'--output={logs}/{mode}_%A_%a.out', f'--error={logs}/{mode}_%A_%a.err']
+    for variable, flag in [('NODELIST', '--nodelist'), ('CPUS_PER_TASK', '--cpus-per-task'), ('MEMORY', '--mem')]:
+        if os.environ.get(variable):
+            command.append(f'{flag}={os.environ[variable]}')
+    # Keep defaults for direct Python callers; an explicitly empty GRES
+    # must stay empty, including in the temporal/composite launchers.
+    gres = os.environ.get('GRES', '' if mode == 'var' else 'gpu:1')
+    if gres:
+        command.append(f'--gres={gres}')
+    if previous:
+        command += [f'--dependency=afterany:{previous}']
+    command += [str(ROOT/'scripts'/LAUNCHERS[mode]),'worker','--offset',str(offset)]
+    return command
+
+
 def submit(mode, tasks, out_root, config_path):
     if shutil.which('sbatch') is None:
         raise RuntimeError('sbatch não encontrado; submeta os scripts no cluster')
@@ -420,26 +445,12 @@ def submit(mode, tasks, out_root, config_path):
         match = re.search(r'MaxArraySize\s*=\s*(\d+)', result.stdout)
         if match:
             chunk_size = min(chunk_size, int(match.group(1)))
-    max_jobs = int(os.environ.get('MAX_GPU_JOBS','6'))
-    if max_jobs < 1:
-        raise ValueError('MAX_GPU_JOBS deve ser positivo')
     logs = Path(os.environ.get('LOG_ROOT', ROOT / 'logs/b3_new'))
     logs.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ, TFB_ROOT=str(ROOT), B3_CONFIG=str(config_path), OUT_ROOT=str(out_root))
     previous = None
     for offset, count in array_chunks(len(tasks), chunk_size):
-        command = ['sbatch','--parsable','--export=ALL', '-p',os.environ.get('GPU_PARTITION','medusas_dev'),
-                   '--time='+os.environ.get('GPU_TIME','08:00:00'),
-                   f'--array=0-{count-1}%{max_jobs}', f'--job-name=b3_{mode}',
-                   f'--output={logs}/{mode}_%A_%a.out', f'--error={logs}/{mode}_%A_%a.err']
-        for variable, flag in [('NODELIST', '--nodelist'), ('CPUS_PER_TASK', '--cpus-per-task'), ('MEMORY', '--mem')]:
-            if os.environ.get(variable):
-                command.append(f'{flag}={os.environ[variable]}')
-        if mode != 'var':
-            command += ['--gres=gpu:1']
-        if previous:
-            command += [f'--dependency=afterany:{previous}']
-        command += [str(ROOT/'scripts'/LAUNCHERS[mode]),'worker','--offset',str(offset)]
+        command = sbatch_command(mode, offset, count, previous)
         result = subprocess.run(command, env=env, check=True, capture_output=True, text=True)
         previous = result.stdout.strip().split(';')[0]
         if not previous.isdigit():
@@ -498,6 +509,8 @@ def main():
     if args.dry_run:
         chunks = array_chunks(len(tasks), int(os.environ.get('ARRAY_CHUNK_SIZE','1000')))
         print(f'{len(chunks)} array(s), tamanho máximo {max(c for _,c in chunks)}; último: 0-{chunks[-1][1]-1}')
+        print('sbatch do primeiro array (prévia; não consulta MaxArraySize do cluster):')
+        print(shlex.join(sbatch_command(args.mode, *chunks[0])))
         return
     if not args.prepare and shutil.which('sbatch') is None:
         raise RuntimeError('sbatch não encontrado; use --dry-run ou --prepare fora do cluster')

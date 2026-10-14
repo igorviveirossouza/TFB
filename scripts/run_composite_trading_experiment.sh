@@ -70,6 +70,10 @@ RESULT_ROOT="${RESULT_ROOT:-/snfs2/igor.viveiros/result/b3_new}"
 LOG_ROOT="${LOG_ROOT:-$TFB_ROOT/logs/b3_new}"
 
 PARTITION="${PARTITION:-medusas_dev}"    # Partição do Slurm
+# GPU: valor passado literalmente a sbatch --gres (ex.: gpu:1 ou gpu:<tipo>:1).
+# O tipo deve existir no cluster; vazio = não solicitar GPU.
+# Não fixe CUDA_VISIBLE_DEVICES: preserve a GPU alocada pelo Slurm.
+GRES="${GRES-gpu:1}"
 TIME_LIMIT="${TIME_LIMIT:-08:00:00}"     # Tempo máximo por job
 NODELIST="${NODELIST:-}"                # Ex.: medusa3; vazio = Slurm escolhe
 CPUS_PER_TASK="${CPUS_PER_TASK:-3}"
@@ -78,6 +82,7 @@ MAX_CONCURRENT_JOBS="${MAX_CONCURRENT_JOBS:-6}"
 ARRAY_CHUNK_SIZE="${ARRAY_CHUNK_SIZE:-1000}"
 MANTER_CSV="${MANTER_CSV:-FALSE}"
 
+# --dry-run mostra o sbatch do primeiro array: GPU, tempo, CPUs e logs.
 # A execução abaixo é compartilhada; não é necessário editar arquivos Python.
 B3_CONFIG_SOURCE="$TFB_ROOT/scripts/run_composite_trading_experiment.sh"
 source "$TFB_ROOT/scripts/b3_experiment_env.sh"
