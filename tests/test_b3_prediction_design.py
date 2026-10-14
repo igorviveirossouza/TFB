@@ -56,6 +56,55 @@ def test_every_requested_pair_runs_forward_and_backward(config, horizon, k, cros
     assert components['cross_steps'] == horizon
 
 
+@pytest.mark.parametrize('horizon,k', PAIRS)
+@pytest.mark.parametrize('cross_lambda', [0.1, 0.5, 0.8])
+def test_listnet_values_and_gradients_are_identical_for_all_deltas(config, horizon, k, cross_lambda):
+    torch = pytest.importorskip('torch')
+    from ts_benchmark.baselines.composite_trading_loss_v3 import build_loss
+    generator = torch.Generator().manual_seed(2026)
+    values = torch.randn(2, horizon, 3, generator=generator) * .01
+    target = torch.randn(2, horizon, 3, generator=generator) * .01
+    results = []
+    for delta in (0, .025, .05, .1):
+        task = dict(modelo='simpleMLP', experimento='composto', lookback=32,
+                    pred_len=horizon, k=k, loss='listnet',
+                    cross_lambda=cross_lambda, cross_delta=delta)
+        _, hyper, _, _ = experiment.model_spec(config, task)
+        criterion = build_loss(SimpleNamespace(**hyper), normalizer_mean=[0]*3, normalizer_scale=[1]*3)
+        prediction = values.clone().requires_grad_()
+        loss = criterion(prediction, target)
+        gradient = torch.autograd.grad(loss, prediction)[0]
+        assert torch.isfinite(loss) and torch.isfinite(gradient).all()
+        results.append((loss.detach(), gradient))
+    for loss, gradient in results[1:]:
+        torch.testing.assert_close(loss, results[0][0], rtol=0, atol=0)
+        torch.testing.assert_close(gradient, results[0][1], rtol=0, atol=0)
+
+
+@pytest.mark.parametrize('cross_loss', ['ranknet', 'hinge', 'pairwise_mse'])
+def test_pairwise_losses_really_use_delta_in_values_and_gradients(cross_loss):
+    torch = pytest.importorskip('torch')
+    from ts_benchmark.baselines.composite_trading_loss_v3 import CompositeTradingLossV3
+    results = []
+    for delta in (0, .025, .05, .1):
+        criterion = CompositeTradingLossV3(
+            trade_window=1, data_kind='log_return',
+            cross_loss=cross_loss, cross_delta=delta, hinge_margin=.1,
+            cross_score_normalization='zscore', inverse_norm=False,
+        )
+        # Raw realized score gaps straddle every threshold; predictions reverse
+        # the order so hinge pairs remain active, exercising the actual mask.
+        prediction = torch.tensor([[[.03, .08, -.02, -.08]]], dtype=torch.float64, requires_grad=True)
+        target = torch.tensor([[[0, .02, .06, .18]]], dtype=torch.float64)
+        loss = criterion._cross_loss(prediction, target)
+        gradient = torch.autograd.grad(loss, prediction)[0]
+        results.append((loss.detach(), gradient))
+    for i, (loss, gradient) in enumerate(results):
+        for other_loss, other_gradient in results[i+1:]:
+            assert not torch.equal(loss, other_loss)
+            assert not torch.equal(gradient, other_gradient)
+
+
 @pytest.mark.parametrize('horizon,k', [(15,10), (20,15), (25,10), (25,15), (25,20)])
 @pytest.mark.parametrize('cross_loss', ['ranknet', 'hinge', 'listnet', 'pairwise_mse'])
 def test_nondivisible_pairs_are_rejected_before_backpropagation(horizon, k, cross_loss):

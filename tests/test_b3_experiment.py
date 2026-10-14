@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+from collections import Counter
 import csv
 import json
 from pathlib import Path
@@ -32,7 +33,7 @@ def config():
     return json.loads(result.stdout)
 
 
-@pytest.mark.parametrize("mode,count", [("temporal", 324), ("composto", 41472), ("var", 3)])
+@pytest.mark.parametrize("mode,count", [("temporal", 324), ("composto", 33696), ("var", 3)])
 def test_full_design_has_unique_destinations_and_contiguous_global_ids(config, mode, count):
     tasks = experiment.make_tasks(config, mode)
     paths = [experiment.output_path(task) for task in tasks]
@@ -47,6 +48,38 @@ def test_full_design_has_unique_destinations_and_contiguous_global_ids(config, m
         assert any(part.startswith("delta=") for part in parts) == (mode == "composto")
         if mode != "composto":
             assert "lambda=00" in parts
+
+
+def test_composite_grid_has_no_effective_duplicates(config):
+    tasks = experiment.make_tasks(config, 'composto')
+    assert Counter(t['loss'] for t in tasks) == {
+        'ranknet': 10368, 'hinge': 10368, 'pairwise_mse': 10368, 'listnet': 2592,
+    }
+    # Ignore delta for ListNet exactly as its objective does. Unique directory
+    # names alone cannot detect duplicate training objectives.
+    active_keys = [tuple(t[key] for key in ('treino', 'modelo', 'lookback', 'pred_len',
+                                          'k', 'loss', 'cross_lambda')) +
+                   (None if t['loss'] == 'listnet' else t['cross_delta'],)
+                   for t in tasks]
+    assert len(set(active_keys)) == len(tasks)
+    for loss in config['cross_losses']:
+        actual_deltas = {t['cross_delta'] for t in tasks if t['loss'] == loss}
+        assert actual_deltas == ({0} if loss == 'listnet' else set(config['deltas']))
+
+
+@pytest.mark.parametrize('deltas', [[0.05], [0.1, 0.025], [0.1, 0.05, 0.025, 0], [0, 0.025, 0.05, 0.1, 0.2]])
+def test_editing_delta_vector_does_not_repeat_remove_or_change_listnet(config, deltas):
+    def listnet_design(tasks):
+        return [{key: value for key, value in task.items() if key != 'array_index'}
+                for task in tasks if task['loss'] == 'listnet']
+    before = listnet_design(experiment.make_tasks(config, 'composto'))
+    config['deltas'] = deltas
+    tasks = experiment.make_tasks(config, 'composto')
+    assert listnet_design(tasks) == before
+    assert len(before) == 2592
+    for loss in ('ranknet', 'hinge', 'pairwise_mse'):
+        assert sum(t['loss'] == loss for t in tasks) == 2592 * len(deltas)
+        assert {t['cross_delta'] for t in tasks if t['loss'] == loss} == set(deltas)
 
 
 def test_full_grid_preserves_training_parameters_and_valid_hk_pairs(config):
@@ -128,16 +161,16 @@ def test_cutoffs_match_integer_floor_even_at_float_roundoff_edges(config):
 
 
 def test_composite_chunks_cover_each_task_once():
-    chunks = experiment.array_chunks(41472)
-    assert len(chunks) == 42
-    assert chunks[-1] == (41000, 472)
+    chunks = experiment.array_chunks(33696)
+    assert len(chunks) == 34
+    assert chunks[-1] == (33000, 696)
     assert all(count == 1000 for _, count in chunks[:-1])
-    assert [offset + local for offset, count in chunks for local in range(count)] == list(range(41472))
+    assert [offset + local for offset, count in chunks for local in range(count)] == list(range(33696))
     with pytest.raises(ValueError):
-        experiment.array_chunks(41472, 0)
+        experiment.array_chunks(33696, 0)
 
 
-@pytest.mark.parametrize("mode,count,expected_chunks", [("temporal", 324, 1), ("composto", 41472, 42), ("var", 3, 1)])
+@pytest.mark.parametrize("mode,count,expected_chunks", [("temporal", 324, 1), ("composto", 33696, 34), ("var", 3, 1)])
 def test_submission_resources_offsets_dependencies_and_export(monkeypatch, tmp_path, mode, count, expected_chunks):
     monkeypatch.setattr(experiment.shutil, "which", lambda name: "/fake/sbatch" if name == "sbatch" else None)
     for name, value in {"LOG_ROOT": str(tmp_path / "logs"), "ARRAY_CHUNK_SIZE": "1000", "MAX_GPU_JOBS": "6", "GPU_PARTITION": "medusas_dev", "GPU_TIME": "08:00:00", "VENV_PATH": "/env/activate", "PYTHON_BIN": "/env/python"}.items():
@@ -233,6 +266,27 @@ def test_prepare_is_repeatable_and_audits_all_three_cuts(prepared_design):
         assert list(csv.DictReader((group / "completed_tasks.csv").open())) == []
 
 
+def test_composite_audit_records_listnet_once_with_inactive_delta(prepared_design):
+    design = prepared_design
+    tasks = experiment.make_tasks(design.config, 'composto')
+    experiment.prepare(design.config_path, design.config, tasks, design.out)
+    for pct in (70, 80, 90):
+        group = design.out / f'treino={pct}' / 'experimento=composto'
+        manifest = group / 'design_composite_trading.csv'
+        assert manifest.read_bytes() == (group / 'desing_composite_trading.csv').read_bytes()
+        rows = list(csv.DictReader(manifest.open()))
+        assert Counter(row['loss'] for row in rows) == {
+            'ranknet': 24, 'hinge': 24, 'pairwise_mse': 24, 'listnet': 6,
+        }
+        for row in rows:
+            assert row['delta_effective'] == ('False' if row['loss'] == 'listnet' else 'True')
+            if row['loss'] == 'listnet':
+                assert float(row['cross_delta']) == 0
+                assert json.loads(row['model_hyper_params'])['loss_cross_delta'] == 0
+                assert 'delta=0' in Path(row['output_dir']).parts
+        assert list(csv.DictReader((group / 'completed_tasks.csv').open())) == []
+
+
 def test_prepare_rejects_changed_config_before_replacing_any_audit(prepared_design):
     design = prepared_design
     manifests = sorted(design.out.glob("treino=*/experimento=*/design_composite_trading.csv"))
@@ -292,9 +346,14 @@ def test_dry_run_and_task_inspection_make_no_output(tmp_path):
     import os
 
     env = dict(os.environ, OUT_ROOT=str(tmp_path / "absent"), DATASET_PATH=str(tmp_path / "missing.csv"))
-    for options in (["--dry-run"], ["--task", "41471"]):
+    for options in (["--dry-run"], ["--task", "33695"]):
         result = subprocess.run(["bash", str(REPO / "scripts/run_composite_trading_experiment.sh"), *options], env=env, check=True, text=True, capture_output=True)
         assert result.stdout.strip()
+        if options == ['--dry-run']:
+            for expected in ('33696 tarefas', 'ranknet=10368', 'hinge=10368',
+                             'pairwise_mse=10368', 'listnet=2592', '34 array(s)',
+                             'último: 0-695', 'uma execução por combinação'):
+                assert expected in result.stdout
         assert not (tmp_path / "absent").exists()
 
 
@@ -369,7 +428,7 @@ def test_editable_shell_parameters_reach_python_without_json(tmp_path):
     assert not (tmp_path / 'out').exists()
     original = subprocess.run(['bash', str(script), '--dry-run'], env=env,
                               check=True, text=True, capture_output=True)
-    assert '41472 tarefas' in original.stdout
+    assert '33696 tarefas' in original.stdout
 
 
 def test_cluster_node_cpu_and_memory_fields_reach_sbatch(monkeypatch, tmp_path):

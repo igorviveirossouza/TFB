@@ -22,7 +22,8 @@ SEED=2026
 STRIDE=1
 NUM_ROLLINGS=48000
 
-# A grade cruza TODOS os valores abaixo. Apenas K <= H e H % K == 0 (16 pares na grade padrão).
+# Apenas K <= H e H % K == 0 (16 pares na grade padrão).
+# DELTAS varia em ranknet, hinge e pairwise_mse; ListNet roda uma vez por combinação.
 TRADE_WINDOWS=(1 5 10 15 20 25)
 CROSS_LOSSES=(ranknet hinge listnet pairwise_mse)
 LAMBDAS=(0.1 0.5 0.8)
@@ -37,7 +38,8 @@ CROSS_SCORE_NORMALIZATION="zscore"
 LOSS_INVERSE_NORM=true
 LOSS_TRACK_COMPONENTS=true
 # Todos os H passos ficam cobertos por blocos completos de K.
-# ListNet não usa delta; os quatro valores são mantidos na grade solicitada.
+# ListNet não usa delta: pasta/auditoria usam delta=0 e delta_effective=False.
+# Grade padrão: 33.696 tarefas (10.368 por loss de pares; 2.592 para ListNet).
 
 # -----------------------------------------------------------------------------
 # HIPERPARÂMETROS ESPECÍFICOS DOS MODELOS — também editáveis neste script

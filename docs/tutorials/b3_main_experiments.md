@@ -14,7 +14,7 @@ alterá-los para ajustar um experimento.
 | Script | Experimento | Configurações |
 | --- | --- | ---: |
 | `scripts/run_temporal_experiment.sh` | MSE temporal, seis redes | 324 |
-| `scripts/run_composite_trading_experiment.sh` | MSE temporal + loss cross-sectional, seis redes | 41.472 |
+| `scripts/run_composite_trading_experiment.sh` | MSE temporal + loss cross-sectional, seis redes | 33.696 |
 | `scripts/run_var_experiment.sh` | VAR com 32 lags, um ajuste por corte | 3 |
 
 Os scripts submetem o experimento completo quando chamados sem argumentos.
@@ -120,7 +120,8 @@ delta é avaliada nos retornos simples realizados antes do z-score.
 | --- | --- |
 | Loss cross-sectional | ranknet, hinge, listnet, pairwise_mse |
 | Lambda | 0.1, 0.5, 0.8 |
-| Delta | 0, 0.025, 0.05, 0.1 |
+| Delta (ranknet, hinge, pairwise_mse) | 0, 0.025, 0.05, 0.1 |
+| Delta (listnet) | Não se aplica; uma execução por combinação |
 | CS | 1 |
 | RANKNET_ALPHA | 1 |
 | LISTNET_TAU | 1 |
@@ -147,13 +148,24 @@ Assim, a grade é:
 
 ```text
 3 cortes × 6 modelos × 3 lookbacks × 16 pares (H,K)
-× 3 lambdas × 4 deltas × 4 losses = 41.472 configurações
+× 3 lambdas × (3 losses de pares × 4 deltas + 1 ListNet) = 33.696 configurações
 ```
 
-**ListNet não utiliza delta na implementação v3.** Seus quatro valores são
-mantidos na grade solicitada e registrados na auditoria, mas correspondem à
-mesma função objetivo. Não foi introduzida uma variante de ListNet para
-atribuir artificialmente um efeito a esse parâmetro.
+| Loss cross-sectional | Deltas efetivos | Treinamentos |
+| --- | ---: | ---: |
+| ranknet | 4 | 10.368 |
+| hinge | 4 | 10.368 |
+| pairwise_mse | 4 | 10.368 |
+| listnet | Não se aplica | 2.592 |
+| **Total** | | **33.696** |
+
+**ListNet não utiliza delta na implementação v3.** A grade gera uma única
+tarefa por corte, modelo, lookback, par (H,K) e lambda para ListNet. O valor
+`delta=0` mantém a hierarquia dos diretórios e o formato da auditoria, com
+`delta_effective=False`; não representa um hiperparâmetro ativo. Isso vale
+mesmo se `DELTAS` não contiver zero. Alterar `DELTAS` afeta somente ranknet,
+hinge e pairwise_mse. Foram eliminadas 7.776 repetições da grade anterior de
+41.472 tarefas, preservando as configurações distintas.
 
 ### VAR
 
@@ -226,7 +238,8 @@ bash scripts/run_var_experiment.sh --dry-run
 ```
 
 Depois de editar os vetores, `--dry-run` recalcula a quantidade de tarefas.
-Por exemplo, reduzir `CROSS_LOSSES`, `LAMBDAS` ou `DELTAS` reduz a grade composta.
+O resumo também mostra a contagem por loss. Reduzir `CROSS_LOSSES` ou
+`LAMBDAS` reduz a grade composta; `DELTAS` altera apenas as losses de pares.
 Para visualizar todos os parâmetros efetivos definidos no `.sh`:
 
 ```bash
@@ -260,9 +273,9 @@ Por padrão, a partição é `medusas_dev`, com limite de oito horas por job e
 até seis tarefas simultâneas por array. As redes solicitam uma GPU por
 tarefa; o VAR usa CPU. Os arrays são limitados a 1.000 tarefas por submissão,
 e esse tamanho é reduzido se o Slurm informar um limite menor. No
-experimento composto, o script submete 42 arrays: 41 com 1.000 tarefas
-(`0-999`) e o último com 472 (`0-471`). Os arrays são encadeados com
-`afterany`, mantendo os índices globais de 0 a 41.471 e evitando que o
+experimento composto, o script submete 34 arrays: 33 com 1.000 tarefas
+(`0-999`) e o último com 696 (`0-695`). Os arrays são encadeados com
+`afterany`, mantendo os índices globais de 0 a 33.695 e evitando que o
 limite de seis tarefas seja multiplicado pelo número de arrays. Os
 experimentos temporal e VAR usam, respectivamente, arrays `0-323` e `0-2`.
 

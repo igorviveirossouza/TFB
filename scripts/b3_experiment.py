@@ -79,22 +79,29 @@ def load_config():
     return path, config
 
 
+def cross_deltas(config, loss):
+    # ListNet has no pairwise dead zone. Keep one canonical, inactive delta
+    # for paths/audits, independent of the editable DELTAS vector.
+    return [0] if loss == 'listnet' else config['deltas']
+
+
 def make_tasks(config, mode):
     tasks = []
     for pct in config['train_percentages']:
         losses = config['cross_losses'] if mode == 'composto' else ['mse']
         lambdas = config['lambdas'] if mode == 'composto' else [0]
-        deltas = config['deltas'] if mode == 'composto' else [0]
         models = config['models'] if mode != 'var' else ['VAR']
         lookbacks = config['lookbacks'] if mode != 'var' else [config['var_lags']]
         horizons = config['horizons'] if mode != 'var' else [max(config['horizons'])]
-        for loss, lam, delta, model, lb, horizon in itertools.product(
-                losses, lambdas, deltas, models, lookbacks, horizons):
-            ks = [k for k in config['trade_windows'] if k <= horizon and horizon % k == 0] if mode == 'composto' else [None]
-            for k in ks:
-                tasks.append(dict(array_index=len(tasks), treino=pct, experimento=mode,
-                                  loss=loss, cross_lambda=lam, cross_delta=delta,
-                                  modelo=model, lookback=lb, pred_len=horizon, k=k))
+        for loss in losses:
+            deltas = cross_deltas(config, loss) if mode == 'composto' else [0]
+            for lam, delta, model, lb, horizon in itertools.product(
+                    lambdas, deltas, models, lookbacks, horizons):
+                ks = [k for k in config['trade_windows'] if k <= horizon and horizon % k == 0] if mode == 'composto' else [None]
+                for k in ks:
+                    tasks.append(dict(array_index=len(tasks), treino=pct, experimento=mode,
+                                      loss=loss, cross_lambda=lam, cross_delta=delta,
+                                      modelo=model, lookback=lb, pred_len=horizon, k=k))
     return tasks
 
 
@@ -480,9 +487,14 @@ def main():
     if args.mode == 'composto':
         pairs = sum(k <= h and h % k == 0 for h in config['horizons'] for k in config['trade_windows'])
         factors = [len(config[key]) for key in ('train_percentages', 'models', 'lookbacks')]
-        factors += [pairs] + [len(config[key]) for key in ('cross_losses', 'lambdas', 'deltas')]
+        variants = sum(len(cross_deltas(config, loss)) for loss in config['cross_losses'])
+        factors += [pairs, len(config['lambdas']), variants]
         print('Grade: ' + ' × '.join(map(str, factors)) + f' = {len(tasks)} treinamentos.', flush=True)
-        print(f'{pairs} pares H/K válidos; delta não altera ListNet.', flush=True)
+        counts = {loss: sum(t['loss'] == loss for t in tasks) for loss in config['cross_losses']}
+        print('Por loss: ' + '; '.join(f'{loss}={count}' for loss, count in counts.items()) + '.', flush=True)
+        print(f'{pairs} pares H/K válidos; {variants} combinações efetivas de loss/delta.', flush=True)
+        if 'listnet' in config['cross_losses']:
+            print('ListNet: delta não se aplica; uma execução por combinação, registrada como delta=0.', flush=True)
     if args.dry_run:
         chunks = array_chunks(len(tasks), int(os.environ.get('ARRAY_CHUNK_SIZE','1000')))
         print(f'{len(chunks)} array(s), tamanho máximo {max(c for _,c in chunks)}; último: 0-{chunks[-1][1]-1}')
