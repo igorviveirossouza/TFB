@@ -118,27 +118,50 @@ As métricas usam a trajetória **diária**, inclusive os dias internos dos
 blocos: retorno total, CAGR de 252 pregões/ano, desvio amostral, volatilidade
 anualizada, drawdown desde patrimônio inicial 1 e Sharpe.
 
-`SELIC_FILE` é opcional. Sem ele, `sharpe_selic` e
-`sharpe_geometrico_selic` ficam NA e `status_rf=NAO_FORNECIDA`; calcula-se
-`sharpe_rf_zero`, explicitamente identificado. Não substitui Selic por CDI.
-Com SGS11, `sharpe_selic=sqrt(252)*mean(r-rf)/sd(r-rf)`, como no R antigo.
-O arquivo deve ter `data` (YYYY-MM-DD) e `rf` (retorno simples **decimal**),
-cobrindo todos os pregões da base. Compõe taxas BCB entre o fechamento
-anterior e a data corrente, incluindo dias BCB sem pregão B3. Essa referência
-diária de oportunidade não é apresentada como rendimento intradiário negociável.
+O benchmark é o **CDI diário realizado (BCB SGS 12)**, obrigatório no
+`calendario_tfb.csv` do bundle de mercado, contrato `2026-10-15-v2-cdi`.
+Não existe arquivo de juros separado nem download durante o job.
 
-No R local, dentro do repositório `analise_resultados`, pode exportar um cache
-completo do motor R antigo:
+- `retorno_cdi`: retorno simples decimal já acumulado no R;
+- `log_retorno_cdi`: log equivalente, conferido pelo Python;
+- `n_observacoes_cdi`: quantidade de observações ANBIMA no intervalo;
+- `rf_fonte`: sempre `BCB_SGS12`.
+
+Reutiliza o CDI auditado em **[data_anterior, date_pregao)**, incluindo dias
+ANBIMA sem pregão B3. A SGS 12 original é % ao dia; o R já dividiu por 100.
+O Python não desloca a série nem divide novamente por 100 ou 252.
+Taxas ausentes/inválidas, fonte ou convenção diferente e versões antigas da
+base interrompem o planejamento antes de criar a execução.
+
+`sharpe_cdi = sqrt(252)*mean(r-rf)/sd(r-rf)`, com desvio amostral e trajetória
+diária, mesmo para K>1. `sharpe_geometrico_cdi` registra separadamente
+`(CAGR_carteira - CAGR_CDI)/vol_anual`. Também salva `cdi_acumulado`,
+`cdi_anualizado` e `status_rf=BCB_SGS12`; `sharpe_rf_zero` permanece apenas
+como diagnóstico identificado. Desvio nulo/uma observação gera Sharpe NA.
+A carteira diária conserva `rf` e cada bloco conserva `retorno_cdi` composto.
+
+É um custo de oportunidade diário entre fechamentos, inclusive para a carteira
+K=1 abertura–fechamento; não é uma taxa intradiária negociável. Não remunera
+caixa/garantias nem participa dos sinais e do IC.
+
+Para a pasta de insumos já transferida, atualize **no R local**, no repositório
+`analise_resultados`:
 
 ```r
-source("src/06_resultados_cluster.R")
-arquivos <- list.files("caminho/cache_selic", pattern="[.]rds$", full.names=TRUE)
-taxas <- do.call(rbind, lapply(arquivos, readRDS))
-exportar_selic_cluster(taxas, "selic_sgs11.csv")
+options(
+  b3.backtest.auditoria = "/caminho/analise_resultados/output/auditoria/ID_DA_EXECUCAO",
+  b3.backtest.saida = "/caminho/analise_resultados/output/base_backtest_temporal_001",
+  b3.backtest.atualizar_cdi = TRUE
+)
+source("src/exportar_base_backtest.R")
 ```
 
-Transfira o arquivo ao SNFS2 e configure `SELIC_FILE`. O Python não baixa
-taxas ou cotações durante o job. O cache precisa cobrir todo o calendário exigido.
+Reenvie os quatro arquivos existentes atualizados (`calendario_tfb.csv`,
+`manifesto.csv`, `fontes.csv` e, por último, `checksums_saidas.csv`) para
+`MARKET_DIR`, sem jobs lendo essa pasta. Não precisa reenviar preços, criar
+outra pasta de insumos ou transferir `cdi_tfb.csv` separadamente. Detalhes na
+[preparação R](https://github.com/igorviveirossouza/analise_resultados/blob/feat/base-mercado-backtest/docs/base_mercado_backtest.md).
+O novo `RUN_ID` padrão contém `cdi_v2`, preservando resultados e planos antigos.
 
 ## Entradas e planejamento
 
@@ -238,7 +261,7 @@ Locks evitam publicação simultânea da mesma tarefa. Entradas não são altera
 Mudar cenário exige novo nome, por exemplo:
 
 ```bash
-RUN_ID=temporal_var_s5_c0_v1 SLIPPAGE_BPS=5 bash scripts/run_backtests_cpu.sh piloto
+RUN_ID=temporal_var_s5_c0_cdi_v2 SLIPPAGE_BPS=5 bash scripts/run_backtests_cpu.sh piloto
 ```
 
 A pasta contém `plano.json`, `estrategias.json`, snapshot em `codigo/`,
@@ -279,7 +302,7 @@ locks evitam duplicação, mas CPUs ficariam aguardando a tarefa já em curso.
 Para reconstruir os resumos após interrupção, sem recalcular carteiras:
 
 ```bash
-RUN_DIR=/snfs2/igor.viveiros/analise_resultados/backtests/temporal_var_abertura_fechamento_s0_c0_v1
+RUN_DIR=/snfs2/igor.viveiros/analise_resultados/backtests/temporal_var_abertura_fechamento_s0_c0_cdi_v2
 "$PYTHON_BIN" -B "$RUN_DIR/codigo/run_backtests.py" consolidate --run-dir "$RUN_DIR"
 ```
 
@@ -298,11 +321,11 @@ traga também `status/` e `logs/`. Dependências: arrow, jsonlite e ggplot2.
 
 ```r
 source("src/06_resultados_cluster.R")
-x <- abrir_resultados_cluster("caminho/local/temporal_var_abertura_fechamento_s0_c0_v1")
+x <- abrir_resultados_cluster("caminho/local/temporal_var_abertura_fechamento_s0_c0_cdi_v2")
 tabela <- subset(x$metricas, treino==70 & k==5 & estrategia=="compra_positivos")
 tabela[order(-tabela$retorno_acumulado),
        c("task_id", "modelo", "lookback", "pred_len", "retorno_acumulado",
-         "volatilidade_anualizada", "sharpe_rf_zero", "sharpe_selic", "max_drawdown")]
+         "volatilidade_anualizada", "sharpe_cdi", "max_drawdown")]
 
 # IC natural com a mesma antecedencia h e amostra comum.
 subset(x$ic_resumo, treino==70 & h==1 & amostra=="comum")
@@ -326,7 +349,7 @@ bash -n scripts/run_backtests_cpu.sh
 
 Casos controlados cobrem IC com empates, datas/horizontes, compra/venda,
 ausência de sinal, eventos, custos, insolvência, indisponibilidade de cotação,
-Selic, Parquets, processos paralelos, retomada/corrupção e fontes incompatíveis.
+CDI incorporado, Parquets, processos paralelos, retomada/corrupção e fontes incompatíveis.
 Não substituem o piloto com a base completa. `--allow-local` serve apenas
 a testes/fixtures; o launcher de produção não oferece essa opção.
 

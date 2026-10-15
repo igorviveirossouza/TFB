@@ -12,7 +12,6 @@ def parser():
     prep.add_argument("--market", required=True)
     prep.add_argument("--returns-file", required=True)
     prep.add_argument("--strategies", required=True)
-    prep.add_argument("--selic", help="CSV/Parquet data,rf; SGS11 em retorno decimal, sem conversao implicita de CDI.")
     prep.add_argument("--run-dir", required=True)
     prep.add_argument("--train", type=int, nargs="+", default=[70, 80, 90])
     prep.add_argument("--k", type=int, nargs="+", default=[1, 5, 10, 15, 20, 25])

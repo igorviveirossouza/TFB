@@ -203,12 +203,12 @@ def metrics(daily, periods):
         "retorno_acumulado": eq[-1]-1, "retorno_anualizado": cagr,
         "desvio_padrao_diario": sd, "volatilidade_anualizada": vol,
         "sharpe_rf_zero": np.mean(r)/sd*np.sqrt(252) if sd > 0 else np.nan,
-        "sharpe_selic": np.mean(ex)/sdex*np.sqrt(252) if sdex > 0 else np.nan,
-        "sharpe_geometrico_selic": (cagr-rfa)/vol if has_rf and vol > 0 else np.nan,
-        "status_rf": "SELIC_SGS11" if has_rf else "NAO_FORNECIDA",
+        "sharpe_cdi": np.mean(ex)/sdex*np.sqrt(252) if sdex > 0 else np.nan,
+        "sharpe_geometrico_cdi": (cagr-rfa)/vol if has_rf and vol > 0 else np.nan,
+        "status_rf": "BCB_SGS12" if has_rf else "NAO_FORNECIDA",
         "max_drawdown": daily.drawdown.min(),
-        "selic_acumulada": np.expm1(np.log1p(rf).sum()) if has_rf else np.nan,
-        "selic_anualizada": rfa,
+        "cdi_acumulado": np.expm1(np.log1p(rf).sum()) if has_rf else np.nan,
+        "cdi_anualizado": rfa,
         "fracao_blocos_caixa": (periods.n_ativos == 0).mean(),
     }])
 
@@ -302,7 +302,8 @@ def backtest(scores, origins, k, market, strategy, slippage_bps=0., cost_bps=0.)
         "data_sinal": data[origins-1], "data_entrada": data[origins], "data_saida": data[origins+k-1],
         "n_ativos": n, "retorno": equity[:, -1]-1, "patrimonio": wealth.reshape(-1, k)[:, -1],
         "custo_entrada_por_capital": entry_fee, "custo_saida_por_capital": exit_fee,
-        "direitos_por_capital": sign*dividends[:, -1]})
+        "direitos_por_capital": sign*dividends[:, -1],
+        "retorno_cdi": np.expm1(np.log1p(market.rf[days]).sum(axis=1))})
     b, j = np.where(active)
     positions = pd.DataFrame({"origin_step": origins[b], "entry_step": origins[b]+1,
         "target_step": origins[b]+k, "ticker": market.tickers[chosen[b, j]],

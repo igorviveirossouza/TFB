@@ -95,7 +95,7 @@ def prepare(args):
         if not np.isfinite(value) or not 0 <= value < 10000:
             raise ValueError("Slippage/custos devem estar em [0,10000) bps por ponta.")
     strategies = load_strategies(args.strategies)
-    market, identity = load_bundle(args.market, args.returns_file, args.selic)
+    market, identity = load_bundle(args.market, args.returns_file)
     tasks, provenance = discover_tasks(predictions, sorted(args.train), market, identity["retornos_sha256"])
     if any(not any(k <= t["pred_len"] for k in args.k) for t in tasks):
         raise ValueError("Cada horizonte deve ter ao menos um K elegivel. Inclua K=1.")
@@ -107,7 +107,7 @@ def prepare(args):
             "strategies": strategies, "k": sorted(args.k), "slippage_bps": args.slippage_bps,
             "cost_bps": args.cost_bps, "code": {p.name: digest(p) for p in source_files},
             "runtime": runtime_versions(),
-            "regime": "abertura_t+1_fechamento_t+k", "rf": "SELIC_SGS11" if args.selic else "NAO_FORNECIDA",
+            "regime": "abertura_t+1_fechamento_t+k", "rf": identity["rf_fonte"], "rf_convencao": identity["rf_convencao"],
             "dividendos": "direito_na_data_ex_sem_reinvestir_no_bloco_disponivel_no_rebalanceamento",
             "distribuicao_ativos": "bloquear_posse_sem_trajetoria_do_ativo_recebido",
             "short": "exposicao_bruta_ate_1x_sem_aluguel_margem_ou_remuneracao_de_garantias",
@@ -171,9 +171,9 @@ def initialize(plan):
     if runtime_versions() != plan["runtime"]:
         raise ValueError("Versoes Python/bibliotecas mudaram desde o planejamento. Use o mesmo ambiente ou novo RUN_ID.")
     inp = plan["inputs"]
-    _MARKET, actual = load_bundle(inp["base"], inp["retornos"], inp["selic"])
+    _MARKET, actual = load_bundle(inp["base"], inp["retornos"])
     if actual != inp:
-        raise ValueError("Insumos de mercado/retornos/Selic mudaram apos preparar o plano.")
+        raise ValueError("Insumos de mercado/retornos/CDI mudaram apos preparar o plano.")
 
 
 def valid_result(directory, signature, require_complete=True):

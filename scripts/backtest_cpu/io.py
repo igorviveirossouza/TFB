@@ -46,29 +46,44 @@ def load_strategies(path):
     return raw
 
 
-def load_rf(path, calendar):
-    if path is None:
-        return None
-    frame = read_table(path)
-    if set(frame.columns) != {"data", "rf"}:
-        raise ValueError("Selic: esperado data (YYYY-MM-DD), rf (retorno simples decimal SGS11).")
-    frame["data"] = pd.to_datetime(frame.data, format="%Y-%m-%d", errors="raise")
-    frame = frame.sort_values("data")
-    rates = pd.to_numeric(frame.rf, errors="raise").to_numpy(dtype=float)
-    if (frame.data.isna().any() or frame.data.duplicated().any() or not np.isfinite(rates).all()
-            or np.any(rates <= -1)):
-        raise ValueError("Selic: datas duplicadas ou taxas invalidas.")
-    current = pd.to_datetime(calendar.date_pregao).to_numpy()
-    previous = pd.to_datetime(calendar.data_anterior).to_numpy()
-    if not np.isin(current, frame.data.values).all():
-        raise ValueError("Selic ausente em pregao; fornecer serie completa, sem preencher zero.")
-    totals = np.r_[0., np.cumsum(np.log1p(rates))]
-    hi = np.searchsorted(frame.data.values, current, side="right")
-    lo = np.searchsorted(frame.data.values, previous, side="right")
-    return np.expm1(totals[hi]-totals[lo])
+RF_SOURCE = "BCB_SGS12"
+RF_CONVENTION = "CDI_ACUMULADO_DATA_ANTERIOR_INCLUSIVE_PREGAO_EXCLUSIVE"
 
 
-def load_bundle(directory, returns_file, rf_file=None):
+def load_rf(calendar):
+    """CDI ja alinhado no R: [data_anterior, date_pregao), simples decimal.
+
+    Cada linha pode acumular mais de um dia ANBIMA. Nao deslocar, interpolar,
+    anualizar ou converter novamente a serie recebida.
+    """
+    required = {"date", "date_pregao", "data_anterior", "retorno_cdi",
+                "log_retorno_cdi", "n_observacoes_cdi", "rf_fonte"}
+    if not required <= set(calendar):
+        raise ValueError("CDI ausente no calendario; atualize a base no R com atualizar_cdi_base_backtest().")
+    frame = calendar.sort_values("date")
+    dates = integers(frame.date, "CDI/date")
+    if not np.array_equal(dates, np.arange(1, len(frame)+1)) or not len(frame):
+        raise ValueError("Calendario CDI duplicado/desalinhado.")
+    current = pd.to_datetime(frame.date_pregao, format="%Y-%m-%d", errors="raise")
+    previous = pd.to_datetime(frame.data_anterior, format="%Y-%m-%d", errors="raise")
+    if (current.isna().any() or previous.isna().any() or not current.is_monotonic_increasing
+            or current.duplicated().any() or (previous >= current).any()
+            or not np.array_equal(previous.values[1:], current.values[:-1])):
+        raise ValueError("Datas do calendario CDI invalidas.")
+    rates = pd.to_numeric(frame.retorno_cdi, errors="raise").to_numpy(dtype=float)
+    logs = pd.to_numeric(frame.log_retorno_cdi, errors="raise").to_numpy(dtype=float)
+    counts = integers(frame.n_observacoes_cdi, "CDI/n_observacoes")
+    if (frame.rf_fonte.isna().any() or not frame.rf_fonte.eq(RF_SOURCE).all()
+            or not np.isfinite(rates).all() or not np.isfinite(logs).all()
+            or np.any(rates <= -1) or np.any(counts < 1)
+            or np.any(counts > (current-previous).dt.days.to_numpy())):
+        raise ValueError("CDI invalido/incompleto; nao substituir taxas por zero ou outra fonte.")
+    if not np.allclose(np.log1p(rates), logs, rtol=1e-10, atol=1e-12):
+        raise ValueError("CDI simples/log divergentes; confira unidades e calendario no R.")
+    return rates
+
+
+def load_bundle(directory, returns_file):
     directory, returns_file = Path(directory).resolve(), Path(returns_file).resolve()
     checks = pd.read_csv(directory/"checksums_saidas.csv", dtype=str, keep_default_na=False)
     if set(checks.columns) != {"arquivo", "md5"} or checks.arquivo.duplicated().any():
@@ -85,17 +100,23 @@ def load_bundle(directory, returns_file, rf_file=None):
             raise ValueError(f"Checksum divergente na base: {path}")
         files[row.arquivo] = digest(path)
     manifest = pd.read_csv(directory/"manifesto.csv")
-    if (len(manifest) != 1 or manifest.versao.iloc[0] != "2026-10-15-v1"
+    if (len(manifest) != 1 or manifest.versao.iloc[0] != "2026-10-15-v2-cdi"
             or manifest.arquivo_base.iloc[0] not in names
             or manifest.arquivo_base.iloc[0] not in {"mercado_diario.csv", "mercado_diario.parquet"}):
-        raise ValueError("Manifesto de mercado desconhecido/incompleto.")
+        raise ValueError("Base sem contrato CDI atual; atualize no R com atualizar_cdi_base_backtest().")
+    if (not {"rf_fonte", "rf_convencao"} <= set(manifest)
+            or manifest.rf_fonte.iloc[0] != RF_SOURCE or manifest.rf_convencao.iloc[0] != RF_CONVENTION):
+        raise ValueError("Fonte/convencao CDI desconhecida no manifesto.")
     sources = pd.read_csv(directory/"fontes.csv", dtype=str)
     source = sources[sources.papel == "RETORNOS_USADOS_NO_TREINO"]
     if len(source) != 1 or digest(returns_file, "md5") != source.md5.iloc[0].lower():
         raise ValueError("Retornos de treino diferem do arquivo registrado no bundle de mercado.")
+    cdi_source = sources[sources.papel == "cdi_tfb.csv"]
+    if len(cdi_source) != 1 or not re.fullmatch(r"[0-9a-fA-F]{32}", str(cdi_source.md5.iloc[0])):
+        raise ValueError("Proveniencia do CDI auditado ausente/invalida em fontes.csv.")
     calendar = pd.read_csv(directory/"calendario_tfb.csv")
     frame = read_table(directory/manifest.arquivo_base.iloc[0])
-    market = Market.from_frame(frame, calendar, load_rf(rf_file, calendar))
+    market = Market.from_frame(frame, calendar, load_rf(calendar))
     dims = (len(frame), len(market.tickers), market.n)
     if dims != tuple(int(manifest[c].iloc[0]) for c in ["n_linhas", "n_ativos", "n_pregoes"]):
         raise ValueError("Dimensoes do manifesto de mercado divergentes.")
@@ -111,8 +132,7 @@ def load_bundle(directory, returns_file, rf_file=None):
         raise ValueError("Base de mercado nao reproduz exatamente o painel de treino informado.")
     identity = {"base": str(directory), "arquivos": files, "retornos": str(returns_file),
                 "retornos_sha256": digest(returns_file),
-                "selic": str(Path(rf_file).resolve()) if rf_file else None,
-                "selic_sha256": digest(rf_file) if rf_file else None,
+                "rf_fonte": RF_SOURCE, "rf_convencao": RF_CONVENTION,
                 "n_pregoes": market.n, "tickers": market.tickers.tolist()}
     return market, identity
 

@@ -9,10 +9,10 @@ PYTHON_BIN="${PYTHON_BIN:-/sonic_home/igor.viveiros/py310/bin/python}"
 PREDICTIONS_ROOT="${PREDICTIONS_ROOT:-/snfs2/igor.viveiros/previsoes/novas_previsoes}"
 MARKET_DIR="${MARKET_DIR:-/snfs2/igor.viveiros/analise_resultados/insumos/base_backtest_temporal_001}"
 RETURNS_FILE="${RETURNS_FILE:-$TFB_ROOT/dataset/forecasting/b3_daily_tfb_new.csv}"
+# CDI obrigatorio, incorporado no calendario_tfb.csv pelo R local.
 STRATEGIES_FILE="${STRATEGIES_FILE:-$TFB_ROOT/config/estrategias_backtest.json}"
-SELIC_FILE="${SELIC_FILE:-}"  # CSV/Parquet data,rf (SGS11 decimal). Vazio: Sharpe Selic=NA.
 OUTPUT_ROOT="${OUTPUT_ROOT:-/snfs2/igor.viveiros/analise_resultados/backtests}"
-RUN_ID="${RUN_ID:-temporal_var_abertura_fechamento_s0_c0_v1}"
+RUN_ID="${RUN_ID:-temporal_var_abertura_fechamento_s0_c0_cdi_v2}"
 TRAIN=(70 80 90)
 K_EVAL=(1 5 10 15 20 25)
 SLIPPAGE_BPS="${SLIPPAGE_BPS:-0}"  # Por ponta: 5 bps = 0,05%; compra pior e venda pior.
@@ -40,7 +40,6 @@ PREP=("$PYTHON_BIN" -B "$TFB_ROOT/scripts/run_backtests.py" prepare
     --predictions "$PREDICTIONS_ROOT" --market "$MARKET_DIR" --returns-file "$RETURNS_FILE"
     --strategies "$STRATEGIES_FILE" --run-dir "$RUN_DIR" --train "${TRAIN[@]}" --k "${K_EVAL[@]}"
     --slippage-bps "$SLIPPAGE_BPS" --cost-bps "$COST_BPS")
-if [[ -n "$SELIC_FILE" ]]; then PREP+=(--selic "$SELIC_FILE"); fi
 if [[ "$ACTION" == planejar ]]; then
     "${PREP[@]}" --dry-run
     printf 'Slurm: particao=%s, CPUs/processos=%s por no, memoria=%s, lotes=%s; nenhuma GPU.\n' "$PARTITION" "$WORKERS" "$MEMORY" "$N_LOTES"
