@@ -25,6 +25,7 @@ fi
 # Cada valor chega ao Python como argumento separado, sem interpolação em código.
 export B3_INLINE_CONFIG
 B3_INLINE_CONFIG=$("$PYTHON_BIN" - \
+  source_data_kind "$SOURCE_DATA_KIND" \
   train_percentages "${TRAIN_PERCENTAGES[*]}" models "${MODELS[*]}" \
   lookbacks "${LOOKBACKS[*]}" horizons "${HORIZONS[*]}" \
   trade_windows "${TRADE_WINDOWS[*]}" cross_losses "${CROSS_LOSSES[*]}" \

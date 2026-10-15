@@ -71,7 +71,7 @@ def load_panel(path: Path) -> pd.DataFrame:
         header = next(csv.reader(stream), [])
     if len(header) != len(set(header)):
         raise ValueError(f"Duplicate CSV columns in {path}.")
-    raw = pd.read_csv(path)
+    raw = pd.read_csv(path, float_precision="round_trip")
     if "date" not in raw or raw.empty:
         raise ValueError(f"Expected a nonempty CSV with a date column: {path}")
     raw["date"] = _date_index(raw["date"])
@@ -122,16 +122,21 @@ def _atomic_write(path: Path, write: Any) -> None:
         tmp.unlink(missing_ok=True)
 
 
-def prepare_dataset(source: Path, destination: Path, *, replace: bool = False) -> dict:
-    """Freeze log returns from positive prices, with hashes and calendar mapping.
+def prepare_dataset(
+    source: Path, destination: Path, *, source_data_kind: str = "price", replace: bool = False,
+) -> dict:
+    """Freeze explicit log-return inputs or convert positive prices exactly once.
 
     Existing matching files are reused unchanged. A managed set can only be
     replaced explicitly; an untracked destination is never overwritten. The
     caller must hold its submission/preparation lock and register FORECAST_META.
+    Never infer the input kind from signs: valid log returns can all be positive.
     """
+    if source_data_kind not in {"price", "log_return"}:
+        raise ValueError("SOURCE_DATA_KIND must be price or log_return.")
     source, destination = Path(source).resolve(), Path(destination).resolve()
     if source == destination:
-        raise ValueError("The price source and generated-return destination must differ.")
+        raise ValueError("The input source and prepared-return destination must differ.")
     metadata_path = destination.with_suffix(".metadata.json")
     # TFB scans top-level *.csv files as forecasting datasets. Keep this audit
     # CSV out of that scan: it is a calendar mapping, not a date,data,cols panel.
@@ -146,6 +151,8 @@ def prepare_dataset(source: Path, destination: Path, *, replace: bool = False) -
             raise ValueError("Generated dataset metadata belongs to another source/destination.")
         valid = (
             existing.get("source_sha256") == source_hash
+            # Metadata produced before explicit input kinds always meant prices.
+            and existing.get("source_data_kind", "price") == source_data_kind
             and destination.is_file()
             and calendar_path.is_file()
             and sha256_file(destination) == existing.get("dataset_sha256")
@@ -154,19 +161,37 @@ def prepare_dataset(source: Path, destination: Path, *, replace: bool = False) -
         if valid:
             return existing
         if not replace:
-            raise FileExistsError("Prepared inputs changed or are incomplete; explicitly replace them before submission.")
+            raise FileExistsError("Prepared inputs or SOURCE_DATA_KIND changed, or files are incomplete; explicitly replace them before submission.")
     elif destination.exists() or calendar_path.exists():
         raise FileExistsError("Refusing to overwrite generated files without ownership metadata.")
 
-    prices = load_panel(source)
-    if len(prices) < 3:
-        raise ValueError("At least three price observations are required.")
-    if not (prices.to_numpy() > 0).all():
-        raise ValueError("Log returns require strictly positive prices.")
-    # diff(log(price)) avoids an overflowing intermediate price ratio.
-    returns = np.diff(np.log(prices.to_numpy()), axis=0)
+    panel = load_panel(source)
+    if source_data_kind == "price":
+        if len(panel) < 3:
+            raise ValueError("At least three price observations are required.")
+        invalid = panel.to_numpy() <= 0
+        if invalid.any():
+            row, col = np.argwhere(invalid)[0]
+            raise ValueError(
+                f"Log returns require strictly positive prices: {int(invalid.sum())} invalid values; "
+                f"first at date={panel.index[row]}, asset={panel.columns[col]}, value={panel.iloc[row, col]}. "
+                "If the source already contains log returns, set SOURCE_DATA_KIND=log_return."
+            )
+        # diff(log(price)) avoids an overflowing intermediate price ratio.
+        returns = np.diff(np.log(panel.to_numpy()), axis=0)
+        source_origins, source_targets = panel.index[:-1], panel.index[1:]
+        step_offset = 2
+    else:
+        if len(panel) < 2:
+            raise ValueError("At least two log-return observations are required.")
+        returns = panel.to_numpy()
+        # The first return's preceding price/date is outside this input. Do not
+        # invent it or remove the already-valid first return to obtain a label.
+        source_origins = pd.Series(panel.index).shift(1)
+        source_targets = panel.index
+        step_offset = 1
     dates = pd.date_range("2000-01-02", periods=len(returns), freq="D")
-    targets = prices.columns.tolist()
+    targets = panel.columns.tolist()
     output = pd.DataFrame({
         "date": np.tile(dates.strftime("%Y-%m-%d"), len(targets)),
         "data": returns.T.reshape(-1),
@@ -175,14 +200,14 @@ def prepare_dataset(source: Path, destination: Path, *, replace: bool = False) -
     calendar = pd.DataFrame({
         "date": dates.strftime("%Y-%m-%d"),
         "return_row": np.arange(len(returns)),
-        "origin_step": np.arange(1, len(prices)),
-        "step": np.arange(2, len(prices) + 1),
-        "source_origin": prices.index[:-1],
-        "source_target": prices.index[1:],
+        "origin_step": np.arange(len(returns)) + step_offset - 1,
+        "step": np.arange(len(returns)) + step_offset,
+        "source_origin": source_origins,
+        "source_target": source_targets,
     })
     # Detect a concurrent upstream rewrite before publishing the frozen input.
     if sha256_file(source) != source_hash:
-        raise RuntimeError("The price source changed during preparation; retry after its writer finishes.")
+        raise RuntimeError("The input source changed during preparation; retry after its writer finishes.")
     _atomic_write(destination, lambda path: output.to_csv(path, index=False))
     _atomic_write(calendar_path, lambda path: calendar.to_csv(path, index=False))
     metadata = {
@@ -191,11 +216,13 @@ def prepare_dataset(source: Path, destination: Path, *, replace: bool = False) -
         "dataset": str(destination),
         "source_sha256": source_hash,
         "dataset_sha256": sha256_file(destination),
-        "n_prices": len(prices),
+        "source_data_kind": source_data_kind,
+        "n_source_rows": len(panel),
+        "n_prices": len(panel) if source_data_kind == "price" else None,
         "n_rows": len(returns),
         "n_assets": len(targets),
         "targets": targets,
-        "step_offset": STEP_OFFSET,
+        "step_offset": step_offset,
         "calendar": str(calendar_path),
         "calendar_sha256": sha256_file(calendar_path),
         "metadata": str(metadata_path),
@@ -266,6 +293,7 @@ def export_predictions(
     horizon: int,
     output_dir: Path,
     keep_csv: bool = False,
+    *, step_offset: int = STEP_OFFSET,
 ) -> dict:
     """Validate stride-one rolling predictions and atomically write one Parquet.
 
@@ -274,7 +302,8 @@ def export_predictions(
     match the frozen input (float32 roundoff is allowed).
     """
     actual, prediction = _read_payload(Path(result_dir))
-    return export_prediction_windows(actual, prediction, panel, cut, horizon, output_dir, keep_csv)
+    return export_prediction_windows(actual, prediction, panel, cut, horizon, output_dir,
+                                     keep_csv, step_offset=step_offset)
 
 
 def export_prediction_windows(
@@ -285,8 +314,11 @@ def export_prediction_windows(
     horizon: int,
     output_dir: Path,
     keep_csv: bool = False,
+    *, step_offset: int = STEP_OFFSET,
 ) -> dict:
     """Export validated windows supplied directly (e.g. one fitted VAR)."""
+    if type(step_offset) is not int or step_offset not in {1, 2}:
+        raise ValueError("step_offset must be 1 (log-return input) or 2 (price input).")
     if cut <= 0 or horizon <= 0 or cut + horizon > len(panel):
         raise ValueError("Invalid test cutoff/horizon for the supplied panel.")
     if not panel.index.is_unique or not panel.index.is_monotonic_increasing:
@@ -306,7 +338,8 @@ def export_prediction_windows(
     window_names = [f"janela_{sample:06d}.csv" for sample in range(count)]
     frame.insert(0, "arquivo", np.repeat(window_names, horizon))
     frame["h"] = np.tile(np.arange(1, horizon + 1), count)
-    frame["origin_step"] = np.repeat(np.arange(cut + 1, cut + count + 1), horizon)
+    first_origin = cut + step_offset - 1
+    frame["origin_step"] = np.repeat(np.arange(first_origin, first_origin + count), horizon)
     frame["step"] = frame["origin_step"] + frame["h"]
     output_dir = Path(output_dir)
     parquet = output_dir / "part.parquet"
@@ -321,7 +354,7 @@ def export_prediction_windows(
         "n_windows": count,
         "n_rows": len(frame),
         "n_assets": len(panel.columns),
-        "first_origin_step": cut + 1,
-        "last_origin_step": cut + count,
-        "first_target_step": cut + 2,
+        "first_origin_step": first_origin,
+        "last_origin_step": first_origin + count - 1,
+        "first_target_step": first_origin + 1,
     }

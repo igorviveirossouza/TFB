@@ -25,18 +25,25 @@ não há etapa de backtest ou formação de carteiras.
 
 ## Dados e cortes temporais
 
-A entrada obrigatória é o arquivo de **preços** `b3_daily_tfb_new.csv`,
+A entrada padrão é o arquivo de **log-retornos já corrigidos** `b3_daily_tfb_new.csv`,
 normalmente em `dataset/forecasting/`. Não há fallback para as bases antigas.
 O arquivo não acompanha este checkout; deve estar disponível no cluster antes
 da preparação ou submissão.
 
-As redes e o VAR usam os log-retornos calculados a partir dessa base:
+Os três `.sh` declaram `SOURCE_DATA_KIND=log_return`. As redes e o VAR usam
+diretamente esses valores, incluindo negativos e zeros, sem aplicar log ou
+diferença novamente e sem remover o primeiro pregão. A base exportada por
+`montar_painel_tfb` já contém `log_retorno_corrigido` na coluna `data`.
 
 ```text
-r[t] = log(P[t]) - log(P[t-1])
-N = número de observações temporais dos preços - 1
+N = número de observações temporais dos log-retornos de entrada
 corte = floor(N × proporção)
 ```
+
+Somente para um CSV que contenha **preços**, declare `SOURCE_DATA_KIND=price`
+no `.sh` ou no ambiente. Nesse modo, os preços devem ser estritamente positivos;
+calcula-se `r[t] = log(P[t]) - log(P[t-1])` uma vez e `N = N_precos - 1`.
+O formato é explícito: não se tenta adivinhá-lo pelo sinal dos valores.
 
 `N` conta pregões da série de log-retornos, não o número de linhas do formato
 longo multiplicado pelo número de ativos. Os cortes são `0.70`, `0.80` e
@@ -59,6 +66,12 @@ Os dados preparados mantêm um índice regular para os adaptadores do TFB e
 uma correspondência explícita com os pregões originais. Não são acrescentados
 pregões de bolsa inexistentes nem preenchidos preços ausentes para completar
 o painel. As previsões são convertidas mantendo sua ordem temporal original.
+O primeiro retorno corresponde a `step=1` para entrada `log_return` e a
+`step=2` para entrada `price`. Esse deslocamento fica nos metadados e é usado
+nos Parquets das redes e do VAR. Para entrada `log_return`, o rótulo anterior
+ao primeiro retorno não está no CSV e fica vazio no calendário de auditoria.
+Os rótulos da fonte são preservados em `source_target`; datas reais ausentes
+de uma entrada com índices inteiros não são reconstruídas.
 
 ## Grade e treinamento
 
@@ -289,7 +302,7 @@ antes de reutilizá-lo. Alterações na configuração ou no código depois da
 preparação são rejeitadas para impedir a mistura de desenhos diferentes na
 mesma saída. Os arquivos derivados de log-retornos e calendário também são
 verificados por hash. Uma nova configuração requer outra `OUT_ROOT`;
-alterar a fonte de preços exige ainda preparar um novo conjunto de dados
+alterar a fonte ou `SOURCE_DATA_KIND` exige ainda preparar um novo conjunto de dados
 derivados, sem sobrescrever silenciosamente o conjunto já registrado.
 
 Os campos abaixo estão no próprio `.sh`. Caminhos e recursos também podem
@@ -301,6 +314,7 @@ ser sobrescritos pelo ambiente:
 | `VENV_PATH` | Arquivo `bin/activate` do ambiente Python |
 | `PYTHON_BIN` | Executável Python |
 | `DATASET_PATH` | Caminho de `b3_daily_tfb_new.csv` |
+| `SOURCE_DATA_KIND` | `log_return` (padrão, entrada já corrigida) ou `price` (calcular log-retornos) |
 | `OUT_ROOT` | Raiz dos resultados Parquet e auditorias |
 | `RESULT_ROOT` | Raiz dos resultados temporários do TFB |
 | `LOG_ROOT` | Diretório dos logs Slurm |

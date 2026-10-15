@@ -222,22 +222,30 @@ def test_submission_respects_smaller_discovered_array_limit(monkeypatch, tmp_pat
 
 
 @pytest.fixture
-def prepared_design(config, monkeypatch, tmp_path):
+def prepared_design(config, monkeypatch, tmp_path, request):
     # Isolate generated inputs and audit files from the actual repository.
     fake_root = tmp_path / "checkout"
     for relative in ("scripts/b3_experiment.py", "scripts/b3_experiment_io.py", "scripts/run_benchmark_composite_trading_loss_v3.py", "ts_benchmark/baselines/composite_trading_loss_v2.py", "ts_benchmark/baselines/composite_trading_loss_v3.py", "ts_benchmark/baselines/self_impl/VAR/VAR.py", "ts_benchmark/baselines/deep_forecasting_model_base.py"):
         destination = fake_root / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(REPO / relative, destination)
-    source = tmp_path / "prices.csv"
-    rows = 1001
-    pd.DataFrame({"date": np.arange(1, rows + 1), "A3": 100 * np.exp(np.arange(rows) * 0.0001), "B4": 50 * np.exp(np.arange(rows) * -0.0002)}).to_csv(source, index=False)
+    source_kind = getattr(request, 'param', 'price')
+    source = tmp_path / "source.csv"
+    rows = 1001 if source_kind == 'price' else 1000
+    if source_kind == 'price':
+        data = pd.DataFrame({"date": np.arange(1, rows + 1), "A3": 100 * np.exp(np.arange(rows) * 0.0001), "B4": 50 * np.exp(np.arange(rows) * -0.0002)})
+    else:
+        data = pd.DataFrame(np.random.default_rng(2026).normal(0, 0.01, (rows, 2)), columns=['A3', 'B4'])
+        data.iloc[0, 0] = 0
+        data.insert(0, 'date', np.arange(1, rows + 1))
+    data.to_csv(source, index=False)
     monkeypatch.setattr(experiment, "ROOT", fake_root)
     monkeypatch.setenv("DATASET_PATH", str(source))
     monkeypatch.setenv("RESULT_ROOT", str(tmp_path / "raw_results"))
     monkeypatch.setattr(experiment, "register_dataset", lambda dataset, metadata: None)
     monkeypatch.setattr(experiment.subprocess, "check_output", lambda *args, **kwargs: "test-commit\n")
     config["models"] = ["DUET"]
+    config["source_data_kind"] = source_kind
     config["lookbacks"] = [32]
     config["horizons"] = [5]
     tasks = experiment.make_tasks(config, "temporal")
@@ -246,6 +254,47 @@ def prepared_design(config, monkeypatch, tmp_path):
     out_root = tmp_path / "out"
     metadata = experiment.prepare(config_path, config, tasks, out_root)
     return SimpleNamespace(config=config, config_path=config_path, tasks=tasks, out=out_root, metadata=metadata)
+
+
+@pytest.mark.parametrize('prepared_design', ['log_return'], indirect=True)
+@pytest.mark.parametrize('mode', ['temporal', 'composto', 'var'])
+def test_log_return_workers_preserve_cutoffs_and_export_source_steps(prepared_design, monkeypatch, mode):
+    pytest.importorskip('pyarrow')
+    design = prepared_design
+    config = design.config
+    tasks = experiment.make_tasks(config, mode)
+    metadata = experiment.prepare(design.config_path, config, tasks, design.out)
+    assert metadata['n_source_rows'] == metadata['n_rows'] == 1000
+    assert metadata['source_data_kind'] == 'log_return'
+    panel = experiment_io.load_panel(Path(metadata['dataset']))
+    source = experiment_io.load_panel(Path(metadata['source']))
+    np.testing.assert_array_equal(panel.to_numpy(), source.to_numpy())
+    # Simulate predictions only; preparation, worker routing, validation,
+    # real Parquet writes and completion manifests run without a GPU/Slurm.
+    monkeypatch.setattr(experiment.subprocess, 'run', lambda *args, **kwargs: None)
+    for pct in (70, 80, 90):
+        task = next(t for t in tasks if t['treino'] == pct)
+        cut = 1000 * pct // 100
+        h = task['pred_len']
+        actual = np.stack([panel.iloc[i:i+h].to_numpy() for i in range(cut, len(panel)-h+1)])
+        monkeypatch.setattr(experiment_io, '_read_payload', lambda _, actual=actual: (actual, actual.copy()))
+        forecasts = np.zeros((len(panel)-cut, h, panel.shape[1]))
+        forecasts[:len(actual)] = actual
+        monkeypatch.setattr(experiment, 'var_forecasts', lambda *args, forecasts=forecasts: forecasts)
+        experiment.worker(config, tasks, design.out, task['array_index'])
+        frame = pd.read_parquet(design.out / experiment.output_path(task) / 'part.parquet')
+        assert frame.iloc[0]['origin_step'] == cut
+        assert frame.iloc[0]['step'] == cut + 1
+        assert frame.iloc[-1]['step'] == 1000
+        assert (frame['step'] - frame['origin_step'] == frame['h']).all()
+        # Join exported targets directly to the original return input, so an
+        # otherwise self-consistent off-by-one shift cannot pass this check.
+        np.testing.assert_array_equal(frame[panel.columns].to_numpy(), source.loc[frame['step']].to_numpy())
+        completed = design.out / experiment.group_path(task) / 'completed_tasks.csv'
+        row = next(csv.DictReader(completed.open()))
+        assert int(row['n_pretest']) == cut
+        assert row['source_data_kind'] == 'log_return'
+        assert int(row['step_offset']) == 1
 
 
 def test_prepare_is_repeatable_and_audits_all_three_cuts(prepared_design):
@@ -357,7 +406,8 @@ def test_dry_run_and_task_inspection_make_no_output(tmp_path):
         assert not (tmp_path / "absent").exists()
 
 
-def test_actual_tfb_data_source_loads_prepared_returns_and_does_not_scan_sidecars(monkeypatch, tmp_path):
+@pytest.mark.parametrize('source_kind', ['price', 'log_return'])
+def test_actual_tfb_data_source_loads_prepared_returns_and_does_not_scan_sidecars(monkeypatch, tmp_path, source_kind):
     from ts_benchmark.data import data_source
 
     source = tmp_path / "b3_daily_tfb_new.csv"
@@ -368,7 +418,7 @@ def test_actual_tfb_data_source_loads_prepared_returns_and_does_not_scan_sidecar
         "A4": [30.0, 31.0, 30.5, 32.0, 33.0],
     })
     prices.to_csv(source, index=False)
-    metadata = experiment_io.prepare_dataset(source, destination)
+    metadata = experiment_io.prepare_dataset(source, destination, source_data_kind=source_kind)
     experiment.register_dataset(destination, metadata)
     meta_path = tmp_path / "FORECAST_META.csv"
     registered_bytes = meta_path.read_bytes()
@@ -380,9 +430,26 @@ def test_actual_tfb_data_source_loads_prepared_returns_and_does_not_scan_sidecar
     pd.testing.assert_frame_equal(loaded, expected, check_names=False)
     assert loaded.columns.tolist() == ["Z3", "A4"]
     assert pd.infer_freq(loaded.index) == "D"
-    assert loader.dataset.get_series_meta_info(destination.name)["length"] == 4
+    assert loader.dataset.get_series_meta_info(destination.name)["length"] == (4 if source_kind == 'price' else 5)
+    assert pd.read_csv(meta_path).set_index('file_name').loc[source.name, 'length'] == 5
     assert meta_path.read_bytes() == registered_bytes
     assert {destination.name, source.name} == set(loader.dataset.metadata.index)
+
+
+@pytest.mark.parametrize('launcher', experiment.LAUNCHERS.values())
+def test_shell_source_kind_default_override_and_invalid_value(launcher):
+    import os
+
+    env = dict(os.environ, TFB_ROOT=str(REPO), PYTHON_BIN=sys.executable)
+    env.pop('SOURCE_DATA_KIND', None)
+    command = ['bash', str(REPO / 'scripts' / launcher), '--print-config']
+    default = subprocess.run(command, env=env, check=True, capture_output=True, text=True)
+    assert json.loads(default.stdout)['source_data_kind'] == 'log_return'
+    prices = subprocess.run(command, env=dict(env, SOURCE_DATA_KIND='price'), check=True, capture_output=True, text=True)
+    assert json.loads(prices.stdout)['source_data_kind'] == 'price'
+    invalid = subprocess.run(command, env=dict(env, SOURCE_DATA_KIND='auto'), capture_output=True, text=True)
+    assert invalid.returncode != 0
+    assert 'SOURCE_DATA_KIND' in invalid.stderr
 
 
 def test_editable_shell_parameters_reach_python_without_json(tmp_path):

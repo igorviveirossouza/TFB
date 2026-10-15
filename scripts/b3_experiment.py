@@ -52,6 +52,9 @@ def load_config():
         config = json.loads(path.read_text())
     else:
         raise ValueError('Execute um dos três run*.sh; os hiperparâmetros ficam no próprio script.')
+    config.setdefault('source_data_kind', 'log_return')
+    if config['source_data_kind'] not in {'price', 'log_return'}:
+        raise ValueError('SOURCE_DATA_KIND deve ser price ou log_return')
     for key in ('train_percentages', 'models', 'lookbacks', 'horizons',
                 'trade_windows', 'cross_losses', 'lambdas', 'deltas'):
         values = config[key]
@@ -198,6 +201,8 @@ def audit_row(config, task, metadata, out_root, signature):
     cross_blocks = task['pred_len'] // task['k'] if task['k'] is not None else ''
     return dict(task, **split_counts(config, task, metadata['n_rows']),
                 dataset='log_retornos', data_source=metadata['source'],
+                source_data_kind=metadata.get('source_data_kind', 'price'),
+                step_offset=metadata['step_offset'],
                 source_sha256=metadata['source_sha256'], dataset_sha256=metadata['dataset_sha256'],
                 n_assets=metadata['n_assets'], seed=config['strategy']['seed'],
                 temporal_loss=config['loss']['loss_temporal'],
@@ -243,7 +248,7 @@ def register_dataset(dataset, metadata):
     if source.parent == dataset.parent:
         # Source may be wide or use integer trading labels. It is not loaded by
         # this experiment, but registering its dimensions avoids TFB auto-scans.
-        rows.append(dict(row, file_name=source.name, length=metadata['n_prices'],
+        rows.append(dict(row, file_name=source.name, length=metadata.get('n_source_rows', metadata['n_prices']),
                          freq='other', if_univariate=metadata['n_assets'] == 1))
     previous = previous.loc[~previous.file_name.isin([r['file_name'] for r in rows])]
     updated = pd.concat([previous, pd.DataFrame(rows)], ignore_index=True)
@@ -259,6 +264,8 @@ def provenance(config, metadata):
                   'ts_benchmark/baselines/deep_forecasting_model_base.py']
     return dict(config=config, source_sha256=metadata['source_sha256'],
                 dataset_sha256=metadata['dataset_sha256'],
+                source_data_kind=metadata.get('source_data_kind', 'price'),
+                step_offset=metadata['step_offset'],
                 code_sha256={p:file_hash(ROOT / p) for p in code_files})
 
 
@@ -267,7 +274,9 @@ def prepare(config_path, config, tasks, out_root):
     source = Path(os.environ.get('DATASET_PATH', ROOT / 'dataset/forecasting/b3_daily_tfb_new.csv')).resolve()
     dataset = ROOT / 'dataset/forecasting/b3_log_returns_new.csv'
     with locked(dataset.parent / '.b3_new_prepare.lock'):
-        metadata = prepare_dataset(source, dataset)
+        metadata = prepare_dataset(source, dataset, source_data_kind=config['source_data_kind'])
+        print(f"Entrada: {config['source_data_kind']}; {metadata['n_rows']} pregões de log-retornos, "
+              f"{metadata['n_assets']} ativos; step inicial={metadata['step_offset']}.", flush=True)
         validate_lengths(config, tasks, metadata)
         signature = digest(provenance(config, metadata))
         groups = sorted({group_path(t) for t in tasks})
@@ -388,7 +397,8 @@ def worker(config, tasks, out_root, index):
                 count = len(panel) - cut - horizon + 1
                 actual = np.stack([panel.iloc[origin:origin+horizon].to_numpy() for origin in range(cut, cut+count)])
                 export_prediction_windows(actual, forecasts[:count, :horizon], panel, cut, horizon, path,
-                                          keep_csv=os.environ.get('MANTER_CSV','FALSE').upper() == 'TRUE')
+                                          keep_csv=os.environ.get('MANTER_CSV','FALSE').upper() == 'TRUE',
+                                          step_offset=metadata['step_offset'])
             parquet_hash = json.dumps({h:file_hash(path/'part.parquet') for h, path in paths.items()}, sort_keys=True)
         else:
             result_root = Path(os.environ.get('RESULT_ROOT', '/snfs2/igor.viveiros/result/b3_new'))
@@ -398,7 +408,8 @@ def worker(config, tasks, out_root, index):
                 print(f'TASK={index}: {output}', flush=True)
                 subprocess.run(command, cwd=ROOT, check=True)
                 export_predictions(Path(temporary), panel, split['n_pretest'], task['pred_len'], output,
-                                   keep_csv=os.environ.get('MANTER_CSV','FALSE').upper() == 'TRUE')
+                                   keep_csv=os.environ.get('MANTER_CSV','FALSE').upper() == 'TRUE',
+                                   step_offset=metadata['step_offset'])
             parquet_hash = file_hash(parquet)
         row = audit_row(config, task, metadata, out_root, signature)
         row.update(slurm_job_id=os.environ.get('SLURM_JOB_ID',''), parquet_sha256=parquet_hash)

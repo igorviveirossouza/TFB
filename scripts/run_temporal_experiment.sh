@@ -46,6 +46,7 @@ TFB_ROOT="${TFB_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 VENV_PATH="${VENV_PATH:-/sonic_home/igor.viveiros/py310/bin/activate}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 DATASET_PATH="${DATASET_PATH:-$TFB_ROOT/dataset/forecasting/b3_daily_tfb_new.csv}"
+export SOURCE_DATA_KIND="${SOURCE_DATA_KIND:-log_return}"  # log_return: base nova já corrigida; price: calcular diff(log(P))
 OUT_ROOT="${OUT_ROOT:-/snfs2/igor.viveiros/previsoes/novas_previsoes}"
 RESULT_ROOT="${RESULT_ROOT:-/snfs2/igor.viveiros/result/b3_new}"
 LOG_ROOT="${LOG_ROOT:-$TFB_ROOT/logs/b3_new}"

@@ -91,6 +91,69 @@ class ExperimentIOTests(unittest.TestCase):
         pd.testing.assert_frame_equal(before.iloc[:2], after.iloc[:2])
         self.assertNotEqual(before.iloc[2, 0], after.iloc[2, 0])
 
+    def test_log_return_inputs_preserve_every_value_row_and_label(self):
+        for integer_dates in (False, True):
+            for positive_only in (False, True):
+                for long_format in (False, True):
+                    with self.subTest(integer_dates=integer_dates, positive_only=positive_only, long_format=long_format):
+                        source = self.root / "input.csv"
+                        destination = self.root / f"returns_{integer_dates}_{positive_only}_{long_format}.csv"
+                        data = self.prices(integer_dates=integer_dates)
+                        data["Z3"] = [0.012345678901234567, -0.02, 0.0, 0.03]
+                        data["A4"] = [-0.01, 0.02, 0.01, -0.03]
+                        if positive_only:
+                            data[["Z3", "A4"]] = data[["Z3", "A4"]].abs() + 0.01
+                        raw = data.melt(id_vars="date", var_name="cols", value_name="data") if long_format else data
+                        raw.to_csv(source, index=False)
+                        source_hash = sha256_file(source)
+                        metadata = prepare_dataset(source, destination, source_data_kind="log_return")
+                        expected = load_panel(source)
+                        actual = load_panel(destination)
+                        np.testing.assert_array_equal(actual.to_numpy(), expected.to_numpy())
+                        self.assertEqual(actual.columns.tolist(), ["Z3", "A4"])
+                        self.assertEqual((metadata["n_source_rows"], metadata["n_rows"], metadata["step_offset"]), (4, 4, 1))
+                        self.assertIsNone(metadata["n_prices"])
+                        calendar = pd.read_csv(metadata["calendar"])
+                        self.assertEqual(calendar["step"].tolist(), [1, 2, 3, 4])
+                        self.assertEqual(calendar["origin_step"].tolist(), [0, 1, 2, 3])
+                        self.assertEqual(calendar["source_target"].tolist(), data["date"].tolist())
+                        self.assertTrue(pd.isna(calendar["source_origin"].iloc[0]))
+                        self.assertEqual(calendar["source_origin"].iloc[1:].tolist(), data["date"].iloc[:-1].tolist())
+                        self.assertEqual(sha256_file(source), source_hash)
+                        mtime = destination.stat().st_mtime_ns
+                        self.assertEqual(prepare_dataset(source, destination, source_data_kind="log_return"), metadata)
+                        self.assertEqual(destination.stat().st_mtime_ns, mtime)
+
+    def test_source_kind_change_cannot_reuse_incompatible_frozen_data(self):
+        source, destination = self.root / "source.csv", self.root / "returns.csv"
+        self.prices().to_csv(source, index=False)
+        metadata = prepare_dataset(source, destination)
+        # Old metadata had no explicit source kind and always meant prices.
+        legacy = dict(metadata)
+        legacy.pop("source_data_kind")
+        legacy.pop("n_source_rows")
+        Path(metadata["metadata"]).write_text(json.dumps(legacy))
+        self.assertEqual(prepare_dataset(source, destination), legacy)
+        with self.assertRaisesRegex(FileExistsError, "SOURCE_DATA_KIND"):
+            prepare_dataset(source, destination, source_data_kind="log_return")
+        updated = prepare_dataset(source, destination, source_data_kind="log_return", replace=True)
+        self.assertEqual(updated["n_rows"], 4)
+        self.assertEqual(updated["step_offset"], 1)
+        with self.assertRaisesRegex(FileExistsError, "SOURCE_DATA_KIND"):
+            prepare_dataset(source, destination, source_data_kind="price")
+
+    def test_log_return_mode_still_rejects_incomplete_or_nonfinite_panels(self):
+        source, destination = self.root / "source.csv", self.root / "returns.csv"
+        for bad in (np.nan, np.inf, -np.inf):
+            data = self.prices()
+            data.loc[1, "Z3"] = bad
+            data.to_csv(source, index=False)
+            with self.assertRaisesRegex(ValueError, "finite"):
+                prepare_dataset(source, destination, source_data_kind="log_return")
+        self.assertFalse(destination.exists())
+        with self.assertRaisesRegex(ValueError, "SOURCE_DATA_KIND"):
+            prepare_dataset(source, destination, source_data_kind="auto")
+
     def test_missing_duplicate_nonfinite_and_nonpositive_values_rejected(self):
         source = self.root / "prices.csv"
         base = self.prices()
