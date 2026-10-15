@@ -1,0 +1,6 @@
+[
+  {"id": "compra_positivos", "lado": "compra", "n_ativos": 9, "filtrar_sinal": true},
+  {"id": "compra_ranking", "lado": "compra", "n_ativos": 9, "filtrar_sinal": false},
+  {"id": "venda_negativos", "lado": "venda", "n_ativos": 9, "filtrar_sinal": true},
+  {"id": "venda_ranking", "lado": "venda", "n_ativos": 9, "filtrar_sinal": false}
+]

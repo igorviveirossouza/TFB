@@ -340,3 +340,21 @@ A inspeção do desenho pode ser feita fora do cluster. Executar os
 experimentos exige a base nova, as dependências do ambiente de treinamento
 e acesso ao Slurm; uma execução local de `--dry-run` não valida treinamento
 em GPU nem disponibilidade da partição.
+
+## Pós-processamento: IC e carteiras em CPU
+
+Depois de concluir temporal e VAR, execute o pós-processamento **neste
+repositório TFB**, na branch `experiment/b3-loss-clean-v1`:
+
+```bash
+bash scripts/run_backtests_cpu.sh planejar
+bash scripts/run_backtests_cpu.sh piloto
+# Após conferir o piloto:
+bash scripts/run_backtests_cpu.sh submeter
+```
+
+O motor Python está em `scripts/backtest_cpu/`, e as estratégias ficam em
+`config/estrategias_backtest.json`. Os jobs usam `gorgonas`; todos os arquivos
+gerados ficam no SNFS2, separados de `novas_previsoes`. O repositório local
+`analise_resultados` prepara os insumos e lê os Parquets em R para gráficos
+e tabelas. Veja [os contratos e as instruções do backtest CPU](b3_backtests_cpu.md).

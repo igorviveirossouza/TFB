@@ -1,0 +1,5 @@
+# Python >= 3.10; ambiente CPU independente do treinamento.
+numpy>=1.24,<3
+pandas>=2.0,<3
+scipy>=1.10,<2
+pyarrow>=12,<27
