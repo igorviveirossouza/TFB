@@ -32,8 +32,9 @@ def read_json(path):
 def read_table(path):
     path = Path(path)
     # ParquetFile evita inferencia Hive de diretorios treino=... ao ler um arquivo.
+    # Inferir tipos no CSV inteiro: colunas de auditoria podem misturar IDs e texto.
     return (pq.ParquetFile(path).read(use_threads=False).to_pandas()
-            if path.suffix == ".parquet" else pd.read_csv(path, keep_default_na=True))
+            if path.suffix == ".parquet" else pd.read_csv(path, keep_default_na=True, low_memory=False))
 
 
 def load_strategies(path):
