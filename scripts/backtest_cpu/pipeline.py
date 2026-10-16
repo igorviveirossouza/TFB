@@ -1,6 +1,6 @@
 """Preparacao auditavel, tarefas independentes, retomada atomica e consolidação."""
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 from datetime import datetime, timezone
 import fcntl
 import json
@@ -17,6 +17,7 @@ import sys
 import numpy as np
 import pandas as pd
 import pyarrow as pa
+import pyarrow.parquet as pq
 import scipy
 
 from . import SCHEMA_VERSION
@@ -303,28 +304,53 @@ def execute_task(task):
 
 
 def consolidate(run, plan):
-    """Resumos pequenos; diarios/posicoes continuam particionados, sem duplicacao."""
+    """Reune resumos e IC diario ja salvo, sem recalcular IC ou carteiras.
+
+    A serie temporal e copiada por tarefa para limitar memoria. O plano e os
+    resultados individuais permanecem intactos, inclusive em execucoes antigas.
+    """
     with locked(run/"locks/consolidar.lock"):
         tables = {"metricas": [], "ic_resumo": [], "ic_acumulado_resumo": [], "falhas": []}
         statuses = []
-        for task in plan["tasks"]:
-            directory = run/"tasks"/task["relpath"]
-            # Respeitar lock evita ler uma republicacao parcial de outro processo.
-            with locked(run/"locks"/f"task_{task['id']:04d}.lock"):
-                status = run/"status"/f"{task['id']:04d}.json"
-                last = read_json(status) if status.exists() else {}
-                if last.get("status") != "ERRO" and valid_result(directory, plan["signature"], require_complete=False):
-                    state = read_json(directory/"conclusao.json")
-                    for name in tables:
-                        if f"{name}.parquet" in state["files"]:
-                            tables[name].append(read_table(directory/f"{name}.parquet"))
-                    statuses.append({"task_id": task["id"], "status": state["status"],
-                                     "seconds": state["seconds"], "max_rss_mib": state["max_rss_mib"]})
-                else:
-                    statuses.append({"task_id": task["id"], "status": "ERRO" if last.get("status") == "ERRO" else "PENDENTE",
-                                     "erro": last.get("erro", "")})
+        daily_tmp = run/"tmp/ic_diario_consolidado.parquet"
+        daily_rows = daily_tasks = 0
+        daily_writer = None
+        try:
+            with ExitStack() as streams:
+                for task in plan["tasks"]:
+                    directory = run/"tasks"/task["relpath"]
+                    # O lock cobre a verificacao e a leitura, evitando republicacoes parciais.
+                    with locked(run/"locks"/f"task_{task['id']:04d}.lock"):
+                        status = run/"status"/f"{task['id']:04d}.json"
+                        last = read_json(status) if status.exists() else {}
+                        if last.get("status") != "ERRO" and valid_result(directory, plan["signature"], require_complete=False):
+                            state = read_json(directory/"conclusao.json")
+                            for name in tables:
+                                if f"{name}.parquet" in state["files"]:
+                                    tables[name].append(read_table(directory/f"{name}.parquet"))
+                            # ParquetFile nao infere particoes Hive a partir do caminho.
+                            daily = pq.ParquetFile(directory/"ic.parquet").read(use_threads=False)
+                            if daily_writer is None:
+                                daily_writer = streams.enter_context(
+                                    pq.ParquetWriter(daily_tmp, daily.schema, compression="snappy"))
+                            daily_writer.write_table(daily)
+                            daily_rows += daily.num_rows
+                            daily_tasks += 1
+                            statuses.append({"task_id": task["id"], "status": state["status"],
+                                             "seconds": state["seconds"], "max_rss_mib": state["max_rss_mib"]})
+                        else:
+                            statuses.append({"task_id": task["id"], "status": "ERRO" if last.get("status") == "ERRO" else "PENDENTE",
+                                             "erro": last.get("erro", "")})
+        except BaseException:
+            daily_tmp.unlink(missing_ok=True)
+            raise
         summary = run/"resumos"
         summary.mkdir(exist_ok=True)
+        if daily_tasks:
+            os.replace(daily_tmp, summary/"ic_diario.parquet")
+        else:
+            daily_tmp.unlink(missing_ok=True)
+            (summary/"ic_diario.parquet").unlink(missing_ok=True)
         # O consumidor R exige o estado da execucao; nunca mistura tabelas antigas.
         for name, frames in tables.items():
             if frames:
@@ -338,9 +364,13 @@ def consolidate(run, plan):
         counts = {s: sum(row["status"] == s for row in statuses) for s in ("COMPLETA", "PARCIAL", "ERRO", "PENDENTE")}
         state = {"signature": plan["signature"], "total": len(statuses), **counts,
                  "completa": counts["COMPLETA"] == len(statuses),
+                 "ic_diario": {"arquivo": "ic_diario.parquet" if daily_tasks else None,
+                               "n_linhas": daily_rows, "n_tarefas": daily_tasks},
                  "updated_utc": datetime.now(timezone.utc).isoformat()}
         atomic_json(summary/"estado_execucao.json", state)
         print(f"Consolidacao: {counts}", flush=True)
+        print(f"IC diario: {daily_rows} linhas, {daily_tasks} tarefas; "
+              "valores existentes preservados, sem recalculo.", flush=True)
         return state
 
 

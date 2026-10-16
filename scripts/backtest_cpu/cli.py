@@ -25,7 +25,7 @@ def parser():
     run.add_argument("--shard", type=int, default=0)
     run.add_argument("--shards", type=int, default=1)
     run.add_argument("--pilot", action="store_true", help="Menor/maior horizonte temporal e VAR do primeiro corte.")
-    merge = commands.add_parser("consolidate", help="Reconstruir resumos; exit=1 se execucao incompleta.")
+    merge = commands.add_parser("consolidate", help="Reunir resumos e IC diario ja salvo; exit=1 se execucao incompleta.")
     merge.add_argument("--run-dir", required=True)
     return p
 

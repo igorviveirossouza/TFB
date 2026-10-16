@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT/"scripts"))
 from backtest_cpu.core import (Market, Strategy, backtest, cumulative_targets, ic_frame, ic_daily_frame,
                                metrics, spearman_rows)
-from backtest_cpu.io import digest, load_bundle, load_predictions, load_rf, read_json, RF_SOURCE, RF_CONVENTION
+from backtest_cpu.io import digest, json_digest, load_bundle, load_predictions, load_rf, read_json, RF_SOURCE, RF_CONVENTION
 from backtest_cpu.pipeline import valid_result
 
 
@@ -294,7 +294,7 @@ def test_rf_preserves_r_compounding_and_checks_missing_units_source_and_dates():
         load_rf(cal.drop(columns="retorno_cdi"))
 
 
-def make_inputs(root, received=False):
+def make_inputs(root, received=False, invalid_ic=False):
     f, cal = market_frame(16, 4)
     aux = None
     if received:
@@ -360,6 +360,8 @@ def make_inputs(root, received=False):
                 records["step"] = records.origin_step+records.h
                 for j, ticker in enumerate(meta["targets"]):
                     records[ticker] = (.2-j*.15)*np.cos(records.origin_step)
+                if invalid_ic:
+                    records.loc[(records.origin_step == 8) & (records.h == 1), meta["targets"]] = 1.
                 records.to_parquet(out/"part.parquet", index=False)
                 hashes[str(h)] = digest(out/"part.parquet")
                 if mode == "temporal":
@@ -382,8 +384,8 @@ def cli(*args, check=True):
     return result
 
 
-def prepare_args(root, local=True, received=False):
-    base, returns, predictions = make_inputs(root, received)
+def prepare_args(root, local=True, received=False, invalid_ic=False):
+    base, returns, predictions = make_inputs(root, received, invalid_ic)
     args = ["prepare", "--market", base, "--returns-file", returns, "--predictions", predictions,
             "--strategies", ROOT/"config/estrategias_backtest.json", "--run-dir", root/"run",
             "--train", "50", "--k", "1", "3"]
@@ -466,6 +468,59 @@ def test_end_to_end_parallel_resume_parquet_calendar_and_corruption(tmp_path):
     assert read_json(run/"resumos/estado_execucao.json")["ERRO"] == 1
 
 
+def test_consolidate_daily_ic_from_existing_run_without_inputs_or_recalculation(tmp_path):
+    args = prepare_args(tmp_path, invalid_ic=True)
+    cli(*args)
+    run = tmp_path/"run"
+    # O snapshot da execucao pode diferir do exportador atual, mas permanece verificavel.
+    frozen = run/"codigo/backtest_cpu/pipeline.py"
+    frozen.write_text(frozen.read_text()+"\n# Snapshot de uma execucao anterior.\n")
+    plan = read_json(run/"plano.json")
+    plan["code"]["pipeline.py"] = digest(frozen)
+    del plan["signature"]
+    plan["signature"] = json_digest(plan)
+    (run/"plano.json").write_text(json.dumps(plan))
+    cli("run", "--run-dir", run, "--workers", "1")
+    sources = [run/"tasks"/t["relpath"]/"ic.parquet" for t in plan["tasks"]]
+    expected = pd.concat([pd.read_parquet(p) for p in sources], ignore_index=True)
+    assert len(expected) == 78 and expected.spearman.isna().sum() == 6
+    daily = run/"resumos/ic_diario.parquet"
+    pd.testing.assert_frame_equal(pd.read_parquet(daily), expected)
+    daily.unlink()  # Execucoes antigas tinham somente os arquivos por tarefa.
+    state_path = run/"resumos/estado_execucao.json"
+    old_state = read_json(state_path)
+    del old_state["ic_diario"]
+    state_path.write_text(json.dumps(old_state))
+    originals = [run/"plano.json", *(run/"codigo").rglob("*.py"),
+                 *(p for p in (run/"tasks").rglob("*") if p.is_file())]
+    before = {p: (digest(p), p.stat().st_mtime_ns) for p in originals}
+    # Nao pode precisar de previsoes, precos ou retornos para reunir o IC ja calculado.
+    for name in ("base", "previsoes", "retornos.csv"):
+        (tmp_path/name).rename(tmp_path/f"indisponivel_{name}")
+    for _ in range(2):
+        result = cli("consolidate", "--run-dir", run)
+        assert "IC diario: 78 linhas, 6 tarefas" in result.stdout
+        actual = pd.read_parquet(daily)
+        pd.testing.assert_frame_equal(actual, expected)
+        assert not actual.duplicated(["task_id", "origin_step", "h"]).any()
+        assert (actual.target_step == actual.origin_step+actual.h).all()
+        state = read_json(state_path)
+        assert state["completa"] and state["signature"] == plan["signature"]
+        assert state["ic_diario"] == {"arquivo": "ic_diario.parquet", "n_linhas": 78, "n_tarefas": 6}
+        assert before == {p: (digest(p), p.stat().st_mtime_ns) for p in originals}
+    # Arquivo corrompido nao e apresentado como serie valida nem mantido no consolidado.
+    sources[0].write_bytes(b"corrupted")
+    assert cli("consolidate", "--run-dir", run, check=False).returncode == 1
+    pd.testing.assert_frame_equal(pd.read_parquet(daily),
+                                  expected[expected.task_id != 0].reset_index(drop=True))
+    assert read_json(state_path)["PENDENTE"] == 1
+    for source in sources:
+        source.unlink()
+    assert cli("consolidate", "--run-dir", run, check=False).returncode == 1
+    assert not daily.exists()
+    assert read_json(state_path)["ic_diario"]["n_linhas"] == 0
+
+
 def test_incomplete_grid_source_offset_and_snfs2_guard(tmp_path):
     args = prepare_args(tmp_path, local=False)
     result = cli(*args, check=False)
@@ -546,4 +601,6 @@ def test_partial_portfolio_failure_preserves_ic_and_reports_nonzero(tmp_path):
     assert not state["completa"] and state["PARCIAL"] == 5 and state["COMPLETA"] == 1
     assert len(pd.read_parquet(tmp_path/"run/resumos/ic_resumo.parquet")) == 24
     assert len(pd.read_parquet(tmp_path/"run/resumos/ic_acumulado_resumo.parquet")) == 18
+    assert state["ic_diario"]["n_tarefas"] == 6
+    assert len(pd.read_parquet(tmp_path/"run/resumos/ic_diario.parquet")) == 78
     assert len(pd.read_parquet(tmp_path/"run/resumos/falhas.parquet")) == 32

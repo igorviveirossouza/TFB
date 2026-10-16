@@ -25,6 +25,16 @@ de mercado já transferido para o SNFS2.
 | `ic.parquet` | **IC natural diário**: previsão do log-retorno para T contra log-retorno corrigido realizado em T. Uma linha por `(origem,h)`; T=origem+h. |
 | `ic_acumulado.parquet` | Agregação do R antigo: soma dos primeiros K log-retornos previstos contra soma dos mesmos K log-retornos corrigidos realizados. Uma linha por `(origem,K)`. |
 
+`resumos/ic_diario.parquet` reúne os `ic.parquet` de todas as tarefas válidas
+em uma única tabela temporal. Preserva cada valor, inclusive NA e seu
+`status_ic`, sem agregar datas, modelos ou horizontes. Cada linha identifica
+`task_id`, `treino`, `experimento`, `modelo`, `lookback`, `pred_len`, `loss`,
+`lambda`, `h`, `origin_step`, `target_step`, `data_origem`, `data_alvo`,
+`spearman`, `n_pares` e `amostra_comum`, além dos metadados do cenário.
+Para a evolução no tempo, use `data_alvo` no eixo horizontal e `spearman`
+no vertical, mantendo uma curva por configuração e por `h`. O horizonte
+total do modelo (`pred_len`) e a antecedência da previsão (`h`) são distintos.
+
 Não mistura previsões de origens diferentes para a mesma data T. Não calcula
 IC contra o retorno abertura–fechamento da carteira. Spearman usa ranks
 médios nos empates, exige ao menos três pares finitos e retorna NA se algum
@@ -279,6 +289,9 @@ bash scripts/run_backtests_cpu.sh piloto
 
 # Apos conferir o piloto, processa a grade e reaproveita tarefas completas.
 bash scripts/run_backtests_cpu.sh submeter
+
+# Reune resumos e a serie diaria ja calculada, sem executar os backtests.
+bash scripts/run_backtests_cpu.sh consolidar
 ```
 
 `TFB_ROOT` é obtido da localização do SH, salvo se informado no ambiente.
@@ -299,8 +312,10 @@ Matrizes e vetorização entre blocos evitam conversões long e cálculos de IC
 repetidos. A base de mercado é carregada uma vez por processo.
 
 Tudo que o job gera fica na execução sob SNFS2: resultados, logs Slurm,
-temporários, cache e snapshot de código. O worker usa caminhos absolutos e
-o snapshot, sem depender de `BASH_SOURCE` no spool do Slurm.
+temporários, cache e snapshot de código. Os cálculos usam caminhos absolutos
+e o snapshot, sem depender de `BASH_SOURCE` no spool do Slurm. A ação
+`consolidar` usa o exportador do checkout atualizado e confere o snapshot
+original; mantenha esse checkout estável até o job terminar.
 O plano registra as versões de Python, NumPy, pandas, SciPy e PyArrow;
 retomadas exigem as mesmas versões para não misturar ambientes.
 
@@ -332,6 +347,7 @@ tasks/treino=.../experimento=.../loss=mse/lambda=00/modelo=.../lookback=.../pred
     conclusao.json
 resumos/
     metricas.parquet
+    ic_diario.parquet
     ic_resumo.parquet
     ic_acumulado_resumo.parquet
     falhas.parquet
@@ -350,14 +366,26 @@ de zero se seu lote tiver falhas. Erros de fonte estão em `status/*.json`.
 deixa pendências intencionalmente. Evite submeter piloto e grade simultaneamente:
 locks evitam duplicação, mas CPUs ficariam aguardando a tarefa já em curso.
 
-Para reconstruir os resumos após interrupção, sem recalcular carteiras:
+Para acrescentar a tabela temporal a uma execução já concluída, atualize o
+TFB e use **o mesmo RUN_ID da execução original**. O job de consolidação usa
+um processo na partição `gorgonas`. Ele lê somente os resultados existentes,
+confere seus checksums e preserva `plano.json`, `codigo/` e `tasks/`.
+Não precisa acessar previsões, preços ou retornos de treino. Não use
+`submeter` nem crie outro RUN_ID para essa exportação.
 
 ```bash
-RUN_DIR=/snfs2/igor.viveiros/analise_resultados/backtests/temporal_var_abertura_fechamento_s0_c0_cdi_v3
-"$PYTHON_BIN" -B "$RUN_DIR/codigo/run_backtests.py" consolidate --run-dir "$RUN_DIR"
+git pull --ff-only origin experiment/b3-loss-clean-v1
+export RUN_ID=temporal_var_abertura_fechamento_s0_c0_cdi_v3_rent4
+bash scripts/run_backtests_cpu.sh consolidar
 ```
 
-O comando retorna código 1 se a execução ainda estiver incompleta.
+A consolidação também é automática ao final das novas execuções. Copia uma
+tarefa por vez para limitar memória. O log e `estado_execucao.json` informam
+o número de linhas e tarefas incluídas no IC diário. IC válido de tarefa com
+carteiras `PARCIAL` é preservado; arquivos corrompidos ou tarefas em erro não
+entram na tabela. O job retorna código 1 se a execução estiver incompleta.
+Depois de concluído, basta atualizar a pasta local `resumos/`; os Parquets
+individuais já baixados não mudam.
 
 ## R local
 
@@ -368,7 +396,7 @@ fica naquele repositório; não é instalado nem executado no TFB remoto.
 
 Copie `plano.json`, `resumos/` e `tasks/`, preservando a estrutura relativa.
 Não precisa trazer previsões/cache/temporários. Para diagnosticar falhas,
-traga também `status/` e `logs/`. Dependências: arrow, jsonlite e ggplot2.
+traga também `status/` e `logs/`. Dependências: arrow, jsonlite, dplyr e ggplot2.
 
 ```r
 source("src/06_resultados_cluster.R")
@@ -382,6 +410,15 @@ tabela[order(-tabela$retorno_acumulado),
 subset(x$ic_resumo, treino==70 & h==1 & amostra=="comum")
 ic <- ler_tarefa_cluster(x, task_id=0, tabela="ic", h=1)
 
+# Todas as configuracoes do mesmo corte/h; filtra no Arrow antes de carregar no R.
+ic_tempo <- x$ic_diario |>
+  dplyr::filter(treino == 70, h == 1, amostra_comum) |>
+  dplyr::collect()
+ggplot2::ggplot(ic_tempo, ggplot2::aes(data_alvo, spearman, group = task_id)) +
+  ggplot2::geom_line() +
+  ggplot2::facet_wrap(~ modelo + lookback + pred_len) +
+  ggplot2::theme_minimal()
+
 # Duas configuracoes do mesmo corte/K/estrategia.
 ids <- head(unique(tabela$task_id), 2)
 grafico_patrimonio_cluster(x, task_ids=ids, k=5, estrategia="compra_positivos")
@@ -390,6 +427,9 @@ grafico_patrimonio_cluster(x, task_ids=ids, k=5, estrategia="compra_positivos")
 Use `permitir_parcial=TRUE` deliberadamente para inspecionar o piloto. Por
 padrão, o leitor bloqueia uma execução incompleta. Os scripts antigos 01–05
 não passam a ler esses arquivos implicitamente.
+`x$ic_diario` é uma consulta Arrow, sem carregar a série inteira na abertura.
+Será `NULL` quando a cópia local ainda não tiver o novo consolidado; nesse
+caso, a leitura por tarefa com `tabela="ic"` continua disponível.
 
 ## Testes de desenvolvimento
 
