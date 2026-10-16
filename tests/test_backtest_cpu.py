@@ -121,6 +121,79 @@ def test_entry_on_ex_date_excludes_distributed_asset():
         backtest(np.ones((1, 1)), np.array([1]), 3, event_market(True), Strategy("s", "compra", 1, False))
 
 
+def received_market_frames():
+    f, cal = market_frame(6, 1)
+    f["abertura"] = f["fechamento"] = f["fechamento_execucao"] = [100, 100, 50, 40, 80, 81]
+    f["fechamento_anterior"] = [100, 100, 100, 50, 40, 80]
+    f["fator_quantidade_evento"] = [1, 1, 2, 1, .5, 1]
+    f["valor_ativos_por_acao_com"] = [0, 0, 0, 10, 0, 0]
+    f["log_retorno_corrigido"] = np.log((f.fator_quantidade_evento*f.fechamento+f.valor_ativos_por_acao_com)/f.fechamento_anterior)
+    f["ids_distribuicoes"] = ["", "", "", "ENTREGA", "", ""]
+    aux = pd.DataFrame({"date": [4, 5, 6], "date_pregao": cal.date_pregao.iloc[3:].to_numpy(),
+        "cols": "BBB0", "ticker_origem": "AAA0", "id_distribuicao": "ENTREGA",
+        "data_ex_distribuicao": str(cal.date_pregao.iloc[3].date()),
+        "inicio_negociacao_recebido": str(cal.date_pregao.iloc[3].date()),
+        "quantidade_recebida_por_acao_com": .5, "fonte_evento_recebido": "fixture",
+        "fonte_cobertura_recebido": "fixture", "fechamento": [20., 11., 12.],
+        "fechamento_execucao": [20., 11., 12.], "fator_quantidade_evento": [1., 2., 1.],
+        "provento_por_acao_com": [0., 2., 0.], "preco_preenchido": False,
+        "pode_executar_fechamento": True})
+    return f, cal, aux
+
+
+@pytest.mark.parametrize("side,sign", [("compra", 1), ("venda", -1)])
+@pytest.mark.parametrize("bps", [0, 10])
+def test_received_shares_daily_value_splits_dividends_costs_and_exit(side, sign, bps):
+    f, cal, aux = received_market_frames()
+    market = Market.from_frame(f, cal, received=aux)
+    assert market.tickers.tolist() == ["AAA0"]
+    result = backtest(np.ones((1, 1)), np.array([1]), 5, market, Strategy("s", side, 1, False), bps, bps)
+    # Parent split 2 before delivery, reverse split 1/2 afterwards; child split
+    # 2 after delivery plus D=2. Final physical basket is 81 + 2*12 + 2.
+    c = bps/10000
+    q = 1/(100*(1+sign*c)*(1+c))
+    cash = 1-sign*q*100*(1+sign*c)-c*q*100*(1+sign*c)
+    expected = cash+sign*q*(105*(1-sign*c)+2)-c*q*105*(1-sign*c)
+    assert result["carteira_diaria"].patrimonio.iloc[-1] == pytest.approx(expected)
+    if not bps:
+        assert result["carteira_diaria"].patrimonio.tolist() == pytest.approx(
+            1+sign*(np.array([1., 1., 1., 1.04, 1.07])-1))
+    child = result["posicoes"].query("tipo_posicao == 'RECEBIDA'").iloc[0]
+    assert child.quantidade_entrada_por_capital == pytest.approx(sign*q)
+    assert child.quantidade_saida_por_capital == pytest.approx(sign*2*q)
+    assert child.direitos_por_capital == pytest.approx(sign*2*q)
+    assert child.preco_entrada == 0 and child.ticker_origem == "AAA0"
+    period = result["carteira_periodos"].iloc[0]
+    assert period.custo_saida_ativos_recebidos_por_capital == pytest.approx(c*q*24*(1-sign*c))
+    assert period.direitos_por_capital == pytest.approx(sign*2*q)
+    assert period.n_ativos == 1
+    # Opening on the ex date obtains no received shares, either long or short.
+    same_day = backtest(np.ones((1, 1)), np.array([3]), 1, market, Strategy("s", side, 1, False))
+    assert same_day["posicoes"].tipo_posicao.tolist() == ["SINAL"]
+    assert same_day["carteira_periodos"].retorno.iloc[0] == pytest.approx(0.)
+
+
+def test_received_validation_and_unavailable_exit_do_not_change_selection():
+    f, cal, aux = received_market_frames()
+    bad = aux.copy(); bad["quantidade_recebida_por_acao_com"] = .6
+    with pytest.raises(ValueError, match="nao reproduz"):
+        Market.from_frame(f, cal, received=bad)
+    with pytest.raises(ValueError, match="incompleta/desalinhada"):
+        Market.from_frame(f, cal, received=aux.drop(index=1))
+    with pytest.raises(ValueError, match="incompleta/desalinhada"):
+        Market.from_frame(f, cal, received=pd.concat([aux, aux.iloc[[0]]]))
+    bad = aux.copy(); bad.loc[2, "pode_executar_fechamento"] = False
+    market = Market.from_frame(f, cal, received=bad)
+    with pytest.raises(ValueError, match="FECHAMENTO_ATIVO_RECEBIDO_INEXECUTAVEL"):
+        backtest(np.ones((1, 1)), np.array([1]), 5, market, Strategy("s", "compra", 1, False))
+    market = Market.from_frame(f, cal, received=aux.iloc[:2])
+    with pytest.raises(ValueError, match="TRAJETORIA_ATIVO_RECEBIDO_INCOMPLETA"):
+        backtest(np.ones((1, 1)), np.array([1]), 5, market, Strategy("s", "compra", 1, False))
+    # Ineligible parent generates neither a fictitious right nor a failure.
+    cash = backtest(-np.ones((1, 1)), np.array([1]), 5, market, Strategy("s", "compra", 1, True))
+    assert cash["carteira_diaria"].patrimonio.eq(1).all()
+
+
 def test_slippage_costs_both_legs_and_capital_constraint():
     f, c = market_frame(2, 1)
     f["abertura"] = f["fechamento"] = f["fechamento_execucao"] = f["fechamento_anterior"] = 100.
@@ -221,13 +294,29 @@ def test_rf_preserves_r_compounding_and_checks_missing_units_source_and_dates():
         load_rf(cal.drop(columns="retorno_cdi"))
 
 
-def make_inputs(root):
+def make_inputs(root, received=False):
     f, cal = market_frame(16, 4)
+    aux = None
+    if received:
+        event = (f.date == 10) & (f.cols == "AAA0")
+        f["ids_distribuicoes"] = ""
+        f.loc[event, "ids_distribuicoes"] = "ENTREGA"
+        f.loc[event, "valor_ativos_por_acao_com"] = 10.
+        f["log_retorno_corrigido"] = np.log((f.fechamento+f.valor_ativos_por_acao_com)/f.fechamento_anterior)
+        aux = received_market_frames()[2]
+        aux["date"] = [10, 11, 12]
+        aux["date_pregao"] = cal.date_pregao.iloc[9:12].to_numpy()
+        aux["data_ex_distribuicao"] = aux["inicio_negociacao_recebido"] = str(cal.date_pregao.iloc[9].date())
+        aux["fator_quantidade_evento"] = 1.
+        aux["provento_por_acao_com"] = 0.
+        aux["fechamento"] = aux["fechamento_execucao"] = [20., 21., 22.]
+        aux["tipo_registro"] = "RECEBIDO"
+        f["tipo_registro"] = "MODELO"
     base = root/"base"
     base.mkdir()
     returns = root/"retornos.csv"
     f[["date", "log_retorno_corrigido", "cols"]].rename(columns={"log_retorno_corrigido": "data"}).to_csv(returns, index=False)
-    f.to_csv(base/"mercado_diario.csv", index=False)
+    (pd.concat([f, aux], ignore_index=True) if received else f).to_csv(base/"mercado_diario.csv", index=False)
     cal["retorno_cdi"] = .0002 + .00001*np.arange(len(cal))
     cal["log_retorno_cdi"] = np.log1p(cal.retorno_cdi)
     cal["n_observacoes_cdi"] = 1
@@ -238,6 +327,15 @@ def make_inputs(root):
                    "n_linhas": len(f), "n_ativos": 4, "n_pregoes": 16}]).to_csv(base/"manifesto.csv", index=False)
     pd.DataFrame([{"papel": "RETORNOS_USADOS_NO_TREINO", "arquivo": str(returns), "md5": digest(returns, "md5")},
                   {"papel": "cdi_tfb.csv", "arquivo": "auditoria/cdi_tfb.csv", "md5": "0"*32}]).to_csv(base/"fontes.csv", index=False)
+    if received:
+        man = pd.read_csv(base/"manifesto.csv")
+        man["versao"] = "2026-10-15-v3-recebidos"
+        man["n_linhas_recebidos"] = 3; man["n_eventos_recebidos"] = 1
+        man.to_csv(base/"manifesto.csv", index=False)
+        sources = pd.read_csv(base/"fontes.csv")
+        provenance = [{"papel": role, "arquivo": "fixture", "md5": "0"*32} for role in
+                      ["CADASTRO_RECEBIDOS", "COTACOES_RECEBIDAS", "auditoria_distribuicoes_em_ativos.csv"]]
+        pd.concat([sources, pd.DataFrame(provenance)], ignore_index=True).to_csv(base/"fontes.csv", index=False)
     pd.DataFrame([{"arquivo": p.name, "md5": digest(p, "md5")} for p in base.iterdir()]).to_csv(base/"checksums_saidas.csv", index=False)
     pred_root = root/"previsoes"
     for mode in ("temporal", "var"):
@@ -284,12 +382,32 @@ def cli(*args, check=True):
     return result
 
 
-def prepare_args(root, local=True):
-    base, returns, predictions = make_inputs(root)
+def prepare_args(root, local=True, received=False):
+    base, returns, predictions = make_inputs(root, received)
     args = ["prepare", "--market", base, "--returns-file", returns, "--predictions", predictions,
             "--strategies", ROOT/"config/estrategias_backtest.json", "--run-dir", root/"run",
             "--train", "50", "--k", "1", "3"]
     return args+["--allow-local"] if local else args
+
+
+def test_received_bundle_parallel_outputs_and_model_universe(tmp_path):
+    args = prepare_args(tmp_path, received=True)
+    market, _ = load_bundle(tmp_path/"base", tmp_path/"retornos.csv")
+    assert len(market.tickers) == 4 and len(market.received) == 1
+    cli(*args)
+    run = tmp_path/"run"
+    cli("run", "--run-dir", run, "--workers", "2")
+    state = read_json(run/"resumos/estado_execucao.json")
+    assert state["COMPLETA"] == 6 and state["PARCIAL"] == 0
+    positions = pd.concat([pd.read_parquet(p) for p in (run/"tasks").rglob("posicoes.parquet")])
+    child = positions.query("tipo_posicao == 'RECEBIDA'")
+    assert set(child.lado) == {"compra", "venda"} and child.ticker.eq("BBB0").all()
+    assert set(child.modelo) == {"DUET", "TimesNet", "VAR"}
+    assert (child[child.lado == "venda"].quantidade_saida_por_capital < 0).all()
+    assert (child[child.lado == "compra"].quantidade_saida_por_capital > 0).all()
+    assert child.k.eq(3).all() and child.pred_len.eq(3).all()
+    assert positions.query("tipo_posicao == 'SINAL'").ticker.ne("BBB0").all()
+    assert pd.read_parquet(run/"resumos/falhas.parquet").empty
 
 
 def test_end_to_end_parallel_resume_parquet_calendar_and_corruption(tmp_path):
@@ -423,6 +541,7 @@ def test_partial_portfolio_failure_preserves_ic_and_reports_nonzero(tmp_path):
     cli(*args)
     result = cli("run", "--run-dir", tmp_path/"run", "--workers", "1", check=False)
     assert result.returncode == 1
+    assert "estrategia=compra_ranking: ABERTURA_INEXECUTAVEL" in result.stdout
     state = read_json(tmp_path/"run/resumos/estado_execucao.json")
     assert not state["completa"] and state["PARCIAL"] == 5 and state["COMPLETA"] == 1
     assert len(pd.read_parquet(tmp_path/"run/resumos/ic_resumo.parquet")) == 24

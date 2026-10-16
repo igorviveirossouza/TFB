@@ -109,7 +109,7 @@ def prepare(args):
             "runtime": runtime_versions(),
             "regime": "abertura_t+1_fechamento_t+k", "rf": identity["rf_fonte"], "rf_convencao": identity["rf_convencao"],
             "dividendos": "direito_na_data_ex_sem_reinvestir_no_bloco_disponivel_no_rebalanceamento",
-            "distribuicao_ativos": "bloquear_posse_sem_trajetoria_do_ativo_recebido",
+            "distribuicao_ativos": "quantidades_recebidas_marcadas_diariamente_liquidadas_com_origem;sem_trajetoria_bloqueia",
             "short": "exposicao_bruta_ate_1x_sem_aluguel_margem_ou_remuneracao_de_garantias",
             "comparabilidade": "origens_comuns_a_todos_modelos_L_H_por_corte; fases_ancoradas_no_corte"}
     plan["signature"] = json_digest(plan)
@@ -122,6 +122,12 @@ def prepare(args):
           f"{portfolios} carteiras (VAR sem duplicacao por H).", flush=True)
     print(f"{market.n} pregoes, {len(market.tickers)} ativos. Slippage={args.slippage_bps:g} bps; "
           f"custos={args.cost_bps:g} bps por ponta. RF={plan['rf']}. Saida: {run}", flush=True)
+    for (ex, _), receipts in sorted(market.received.items()):
+        for receipt in receipts:
+            first = market.calendar.date_pregao.iloc[ex].date()
+            last = market.calendar.date_pregao.iloc[ex+len(receipt['close'])-1].date()
+            print(f"Ativo recebido: {receipt['ticker']}, {first} a {last}, "
+                  f"{len(receipt['close'])} pregoes; fora do ranking.", flush=True)
     if args.dry_run:
         print("Plano conferido; nenhum arquivo criado e nenhum job submetido.")
         return
@@ -255,6 +261,7 @@ def execute_task(task):
                     with_meta(frame, task, plan).to_parquet(stage/f"{name}.parquet", index=False, compression="snappy")
                 state = {"task_id": task["id"], "signature": plan["signature"],
                          "status": "PARCIAL" if failures else "COMPLETA", "n_falhas": len(failures),
+                         "falhas": failures,
                          "carteiras_proprias": own,
                          "seconds": time.perf_counter()-start,
                          "max_rss_mib": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss/1024,
@@ -373,6 +380,8 @@ def run_tasks(args):
         failures += result["status"] in {"ERRO", "PARCIAL"}
         print(f"task={result['task_id']} {result['status']} "
               f"{result.get('seconds', 0):.2f}s {result.get('erro', '')}", flush=True)
+        for failure in result.get("falhas", []):
+            print(f"  k={failure['k']} estrategia={failure['estrategia']}: {failure['erro']}", flush=True)
     if args.workers == 1:
         for task in tasks:
             report(execute_task(task))

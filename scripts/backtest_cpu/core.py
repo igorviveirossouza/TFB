@@ -1,5 +1,5 @@
 """Calculo vetorizado. Nenhuma leitura/escrita, rede ou dependencia de R/CUDA."""
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import re
 
 import numpy as np
@@ -38,13 +38,14 @@ class Market:
     calendar: pd.DataFrame
     arrays: dict
     rf: np.ndarray
+    received: dict = field(default_factory=dict)
 
     @property
     def n(self):
         return len(self.calendar)
 
     @classmethod
-    def from_frame(cls, frame, calendar, rf=None):
+    def from_frame(cls, frame, calendar, rf=None, received=None):
         numeric = ["abertura", "fechamento", "fechamento_execucao", "fechamento_anterior",
                    "fator_quantidade_evento", "provento_por_acao_com",
                    "valor_ativos_por_acao_com", "log_retorno_corrigido"]
@@ -114,7 +115,83 @@ class Market:
         rates = np.full(len(cal), np.nan) if rf is None else np.asarray(rf, dtype=float)
         if rates.shape != (len(cal),) or np.isinf(rates).any() or np.any(rates <= -1):
             raise ValueError("Serie RF invalida.")
-        return cls(tickers, cal.reset_index(drop=True), arrays, rates)
+        market = cls(tickers, cal.reset_index(drop=True), arrays, rates)
+        market.load_received(received, f)
+        return market
+
+    def load_received(self, frame, model_frame):
+        """Trajetorias auxiliares por evento; nunca entram no universo do ranking.
+
+        Quantidade e valor inicial devem reconciliar com V no painel congelado.
+        A cobertura pode ser curta; possuir o ativo alem dela gera erro explicito.
+        """
+        if frame is None or frame.empty:
+            return
+        keys = ["id_distribuicao", "ticker_origem", "cols", "data_ex_distribuicao",
+                "quantidade_recebida_por_acao_com", "inicio_negociacao_recebido",
+                "fonte_evento_recebido", "fonte_cobertura_recebido"]
+        values = ["fechamento", "fechamento_execucao", "fator_quantidade_evento",
+                  "provento_por_acao_com"]
+        needed = {*keys, *values, "date", "date_pregao", "pode_executar_fechamento", "preco_preenchido"}
+        if not needed <= set(frame) or frame[list(needed - {"fechamento_execucao"})].isna().any().any():
+            raise ValueError("Ativos recebidos: campos ausentes/incompletos.")
+        totals, identifiers = {}, {}
+        for event, group in frame.groupby("id_distribuicao", sort=True):
+            if not isinstance(event, str) or not event or any(group[c].nunique() != 1 for c in keys):
+                raise ValueError("Metadados inconsistentes do ativo recebido.")
+            g = group.sort_values("date")
+            meta = g.iloc[0]
+            if meta.ticker_origem not in self.tickers or meta.cols == meta.ticker_origem:
+                raise ValueError("Origem/especie invalida do ativo recebido.")
+            ex = pd.to_datetime(meta.data_ex_distribuicao, format="%Y-%m-%d", errors="raise")
+            start = pd.to_datetime(meta.inicio_negociacao_recebido, format="%Y-%m-%d", errors="raise")
+            where = np.flatnonzero(self.calendar.date_pregao == ex)
+            if len(where) != 1 or pd.isna(start) or start < ex:
+                raise ValueError("Data ex/negociacao invalida do ativo recebido.")
+            ex_index = int(where[0])
+            steps = integers(g.date, "Recebido/date") - 1
+            if (not np.array_equal(steps, np.arange(ex_index, ex_index+len(g)))
+                    or steps[-1] >= self.n
+                    or not np.array_equal(pd.to_datetime(g.date_pregao).values,
+                                          self.calendar.date_pregao.values[steps])):
+                raise ValueError(f"Trajetoria recebida incompleta/desalinhada: {event}")
+            a = {c: pd.to_numeric(g[c], errors="raise").to_numpy(float) for c in values}
+            for c in values:
+                if c != "fechamento_execucao" and (not np.isfinite(a[c]).all() or
+                        np.any(a[c] < 0 if c == "provento_por_acao_com" else a[c] <= 0)):
+                    raise ValueError(f"Valor invalido em recebido/{c}: {event}")
+            flags = {}
+            for c in ("pode_executar_fechamento", "preco_preenchido"):
+                flags[c] = g[c].astype(str).str.lower().map({"true": True, "false": False})
+                if flags[c].isna().any():
+                    raise ValueError(f"Flag invalida do ativo recebido: {event}")
+                flags[c] = flags[c].to_numpy(bool)
+            ok = flags["pode_executar_fechamento"]
+            if (np.any(ok & (flags["preco_preenchido"] | ~np.isfinite(a["fechamento_execucao"])))
+                    or not np.allclose(a["fechamento_execucao"][ok], a["fechamento"][ok], rtol=1e-11, atol=1e-12)
+                    or np.any(ok & (self.calendar.date_pregao.values[steps] < start.to_datetime64()))):
+                raise ValueError(f"Execucao inconsistente do ativo recebido: {event}")
+            if a["fator_quantidade_evento"][0] != 1 or a["provento_por_acao_com"][0] != 0:
+                raise ValueError("Entrega deve estar em unidades ex, sem provento duplicado na data ex.")
+            ratio = float(meta.quantidade_recebida_por_acao_com)
+            if not np.isfinite(ratio) or ratio <= 0:
+                raise ValueError("Proporcao invalida do ativo recebido.")
+            parent = int(np.flatnonzero(self.tickers == meta.ticker_origem)[0])
+            key = (ex_index, parent)
+            scale = np.cumprod(a["fator_quantidade_evento"])
+            cash = np.cumsum(a["provento_por_acao_com"] * np.r_[1., scale[:-1]])
+            self.received.setdefault(key, []).append({"id": event, "ticker": meta.cols,
+                "ratio": ratio, "close": a["fechamento"], "exit": a["fechamento_execucao"],
+                "exit_ok": ok, "scale": scale, "cash": cash})
+            totals[key] = totals.get(key, 0.) + ratio*a["fechamento"][0]
+            identifiers.setdefault(key, set()).add(event)
+        for (ex, parent), total in totals.items():
+            if not np.isclose(total, self.arrays["valor_ativos_por_acao_com"][ex, parent], rtol=1e-10, atol=1e-12):
+                raise ValueError("Ativo recebido nao reproduz o valor da distribuicao no painel congelado.")
+            row = model_frame.iloc[ex*len(self.tickers)+parent]
+            ids = row.get("ids_distribuicoes")
+            if not isinstance(ids, str) or set(ids.split(";")) != identifiers[(ex, parent)]:
+                raise ValueError("IDs de distribuicoes recebidas divergem da auditoria do modelo.")
 
 
 def cumulative_targets(market, origins, k):
@@ -217,8 +294,8 @@ def backtest(scores, origins, k, market, strategy, slippage_bps=0., cost_bps=0.)
     """Todos os blocos de uma estrategia de uma vez; quantidades fixas no bloco.
 
     Entrada em O[t+1], saida em C[t+K]. Dividendo de quem ja estava posicionado
-    entra como direito economico sem reinvestimento intrabloco. Distribuicao
-    de outros ativos durante a posse exige precos adicionais: falha explicita.
+    entra como direito economico sem reinvestimento intrabloco. Ativos recebidos
+    sao marcados diariamente e liquidados junto da origem, com custos/slippage.
     """
     for value in (slippage_bps, cost_bps):
         if not np.isfinite(value) or not 0 <= value < 10000:
@@ -263,11 +340,10 @@ def backtest(scores, origins, k, market, strategy, slippage_bps=0., cost_bps=0.)
     assets = a["valor_ativos_por_acao_com"][row, col].copy()
     assets[:, 0, :] = 0.
     bad = (assets > 0) & active[:, None, :]
-    if bad.any():
-        i, d, j = np.argwhere(bad)[0]
-        raise ValueError(f"ATIVO_DISTRIBUIDO_SEM_TRAJETORIA: {market.tickers[chosen[i,j]]}, "
-                         f"date={days[i,d]+1}. Valor de referencia nao e preco de venda; "
-                         "requer cotacoes/quantidades do ativo recebido.")
+    for i, d, j in np.argwhere(bad):
+        if (int(days[i, d]), int(chosen[i, j])) not in market.received:
+            raise ValueError(f"ATIVO_DISTRIBUIDO_SEM_TRAJETORIA: {market.tickers[chosen[i,j]]}, "
+                             f"date={days[i,d]+1}. Requer cotacoes/quantidades do ativo recebido.")
     div = np.cumsum(div, axis=1)
     opening = np.where(active, opening, 1.)
     slip, cost = slippage_bps/10000, cost_bps/10000
@@ -282,8 +358,40 @@ def backtest(scores, origins, k, market, strategy, slippage_bps=0., cost_bps=0.)
     mark = c.copy()
     mark[:, -1, :] = exit_price
     dividends = (quantity[:, None, :]*div).sum(axis=2)
-    equity = cash[:, None]+sign*(quantity[:, None, :]*mark*scale).sum(axis=2)+sign*dividends
+    received_value = np.zeros((len(origins), k))
+    received_cash = np.zeros_like(received_value)
+    received_fee = np.zeros(len(origins))
+    received_positions = []
+    # Poucos eventos: laço apenas sobre posicoes que atravessam a data ex.
+    for i, d, j in np.argwhere(bad):
+        for receipt in market.received[(int(days[i, d]), int(chosen[i, j]))]:
+            length = k-int(d)
+            if length > len(receipt["close"]):
+                raise ValueError(f"TRAJETORIA_ATIVO_RECEBIDO_INCOMPLETA: {receipt['ticker']}, "
+                                 f"saida date={origins[i]+k}, evento={receipt['id']}.")
+            if not receipt["exit_ok"][length-1]:
+                raise ValueError(f"FECHAMENTO_ATIVO_RECEBIDO_INEXECUTAVEL: {receipt['ticker']}, "
+                                 f"date={origins[i]+k}, evento={receipt['id']}.")
+            q_received = quantity[i, j]*previous_scale[i, d, j]*receipt["ratio"]
+            marks = receipt["close"][:length].copy()
+            exit_received = receipt["exit"][length-1]*(1-sign*slip)
+            marks[-1] = exit_received
+            q_exit = q_received*receipt["scale"][length-1]
+            received_value[i, d:] += q_received*marks*receipt["scale"][:length]
+            received_cash[i, d:] += q_received*receipt["cash"][:length]
+            received_fee[i] += cost*q_exit*exit_received
+            received_positions.append({"origin_step": origins[i], "entry_step": days[i, d]+1,
+                "target_step": origins[i]+k, "ticker": receipt["ticker"], "rank": np.nan,
+                "score_log_acumulado": np.nan, "peso_entrada": 0.,
+                "quantidade_entrada_por_capital": sign*q_received,
+                "quantidade_saida_por_capital": sign*q_exit, "preco_entrada": 0.,
+                "preco_saida": exit_received, "direitos_por_capital": sign*q_received*receipt["cash"][length-1],
+                "tipo_posicao": "RECEBIDA", "ticker_origem": market.tickers[chosen[i, j]],
+                "id_distribuicao": receipt["id"]})
+    dividends += received_cash
+    equity = cash[:, None]+sign*((quantity[:, None, :]*mark*scale).sum(axis=2)+received_value+dividends)
     exit_fee = cost*(quantity*scale[:, -1, :]*exit_price).sum(axis=1)
+    exit_fee += received_fee
     equity[:, -1] -= exit_fee
     if not np.isfinite(equity).all() or np.any(equity <= 0):
         raise ValueError("PATRIMONIO_NAO_POSITIVO: carteira insolvente; nao truncar perdas nem continuar alavancando.")
@@ -297,12 +405,15 @@ def backtest(scores, origins, k, market, strategy, slippage_bps=0., cost_bps=0.)
         "origin_step": np.repeat(origins, k), "n_ativos": np.repeat(n, k),
         "retorno": returns, "rf": market.rf[days.ravel()], "patrimonio": wealth,
         "drawdown": wealth/np.maximum.accumulate(np.r_[1., wealth])[1:]-1,
-        "direitos_acumulados_por_capital_bloco": sign*dividends.ravel()})
+        "direitos_acumulados_por_capital_bloco": sign*dividends.ravel(),
+        "valor_ativos_recebidos_por_capital_bloco": sign*received_value.ravel()})
     periods = pd.DataFrame({"origin_step": origins, "entry_step": origins+1, "target_step": origins+k,
         "data_sinal": data[origins-1], "data_entrada": data[origins], "data_saida": data[origins+k-1],
         "n_ativos": n, "retorno": equity[:, -1]-1, "patrimonio": wealth.reshape(-1, k)[:, -1],
         "custo_entrada_por_capital": entry_fee, "custo_saida_por_capital": exit_fee,
         "direitos_por_capital": sign*dividends[:, -1],
+        "valor_saida_ativos_recebidos_por_capital": sign*received_value[:, -1],
+        "custo_saida_ativos_recebidos_por_capital": received_fee,
         "retorno_cdi": np.expm1(np.log1p(market.rf[days]).sum(axis=1))})
     b, j = np.where(active)
     positions = pd.DataFrame({"origin_step": origins[b], "entry_step": origins[b]+1,
@@ -311,7 +422,11 @@ def backtest(scores, origins, k, market, strategy, slippage_bps=0., cost_bps=0.)
         "quantidade_entrada_por_capital": sign*quantity[b, j],
         "quantidade_saida_por_capital": sign*quantity[b, j]*scale[b, -1, j],
         "preco_entrada": entry_price[b, j], "preco_saida": exit_price[b, j],
-        "direitos_por_capital": sign*quantity[b, j]*div[b, -1, j]})
+        "direitos_por_capital": sign*quantity[b, j]*div[b, -1, j],
+        "tipo_posicao": "SINAL", "ticker_origem": market.tickers[chosen[b, j]],
+        "id_distribuicao": ""})
+    if received_positions:
+        positions = pd.concat([positions, pd.DataFrame(received_positions)], ignore_index=True)
     result = {"carteira_diaria": daily, "carteira_periodos": periods,
               "posicoes": positions, "metricas": metrics(daily, periods)}
     for frame in result.values():

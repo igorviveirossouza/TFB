@@ -101,7 +101,7 @@ def load_bundle(directory, returns_file):
             raise ValueError(f"Checksum divergente na base: {path}")
         files[row.arquivo] = digest(path)
     manifest = pd.read_csv(directory/"manifesto.csv")
-    if (len(manifest) != 1 or manifest.versao.iloc[0] != "2026-10-15-v2-cdi"
+    if (len(manifest) != 1 or manifest.versao.iloc[0] not in {"2026-10-15-v2-cdi", "2026-10-15-v3-recebidos"}
             or manifest.arquivo_base.iloc[0] not in names
             or manifest.arquivo_base.iloc[0] not in {"mercado_diario.csv", "mercado_diario.parquet"}):
         raise ValueError("Base sem contrato CDI atual; atualize no R com atualizar_cdi_base_backtest().")
@@ -117,7 +117,25 @@ def load_bundle(directory, returns_file):
         raise ValueError("Proveniencia do CDI auditado ausente/invalida em fontes.csv.")
     calendar = pd.read_csv(directory/"calendario_tfb.csv")
     frame = read_table(directory/manifest.arquivo_base.iloc[0])
-    market = Market.from_frame(frame, calendar, load_rf(calendar))
+    received = None
+    if manifest.versao.iloc[0] == "2026-10-15-v3-recebidos":
+        if ("tipo_registro" not in frame or frame.tipo_registro.isna().any()
+                or not frame.tipo_registro.isin(["MODELO", "RECEBIDO"]).all()):
+            raise ValueError("Tipos de registro invalidos na base com ativos recebidos.")
+        received = frame[frame.tipo_registro == "RECEBIDO"].copy()
+        frame = frame[frame.tipo_registro == "MODELO"].copy()
+        if (not {"n_linhas_recebidos", "n_eventos_recebidos"} <= set(manifest)
+                or len(received) != int(manifest.n_linhas_recebidos.iloc[0])
+                or "id_distribuicao" not in received
+                or received.id_distribuicao.nunique() != int(manifest.n_eventos_recebidos.iloc[0])):
+            raise ValueError("Dimensoes de ativos recebidos divergentes do manifesto.")
+        for role in ("CADASTRO_RECEBIDOS", "COTACOES_RECEBIDAS", "auditoria_distribuicoes_em_ativos.csv"):
+            origin = sources[sources.papel == role]
+            if len(origin) != 1 or not re.fullmatch(r"[0-9a-fA-F]{32}", str(origin.md5.iloc[0])):
+                raise ValueError(f"Proveniencia de ativos recebidos ausente: {role}")
+    elif "tipo_registro" in frame:
+        raise ValueError("Registros auxiliares exigem contrato v3-recebidos.")
+    market = Market.from_frame(frame, calendar, load_rf(calendar), received)
     dims = (len(frame), len(market.tickers), market.n)
     if dims != tuple(int(manifest[c].iloc[0]) for c in ["n_linhas", "n_ativos", "n_pregoes"]):
         raise ValueError("Dimensoes do manifesto de mercado divergentes.")
