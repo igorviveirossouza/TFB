@@ -13,6 +13,11 @@ O código remoto está neste repositório **TFB**, na branch
 - `config/estrategias_backtest.json`: regras das carteiras;
 - `requirements-backtest.txt` e `tests/test_backtest_cpu.py`: ambiente e testes.
 
+O benchmark Momentum tem execução separada em
+`scripts/run_momentum_reference_cpu.sh`. Ele deriva os treinos, lookbacks, Ks
+e convenções do plano já concluído, preservando seus resultados. Veja
+[Momentum com o mesmo protocolo](b3_momentum_reference.md).
+
 A preparação e a consulta em R pertencem ao repositório separado
 [`analise_resultados`](https://github.com/igorviveirossouza/analise_resultados/tree/feat/base-mercado-backtest).
 O job não precisa de um checkout desse repositório no servidor: lê o bundle

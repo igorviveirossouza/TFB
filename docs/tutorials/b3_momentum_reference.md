@@ -19,8 +19,10 @@ bash scripts/run_momentum_reference_cpu.sh submeter
 ```
 
 Sem argumento o launcher apenas planeja. `submeter` devolve o JobID, o destino
-e o diretório de logs. O job usa `gorgonas`, uma CPU/processo, sem GPU, com
-threads BLAS limitadas a uma. Padrões: `MEMORY=16G`, `TIME_LIMIT=04:00:00`.
+e o diretório de logs. O job usa `gorgonas`, ate 16 CPUs/processos, sem GPU,
+com threads BLAS/Arrow limitadas a uma por processo. O pool usa no maximo o
+numero de tarefas (nove na grade atual). Padrões: `WORKERS=16`, `MEMORY=16G`,
+`TIME_LIMIT=04:00:00`. Para alterar o paralelismo, ajuste `WORKERS` no ambiente.
 Toda saída, código próprio preservado e temporários ficam no SNFS2. Os
 caminhos Python e raiz do repositório são configuráveis por `PYTHON_BIN` e
 `TFB_ROOT`, como no launcher temporal/VAR.

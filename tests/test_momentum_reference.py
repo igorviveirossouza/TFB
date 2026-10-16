@@ -166,6 +166,52 @@ def test_guards_reference_inputs_snapshot_and_partial_state(completed_reference)
     assert not output.exists()
 
 
+def test_parallel_workers_keep_task_results_and_reference_unchanged(completed_reference):
+    reference = completed_reference
+    parent = read_json(reference/"plano.json")
+    # Adiciona um lookback ao contrato da referencia sintetica para exercitar
+    # duas tarefas simultaneas; o benchmark nao consulta previsoes de redes.
+    additions = []
+    for original in parent["tasks"]:
+        if original["experimento"] == "temporal":
+            task = dict(original)
+            task["id"] = len(parent["tasks"])+len(additions)
+            task["lookback"] = 3
+            task["backtest_source_id"] = task["id"]
+            additions.append(task)
+    parent["tasks"].extend(additions)
+    del parent["signature"]
+    parent["signature"] = momentum.json_digest(parent)
+    (reference/"plano.json").write_text(json.dumps(parent))
+    status_path = reference/"resumos/estado_execucao.json"
+    status = read_json(status_path)
+    status.update(signature=parent["signature"], total=len(parent["tasks"]), COMPLETA=len(parent["tasks"]))
+    status_path.write_text(json.dumps(status))
+    files = [p for p in reference.rglob("*") if p.is_file()]
+    before = {p: (digest(p), p.stat().st_mtime_ns) for p in files}
+    (reference.parent/"previsoes").rename(reference.parent/"previsoes_indisponiveis")
+    output = reference.parent/"momentum"
+    result = cli(reference, output, "--workers", "2")
+    assert "2 processos" in result.stdout
+    state = read_json(output/"resumos/estado_execucao.json")
+    assert state["completa"] and state["COMPLETA"] == 2
+    met = pd.read_parquet(output/"resumos/metricas.parquet")
+    assert len(met) == 16 and set(met.lookback) == {2, 3}
+    plan = read_json(output/"plano.json")
+    market, _ = load_bundle(parent["inputs"]["base"], parent["inputs"]["retornos"])
+    r = market.arrays["log_retorno_corrigido"]
+    for task in plan["tasks"]:
+        rows = pd.read_parquet(output/"tasks"/task["relpath"]/"ic_acumulado.parquet")
+        for row in rows.itertuples():
+            score = r[row.origin_step-task["lookback"]:row.origin_step].sum(axis=0)
+            target = r[row.origin_step:row.origin_step+row.k].sum(axis=0)
+            assert row.spearman == pytest.approx(spearmanr(score, target).statistic)
+    timestamps = {p: p.stat().st_mtime_ns for p in (output/"tasks").rglob("*.parquet")}
+    assert cli(reference, output, "--workers", "2").stdout.count("REUTILIZADA") == 2
+    assert timestamps == {p: p.stat().st_mtime_ns for p in timestamps}
+    assert before == {p: (digest(p), p.stat().st_mtime_ns) for p in files}
+
+
 def test_strategy_failure_is_partial_and_never_reported_as_complete(completed_reference, monkeypatch):
     args = argparse.Namespace(reference_run=str(completed_reference),
                               run_dir=str(completed_reference.parent/"momentum"),

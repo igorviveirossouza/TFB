@@ -8,11 +8,13 @@ depende de H. Cada tarefa treino/L grava IC por K e carteiras em tasks/;
 resumos/ reune IC acumulado resumido, metricas, falhas e estado da execucao.
 """
 import argparse
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime, timezone
 import hashlib
 import importlib
 import importlib.util
 import json
+import multiprocessing as mp
 import os
 from pathlib import Path
 import re
@@ -38,6 +40,7 @@ import pyarrow.parquet as pq
 VERSION = "2026-10-16-momentum-v1"
 FORMULA = "sum(log_retorno_corrigido[t-L+1:t])=log(P*_t/P*_(t-L));P*=indice_retorno_total"
 SUMMARY_TABLES = ("ic_acumulado_resumo", "metricas", "falhas")
+_WORKER_CONTEXT = None
 
 
 def digest(path):
@@ -354,6 +357,18 @@ def validate_existing_output(run_dir, plan):
         raise ValueError("Script congelado momentum diferente; use outro RUN_ID.")
 
 
+def initialize_worker(args):
+    global _WORKER_CONTEXT
+    run_dir, _, plan, market, engine = load_reference(args)
+    engine.pipeline.setup_runtime(run_dir)
+    _WORKER_CONTEXT = (run_dir, plan, market, engine)
+
+
+def execute_worker(task):
+    run_dir, plan, market, engine = _WORKER_CONTEXT
+    return execute_task(task, plan, market, engine, run_dir)
+
+
 def run(args):
     run_dir, reference, plan, market, engine = load_reference(args)
     combinations = len(plan["tasks"])*len(plan["k"])
@@ -363,9 +378,15 @@ def run(args):
     print(f"K={plan['k']}; slippage={plan['slippage_bps']:g} bps; custos={plan['cost_bps']:g} bps por ponta.", flush=True)
     marker = run_dir/"plano.json"
     validate_existing_output(run_dir, plan)
+    requested = getattr(args, "workers", 1)
+    if type(requested) is not int or not 1 <= requested <= 16:
+        raise ValueError("Workers deve ser um inteiro entre 1 e 16.")
     if args.dry_run:
         print("Plano conferido; nenhum arquivo criado e nenhum calculo executado.", flush=True)
         return 0
+    allocation = int(os.environ.get("SLURM_CPUS_PER_TASK", os.cpu_count() or 1))
+    if requested > allocation:
+        raise ValueError("Numero de processos excede as CPUs disponiveis/alocadas.")
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir/"locks").mkdir(exist_ok=True)
     with engine.pipeline.locked(run_dir/"locks"/"momentum.lock"):
@@ -383,7 +404,18 @@ def run(args):
         # Um resumo antigo nao pode continuar completo se uma retomada for interrompida.
         if (run_dir/"resumos"/"estado_execucao.json").exists():
             (run_dir/"resumos"/"estado_execucao.json").unlink()
-        states = [execute_task(task, plan, market, engine, run_dir) for task in plan["tasks"]]
+        workers = min(requested, len(plan["tasks"]))
+        print(f"Momentum: {workers} processos, 1 thread por processo.", flush=True)
+        if workers == 1:
+            states = [execute_task(task, plan, market, engine, run_dir) for task in plan["tasks"]]
+        else:
+            states = [None]*len(plan["tasks"])
+            with ProcessPoolExecutor(max_workers=workers, mp_context=mp.get_context("spawn"),
+                                     initializer=initialize_worker, initargs=(args,)) as pool:
+                futures = [pool.submit(execute_worker, task) for task in plan["tasks"]]
+                for future in as_completed(futures):
+                    state = future.result()
+                    states[state["task_id"]] = state
         return publish_summaries(run_dir, plan, states, engine)
 
 
@@ -393,6 +425,7 @@ def parser():
     p.add_argument("--run-dir", required=True, help="Pasta momentum separada da referencia e dos insumos.")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--allow-local", action="store_true", help="Fixtures/testes fora do SNFS2.")
+    p.add_argument("--workers", type=int, default=1, help="Processos CPU independentes; uma thread por processo.")
     return p
 
 
