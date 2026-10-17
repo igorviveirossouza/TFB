@@ -1,0 +1,178 @@
+# Backtests incrementais do experimento composto
+
+Execute no **TFB remoto**, branch `experiment/b3-loss-clean-v1`.
+O launcher dedicado é `scripts/run_backtests_composto_cpu.sh` e usa o mesmo
+motor financeiro validado no temporal/VAR: abertura t+1, fechamento t+K,
+CDI, eventos societários, RENT4, custos e slippage por ponta. Não treina redes.
+
+## Primeira execução: treino 80
+
+```bash
+cd /sonic_home/igor.viveiros/src/TFB
+git pull --ff-only origin experiment/b3-loss-clean-v1
+
+export TRAIN_VALUES="80"
+export COMPOSITE_RUN_ID=composto_abertura_fechamento_s0_c0_cdi_v1
+bash scripts/run_backtests_composto_cpu.sh planejar
+bash scripts/run_backtests_composto_cpu.sh piloto
+```
+
+O piloto executa, por loss disponível, as tarefas de menor e maior H,
+desempatando por `k_dir`. Ele serve para conferir os insumos e as saídas;
+as outras tarefas disponíveis continuam pendentes. Confira seu log antes
+da submissão completa:
+
+```bash
+bash scripts/run_backtests_composto_cpu.sh submeter
+```
+
+Padrões pedidos para esta etapa:
+
+| Parâmetro | Padrão |
+| --- | --- |
+| Partição | `gorgonas_dev` |
+| Tempo | `01:30:00` |
+| CPUs/processos por nó | 16, uma thread por processo |
+| Memória | 56G |
+| Lotes/nós | 1; `N_LOTES` permite 1 a 3 |
+| Treinos | `TRAIN_VALUES="80"` |
+| Ks de avaliação | `K_EVAL_VALUES="1 5 10 15 20 25"` |
+| Custos e slippage | zero bps por ponta |
+
+`TIME_LIMIT`, `PARTITION`, `WORKERS`, `MEMORY`, `N_LOTES`, `TRAIN_VALUES` e
+`K_EVAL_VALUES` podem ser definidos no ambiente. O script sem argumento só
+planeja. `submeter`, `piloto` e `consolidar` devolvem JobID e caminhos dos logs.
+O identificador é **`COMPOSITE_RUN_ID`**: o `RUN_ID` usado pelo temporal/VAR
+não seleciona esta execução por acidente.
+
+Previsões: `/snfs2/igor.viveiros/previsoes/novas_previsoes/treino=80/experimento=composto/`.
+Os nomes de pastas usam um único `=`. Mercado e retornos seguem os caminhos
+do launcher temporal; podem ser configurados com `MARKET_DIR` e `RETURNS_FILE`.
+
+Saída padrão:
+
+```text
+/snfs2/igor.viveiros/analise_resultados/backtests/composto_abertura_fechamento_s0_c0_cdi_v1/
+```
+
+## Como adicionar estimativas sem refazer tarefas concluídas
+
+Quando novas previsões estiverem prontas, repita **o mesmo comando e o mesmo
+COMPOSITE_RUN_ID**:
+
+```bash
+bash scripts/run_backtests_composto_cpu.sh submeter
+```
+
+A preparação lê os `run_config.json` e `completed_tasks.csv` de cada treino.
+Só incorpora Parquets concluídos e registrados pelo produtor. Uma grade
+incompleta é aceita; arquivo solto ainda não registrado não é processado.
+Um registro cujo arquivo ainda falta aparece nas pendências de descoberta.
+
+As tarefas já registradas mantêm seus IDs e assinaturas quando outras chegam.
+Tarefas `COMPLETA` com arquivos íntegros são reutilizadas sem calcular ICs ou
+carteiras novamente. Tarefas parciais, com erro, interrompidas ou com saídas
+corrompidas são reprocessadas. Checksums continuam sendo verificados: a
+retomada evita cálculos, mas ainda lê arquivos para conferir a integridade.
+
+Para incluir outros treinos posteriormente:
+
+```bash
+export TRAIN_VALUES="70 80 90"
+bash scripts/run_backtests_composto_cpu.sh planejar
+bash scripts/run_backtests_composto_cpu.sh submeter
+```
+
+Treinos ainda sem configuração são informados como desconhecidos, sem
+contagem inventada. Os treinos previamente registrados permanecem no catálogo
+mesmo que uma chamada posterior informe somente parte deles.
+
+Cada submissão fixa sua lista em `planos/<assinatura>.json`. Se novas previsões
+forem registradas enquanto o job aguarda na fila, elas entrarão na próxima
+submissão; a lista do job anterior não muda. Jobs simultâneos usam locks por
+tarefa. A consolidação considera o catálogo mais recente, inclusive pendências.
+
+Mercado, universo, retornos, código, estratégias, custos e Ks de avaliação
+ficam fixos em `contrato.json`. Alterá-los exige outro `COMPOSITE_RUN_ID`.
+Um Parquet já aceito não pode ser substituído silenciosamente por nova estimação.
+Adicionar novos treinos e concluir previsões do desenho existente é permitido.
+Não modifique a grade/configuração de um treino já registrado nesta execução.
+
+## Identificação e janelas
+
+A descoberta usa o desenho salvo, sem reconstruir uma grade fixa no launcher.
+Assim, respeita `lambda` 0.1/0.5/0.8, deltas 0/0.025/0.05/0.1 e as combinações
+efetivamente configuradas. **ListNet tem delta canônico zero, inativo**, sem
+duplicar experimentos pelas demais margens. O contrato do treinamento exige
+`H % k_dir == 0`.
+
+Todas as tabelas preservam `treino`, `modelo`, `lookback`, `pred_len`, `loss`,
+`lambda`, `delta`, `cross_lambda`, `cross_delta`, `delta_effective`, `k_dir`,
+`k_loss`, `seed`, `temporal_loss`, `training_array_index`, `task_id`, custos e
+assinatura individual. `k_loss` é um alias de `k_dir`, para compatibilidade.
+
+| Campo | Significado |
+| --- | --- |
+| `k_dir` / `k_loss` | Acúmulo utilizado pela loss cross-sectional no treinamento |
+| `h` | Antecedência de um retorno diário previsto, de 1 até H |
+| `k` | Janela de acúmulo e avaliação do backtest, dentre os Ks configurados com K ≤ H |
+
+Uma estimação com `k_dir=5` também é avaliada em K=1,5,10 etc., quando K ≤ H.
+Não se fundem realizações que diferem em `k_dir`, lambda ou delta.
+
+O IC diário compara os retornos previstos e reais apenas no passo h. O IC
+acumulado compara a soma dos primeiros K log-retornos previstos com a soma
+dos realizados, cross-sectionalmente. As séries de IC usam origens diárias;
+as carteiras rebalanceiam a cada K pregões, ancoradas no corte de treino.
+
+A amostra comum usa `N - max(config.horizons)` de cada treino, considerando
+inclusive os horizontes ainda não concluídos. A chegada de H maior não muda
+as datas dos resultados antigos. Com a mesma grade H e a mesma base, as datas
+coincidem com temporal/VAR.
+
+## Saídas completas
+
+| Local | Arquivos |
+| --- | --- |
+| Cada tarefa em `tasks/treino=.../experimento=composto/.../k_dir=.../` | `ic.parquet` (diário), `ic_resumo.parquet`, `ic_acumulado.parquet`, `ic_acumulado_resumo.parquet`, `carteira_diaria.parquet`, `carteira_periodos.parquet`, `posicoes.parquet`, `metricas.parquet`, `falhas.parquet`, `conclusao.json` |
+| `resumos/` | `ic_diario.parquet`, **`ic_acumulado.parquet`**, `ic_resumo.parquet`, `ic_acumulado_resumo.parquet`, `metricas.parquet`, `falhas.parquet`, `status_tarefas.csv`, `estado_execucao.json`, `descoberta_previsoes.json` |
+
+Arquivos de carteiras podem faltar numa tarefa parcial caso todas as respectivas
+estratégias tenham falhado; consulte `falhas.parquet` e os logs. Nunca se marca
+essa tarefa como completa. Os dois ICs consolidados são copiados em lotes,
+sem carregar todas as séries simultaneamente em memória e sem calcular médias
+entre configurações.
+
+`estado_execucao.json` distingue:
+
+- `completa`: todas as previsões já incorporadas ao catálogo foram processadas;
+- `completa_grade`: além disso, todas as estimativas da grade pedida chegaram;
+- `discovery.awaiting`: estimativas faltantes nas grades conhecidas;
+- `discovery.missing_groups`: treinos sem configuração, cuja quantidade ainda é desconhecida.
+
+As contagens `COMPLETA/PARCIAL/ERRO/PENDENTE` referem-se às tarefas de backtest
+do catálogo; não confundem falta de previsão com erro do backtest. Para apenas
+reunir resultados existentes, sem acessar insumos ou previsões:
+
+```bash
+bash scripts/run_backtests_composto_cpu.sh consolidar
+```
+
+## Consulta em R
+
+Transfira `plano.json`, `resumos/` e, para consultas individuais, `tasks/`.
+Atualize `analise_resultados`, branch `feat/base-mercado-backtest`:
+
+```r
+source("src/06_resultados_cluster.R")
+x <- abrir_resultados_cluster("resultados_carteiras/composto")
+
+ic <- x$ic_acumulado |>
+  dplyr::filter(treino == 80, loss == "hinge", lambda == "0.5",
+                delta == 0.025, k_dir == 5, k == 10, amostra_comum) |>
+  dplyr::collect()
+```
+
+Mantenha `k_dir` fixo ao comparar Ks de avaliação; inclua-o nas chaves das
+curvas/tabelas ao comparar realizações. `x$ic_diario` também é uma consulta
+Arrow filtrável. Os resumos e as métricas ficam nos campos habituais.
