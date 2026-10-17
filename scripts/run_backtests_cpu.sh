@@ -22,8 +22,8 @@ COST_BPS="${COST_BPS:-0}"          # Por ponta, proporcional ao financeiro efeti
 WORKERS="${WORKERS:-16}"
 N_LOTES="${N_LOTES:-1}"             # 1 inicialmente; ate 3 nos, cada qual com WORKERS processos.
 MEMORY="${MEMORY:-56G}"
-TIME_LIMIT="${TIME_LIMIT:-24:00:00}"
-PARTITION="gorgonas"                # Producao: nunca gorgonas_dev.
+TIME_LIMIT="${TIME_LIMIT:-01:30:00}"
+PARTITION="gorgonas_dev"                # Producao: nunca gorgonas_dev.
 
 ACTION="${1:-planejar}"
 if [[ $# -gt 1 || ! "$ACTION" =~ ^(planejar|piloto|submeter|consolidar)$ ]]; then

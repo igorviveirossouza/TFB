@@ -8,7 +8,7 @@ PYTHON_BIN="${PYTHON_BIN:-/sonic_home/igor.viveiros/py310/bin/python}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-/snfs2/igor.viveiros/analise_resultados/backtests}"
 REFERENCE_RUN="${REFERENCE_RUN:-$OUTPUT_ROOT/temporal_var_abertura_fechamento_s0_c0_cdi_v3_rent4}"
 RUN_ID="${RUN_ID:-momentum_temporal_var_s0_c0_cdi_v1}"
-TIME_LIMIT="${TIME_LIMIT:-04:00:00}"
+TIME_LIMIT="${TIME_LIMIT:-01:30:00}"
 MEMORY="${MEMORY:-16G}"
 WORKERS="${WORKERS:-16}"
 ACTION="${1:-planejar}"
@@ -55,7 +55,7 @@ WORKER_SCRIPT="$(mktemp "$RUN_DIR/worker_momentum_XXXXXX.sh")"
     printf '%q ' "$PYTHON_BIN" -B "$SNAPSHOT" --reference-run "$REFERENCE_RUN" --run-dir "$RUN_DIR" --workers "$WORKERS"
     printf '\n'
 } > "$WORKER_SCRIPT"
-SBATCH=(sbatch --parsable --job-name=momentum --partition=gorgonas
+SBATCH=(sbatch --parsable --job-name=momentum --partition=gorgonas_dev
     --nodes=1 --ntasks=1 --cpus-per-task="$WORKERS" --hint=nomultithread
     --mem="$MEMORY" --time="$TIME_LIMIT" --chdir="$RUN_DIR"
     --output="$RUN_DIR/logs/%x_%j.out" --error="$RUN_DIR/logs/%x_%j.err"
