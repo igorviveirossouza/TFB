@@ -12,6 +12,7 @@ STRATEGIES_FILE="${STRATEGIES_FILE:-$TFB_ROOT/config/estrategias_backtest.json}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-/snfs2/igor.viveiros/analise_resultados/backtests}"
 # Nao herda RUN_ID: uma sessao usada no temporal nao pode selecionar essa execucao.
 COMPOSITE_RUN_ID="${COMPOSITE_RUN_ID:-composto_abertura_fechamento_s0_c0_cdi_v1}"
+TRAIN_EXPLICIT="${TRAIN_VALUES+x}"
 read -r -a TRAIN <<< "${TRAIN_VALUES:-80}"
 read -r -a K_EVAL <<< "${K_EVAL_VALUES:-1 5 10 15 20 25}"
 SLIPPAGE_BPS="${SLIPPAGE_BPS:-0}"
@@ -46,6 +47,15 @@ PREP=("$PYTHON_BIN" -B "$TFB_ROOT/scripts/run_backtests_composto.py" prepare
     --predictions "$PREDICTIONS_ROOT" --market "$MARKET_DIR" --returns-file "$RETURNS_FILE"
     --strategies "$STRATEGIES_FILE" --run-dir "$RUN_DIR" --train "${TRAIN[@]}" --k "${K_EVAL[@]}"
     --slippage-bps "$SLIPPAGE_BPS" --cost-bps "$COST_BPS")
+if [[ -f "$RUN_DIR/contrato.json" ]]; then
+    # O ID seleciona o contrato e seu codigo congelado, inclusive versoes antigas.
+    # Nao aplicar defaults/variaveis de outra execucao sobre esse contrato.
+    PREP=("$PYTHON_BIN" -B "$TFB_ROOT/scripts/run_backtests_composto.py" prepare --run-dir "$RUN_DIR")
+    if [[ -n "$TRAIN_EXPLICIT" ]]; then
+        PREP+=(--train "${TRAIN[@]}")
+    fi
+    echo "Contrato existente: origens, estrategias, Ks e custos serao recuperados de $RUN_DIR/contrato.json."
+fi
 if [[ "$ACTION" == planejar ]]; then
     "${PREP[@]}" --dry-run
     printf 'Slurm: particao=%s, CPUs/processos=%s por no, memoria=%s, lotes=%s; nenhuma GPU.\n' "$PARTITION" "$WORKERS" "$MEMORY" "$N_LOTES"

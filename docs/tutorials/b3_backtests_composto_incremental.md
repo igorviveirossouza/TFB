@@ -98,6 +98,55 @@ Um Parquet já aceito não pode ser substituído silenciosamente por nova estima
 Adicionar novos treinos e concluir previsões do desenho existente é permitido.
 Não modifique a grade/configuração de um treino já registrado nesta execução.
 
+### Retomar contratos anteriores após atualizar o repositório
+
+O launcher seleciona automaticamente `codigo/run_backtests_composto.py` da
+execução indicada por `COMPOSITE_RUN_ID`, verificando primeiro a assinatura do
+contrato e os hashes de todos os arquivos congelados. Isso vale para planejar,
+piloto, submeter e consolidar, inclusive contratos da versão anterior às losses
+de proximidade. O contrato, o código congelado e os resultados concluídos não
+são migrados. As verificações originais de insumos, ambiente e integridade
+continuam em vigor.
+
+Para um ID existente, o launcher recupera do contrato `PREDICTIONS_ROOT`, mercado,
+retornos, estratégias, Ks, custos e slippage; valores dessas variáveis no ambiente
+não substituem o contrato. `TRAIN_VALUES`, quando explicitamente definido, ainda
+permite incluir novos cortes; se omitido, usa os cortes do plano salvo. Recursos
+Slurm (`WORKERS`, partição, memória, tempo e lotes) continuam configuráveis.
+
+```bash
+export COMPOSITE_RUN_ID=composto_abertura_fechamento_s0_c0_cdi_v1
+bash scripts/run_backtests_composto_cpu.sh planejar
+bash scripts/run_backtests_composto_cpu.sh submeter
+```
+
+### Execução separada das novas losses de proximidade
+
+O treinamento usa `hinge_proximity`, `ranknet_proximity` e
+`pairwise_mse_proximity`, com `CROSS_MASK=(uniform 0.025)` ou
+`CROSS_MASK=(gaussian 0.025)`. Use outro `OUT_ROOT` no treinamento e aponte
+`PREDICTIONS_ROOT` para essa raiz no backtest. Escolha um **novo**
+`COMPOSITE_RUN_ID`; não reutilize o contrato antigo para esse desenho.
+
+```bash
+export PREDICTIONS_ROOT=/snfs2/igor.viveiros/previsoes/proximity_uniform_a0025
+export COMPOSITE_RUN_ID=composto_proximity_uniform_a0025_s0_c0_cdi_v1
+export TRAIN_VALUES="80"
+bash scripts/run_backtests_composto_cpu.sh planejar
+bash scripts/run_backtests_composto_cpu.sh piloto
+# Após conferir o piloto:
+bash scripts/run_backtests_composto_cpu.sh submeter
+```
+
+A descoberta lê tipo de máscara e `a` do desenho de treinamento; não é preciso
+repeti-los no launcher do backtest. As novas losses têm `delta=0` inativo, sem
+repetir tarefas pelo vetor `DELTAS`. Seus caminhos incluem `mask=<tipo>/a=<valor>`.
+As tabelas de ICs, carteiras, posições, métricas, falhas e o status das tarefas
+preservam `mask_type`, `mask_a` e `mask_effective`. Nas losses originais de um
+contrato novo, os dois primeiros campos são nulos e o último é falso. Contratos
+antigos mantêm seu schema original. A fusão entre execuções fica para a análise
+local em R; IDs de tarefa são locais a cada execução.
+
 ## Identificação e janelas
 
 A descoberta usa o desenho salvo, sem reconstruir uma grade fixa no launcher.

@@ -80,3 +80,19 @@ def test_invalid_configuration_stops_before_preparing(invocation, overrides):
     result, args = invocation("planejar", **overrides)
     assert result.returncode == 2
     assert args == []
+
+
+def test_existing_run_id_restores_contract_instead_of_other_runs_environment(invocation, tmp_path):
+    run = tmp_path / "output with spaces" / "contrato_antigo"
+    run.mkdir(parents=True)
+    (run / "contrato.json").write_text("{}")  # Python router validates contents separately.
+    result, args = invocation("planejar", COMPOSITE_RUN_ID="contrato_antigo",
+                              PREDICTIONS_ROOT="/outra_execucao", K_EVAL_VALUES="1 2",
+                              COST_BPS="99")
+    assert result.returncode == 0, result.stderr
+    assert args[3:] == ["--run-dir", str(run), "--dry-run"]
+    assert "Contrato existente" in result.stdout
+    result, args = invocation("planejar", COMPOSITE_RUN_ID="contrato_antigo", TRAIN_VALUES="70 80")
+    assert result.returncode == 0, result.stderr
+    assert values(args, "--train") == ["70", "80"]
+    assert "--predictions" not in args and "--k" not in args

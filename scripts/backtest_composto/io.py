@@ -11,6 +11,7 @@ import io
 import itertools
 import json
 import math
+from numbers import Real
 from pathlib import Path
 import re
 
@@ -22,7 +23,25 @@ from backtest_cpu.io import load_predictions
 
 _HASH = re.compile(r"[0-9a-fA-F]{64}")
 _NAME = re.compile(r"[A-Za-z0-9_]+")
-_LOSSES = {"ranknet", "hinge", "listnet", "pairwise_mse"}
+_PROXIMITY = {"hinge_proximity", "ranknet_proximity", "pairwise_mse_proximity"}
+_LOSSES = {"ranknet", "hinge", "listnet", "pairwise_mse"} | _PROXIMITY
+
+
+def _cross_mask(cfg):
+    """Mirror the producer's mask contract in the self-contained CPU snapshot."""
+    value = cfg["loss"].get("loss_cross_mask")
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        raise ValueError("loss_cross_mask deve ser [tipo, a].")
+    name, bandwidth = value
+    if not isinstance(name, str) or name.strip().lower() not in {"uniform", "gaussian"}:
+        raise ValueError("Tipo de loss_cross_mask invalido.")
+    name = name.strip().lower()
+    if isinstance(bandwidth, bool) or not isinstance(bandwidth, Real):
+        raise ValueError("a da mascara deve ser numerico e finito.")
+    bandwidth = _number(bandwidth, "mask_a")
+    if bandwidth < 0 or (name == "gaussian" and bandwidth == 0):
+        raise ValueError("Mascara exige a >= 0 (uniform) ou a > 0 (gaussian).")
+    return name, bandwidth
 
 
 def _sha(data):
@@ -123,6 +142,8 @@ def _validate_config(plan, pct, market, source_sha256, path):
     for required in ("training", "loss"):
         if not isinstance(cfg.get(required), dict):
             raise ValueError(f"Configuracao {required} ausente.")
+    if set(cfg["cross_losses"]) & _PROXIMITY:
+        _cross_mask(cfg)
     cut = market.n*pct//100
     hmax = max(cfg["horizons"])
     if cut < 1 or cut+hmax > market.n:
@@ -134,7 +155,8 @@ def _expected_tasks(cfg, pct):
     """Mesma ordem/identidade de b3_experiment.make_tasks; nenhuma dependencia GPU."""
     definitions = []
     for loss in cfg["cross_losses"]:
-        deltas = [0] if loss == "listnet" else cfg["deltas"]
+        mask = _cross_mask(cfg) if loss in _PROXIMITY else None
+        deltas = [0] if loss == "listnet" or mask is not None else cfg["deltas"]
         for lam, delta, model, lookback, horizon in itertools.product(
                 cfg["lambdas"], deltas, cfg["models"], cfg["lookbacks"], cfg["horizons"]):
             for k_dir in cfg["trade_windows"]:
@@ -143,15 +165,19 @@ def _expected_tasks(cfg, pct):
                                         "lookback": lookback, "pred_len": horizon, "loss": loss,
                                         "cross_lambda": float(lam), "cross_delta": float(delta),
                                         "lambda": format(lam, "g"), "delta": format(delta, "g"),
-                                        "k_dir": k_dir, "delta_effective": loss != "listnet"})
+                                        "k_dir": k_dir, "delta_effective": loss != "listnet" and mask is None})
+                    if mask is not None:
+                        definitions[-1].update(mask_type=mask[0], mask_a=mask[1])
     if not definitions:
         raise ValueError("Grade composta sem pares H/K de treino elegiveis.")
     offset = cfg["train_percentages"].index(pct)*len(definitions)
     for i, task in enumerate(definitions):
         task["training_array_index"] = offset+i
-        task["relpath"] = str(Path(f"treino={pct}")/"experimento=composto"/f"loss={task['loss']}"
-                              /f"lambda={task['lambda']}"/f"delta={task['delta']}"
-                              /f"modelo={task['modelo']}"/f"lookback={task['lookback']}"
+        path = (Path(f"treino={pct}")/"experimento=composto"/f"loss={task['loss']}"
+                /f"lambda={task['lambda']}"/f"delta={task['delta']}")
+        if task["loss"] in _PROXIMITY:
+            path = path/f"mask={task['mask_type']}"/f"a={task['mask_a']!r}"
+        task["relpath"] = str(path/f"modelo={task['modelo']}"/f"lookback={task['lookback']}"
                               /f"pred_len={task['pred_len']}"/f"k_dir={task['k_dir']}")
     if len({t["relpath"] for t in definitions}) != len(definitions):
         raise ValueError("Grade composta produz caminhos duplicados.")
@@ -190,7 +216,15 @@ def _validate_row(row, task, cfg, meta, plan, market, cut):
         if _number(row[key], key) != task[key]:
             raise ValueError(f"Lambda/delta divergente: {identity}")
     if row["delta_effective"].lower() != str(task["delta_effective"]).lower():
-        raise ValueError(f"delta_effective inconsistente (ListNet exige delta=0 inativo): {identity}")
+        raise ValueError(f"delta_effective inconsistente: {identity}")
+    if task["loss"] in _PROXIMITY:
+        if (row.get("mask_type") != task["mask_type"]
+                or _number(row.get("mask_a"), "mask_a") != task["mask_a"]
+                or row.get("mask_effective", "").lower() != "true"):
+            raise ValueError(f"Mascara divergente na auditoria: {identity}")
+    elif (row.get("mask_type", "") or row.get("mask_a", "")
+          or row.get("mask_effective", "false").lower() != "false"):
+        raise ValueError(f"Mascara ativa para loss original: {identity}")
     horizon = task["pred_len"]
     if (json.loads(row["forecast_horizons"]) != [horizon]
             or json.loads(row["n_windows_by_horizon"]) != {str(horizon): expected_int["n_windows"]}):
@@ -205,6 +239,9 @@ def _validate_row(row, task, cfg, meta, plan, market, cut):
     hyper = dict(cfg["model_defaults"][task["modelo"]], **cfg["training"])
     hyper.update(seq_len=task["lookback"], pred_len=horizon, horizon=horizon)
     hyper.update(cfg["loss"])
+    hyper.pop("loss_cross_mask", None)
+    if task["loss"] in _PROXIMITY:
+        hyper["loss_cross_mask"] = [task["mask_type"], task["mask_a"]]
     hyper.update(loss="composite_trading", loss_cross=task["loss"], loss_trade_window=task["k_dir"],
                  loss_cross_lambda=task["cross_lambda"], loss_cross_delta=task["cross_delta"])
     strategy = dict(cfg["strategy"])

@@ -20,7 +20,7 @@ from test_backtest_cpu import make_inputs
 
 
 def make_composite_fixture(tmp_path, percentages=(50,), horizons=(1, 3), deltas=(0, .025),
-                           losses=("ranknet", "listnet"), available_indices=(0,)):
+                           losses=("ranknet", "listnet"), available_indices=(0,), cross_mask=None):
     """Pequena grade usando audit_row/export_prediction_windows do produtor real."""
     base, returns, root = make_inputs(tmp_path)
     market, identity = load_bundle(base, returns)
@@ -35,6 +35,8 @@ def make_composite_fixture(tmp_path, percentages=(50,), horizons=(1, 3), deltas=
               "training": {"num_epochs": 2, "patience": 1, "lr": .001},
               "loss": {"loss_temporal": "mse", "loss_inverse_norm": True,
                        "loss_cross_score_normalization": "zscore", "loss_listnet_tau": 1.}}
+    if cross_mask is not None:
+        config["loss"]["loss_cross_mask"] = cross_mask
     tasks = producer.make_tasks(config, "composto")
     signature = producer.digest(producer.provenance(config, metadata))
     fixture = SimpleNamespace(base=base, returns=returns, root=root, market=market, identity=identity,

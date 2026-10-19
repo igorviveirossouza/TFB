@@ -21,7 +21,7 @@ from backtest_cpu.io import digest, json_digest, load_bundle, load_strategies, r
 from backtest_cpu.pipeline import atomic_json, locked, runtime_versions, setup_runtime, storage_path, valid_result
 from .io import discover_composite_tasks, load_composite_predictions
 
-VERSION = "2026-10-17-composto-incremental-v1"
+VERSION = "2026-10-19-composto-proximity-v2"
 _PLAN = None
 _MARKET = None
 SUMMARY_NAMES = ("metricas", "ic_resumo", "ic_acumulado_resumo", "falhas")
@@ -219,6 +219,9 @@ def with_meta(frame, task, plan):
                    "cross_lambda": (task["cross_lambda"], pa.float64()),
                    "cross_delta": (task["cross_delta"], pa.float64()),
                    "delta_effective": (task["delta_effective"], pa.bool_()),
+                   "mask_type": (task.get("mask_type"), pa.string()),
+                   "mask_a": (task.get("mask_a"), pa.float64()),
+                   "mask_effective": ("mask_type" in task, pa.bool_()),
                    "k_loss": (task["k_dir"], pa.int64()), "task_id": (task["id"], pa.int64()),
                    "seed": (task.get("seed"), pa.int64()),
                    "training_array_index": (task["training_array_index"], pa.int64()),
@@ -363,13 +366,15 @@ def consolidate(run):
                             label = "ERRO" if last.get("status") == "ERRO" else "PENDENTE"
                         statuses.append({"task_id": task["id"], "status": label,
                                          **{k: task[k] for k in ("treino", "modelo", "lookback", "pred_len", "loss", "lambda", "delta", "k_dir")},
+                                         "mask_type": task.get("mask_type"), "mask_a": task.get("mask_a"),
+                                         "mask_effective": "mask_type" in task,
                                          "seconds": result.get("seconds"), "erro": result.get("erro", "")})
             for name, parts in frames.items():
                 populated = [p for p in parts if len(p)]
                 if parts:
                     table = pd.concat(populated, ignore_index=True) if populated else parts[0].iloc[:0]
                     table.to_parquet(stage/f"{name}.parquet", index=False, compression="snappy")
-            pd.DataFrame(statuses, columns=["task_id", "status", "treino", "modelo", "lookback", "pred_len", "loss", "lambda", "delta", "k_dir", "seconds", "erro"]).to_csv(stage/"status_tarefas.csv", index=False)
+            pd.DataFrame(statuses, columns=["task_id", "status", "treino", "modelo", "lookback", "pred_len", "loss", "lambda", "delta", "k_dir", "mask_type", "mask_a", "mask_effective", "seconds", "erro"]).to_csv(stage/"status_tarefas.csv", index=False)
             counts = {s: sum(x["status"] == s for x in statuses) for s in ("COMPLETA", "PARCIAL", "ERRO", "PENDENTE")}
             state = {"signature": plan["signature"], "contract_signature": plan["contract_signature"],
                      "total": len(statuses), **counts,
