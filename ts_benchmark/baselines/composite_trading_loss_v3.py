@@ -28,6 +28,10 @@ from ts_benchmark.baselines.composite_trading_loss_v2 import (
     build_loss_v1,
     loss_accepts_base_value_v1,
 )
+from ts_benchmark.baselines.proximity_losses import (
+    PROXIMITY_LOSSES,
+    validate_cross_mask,
+)
 
 
 def build_loss(config, normalizer_mean=None, normalizer_scale=None):
@@ -71,6 +75,7 @@ def build_loss(config, normalizer_mean=None, normalizer_scale=None):
         listnet_tau=float(_cfg(config, "loss_listnet_tau", 1.0)),
         hinge_margin=float(_cfg(config, "loss_hinge_margin", 0.01)),
         cross_delta=float(_cfg(config, "loss_cross_delta", 0.0)),
+        cross_mask=_cfg(config, "loss_cross_mask", None),
         cross_score_normalization=cross_score_normalization,
         inverse_norm=inverse_norm,
         normalizer_mean=normalizer_mean,
@@ -107,6 +112,7 @@ class CompositeTradingLossV3(CompositeTradingLossV2):
         listnet_tau: float = 1.0,
         hinge_margin: float = 0.01,
         cross_delta: float = 0.0,
+        cross_mask=None,
         cross_score_normalization: str = "zscore",
         inverse_norm: bool = True,
         normalizer_mean=None,
@@ -120,6 +126,13 @@ class CompositeTradingLossV3(CompositeTradingLossV2):
                 "loss_cross_score_normalization deve ser 'none' ou 'zscore'."
             )
 
+        cross_loss_name = cross_loss.lower()
+        proximity_mask = (
+            validate_cross_mask(cross_mask)
+            if cross_loss_name in PROXIMITY_LOSSES
+            else None
+        )
+
         # V2 already implements the correct return/price block aggregation.
         # Its rank_score_normalization attribute is reused internally only as a
         # validated storage slot; V3 applies it to every cross objective.
@@ -128,7 +141,7 @@ class CompositeTradingLossV3(CompositeTradingLossV2):
             data_kind=data_kind,
             score_kind=score_kind,
             temporal_loss=temporal_loss,
-            cross_loss=cross_loss,
+            cross_loss=PROXIMITY_LOSSES.get(cross_loss_name, cross_loss_name),
             cross_lambda=cross_lambda,
             cross_scale=cross_scale,
             huber_delta=huber_delta,
@@ -143,6 +156,9 @@ class CompositeTradingLossV3(CompositeTradingLossV2):
             track_components=track_components,
             eps=eps,
         )
+        self.cross_loss_name = cross_loss_name
+        # Original objectives deliberately ignore this new hyperparameter.
+        self.cross_mask = proximity_mask
         self.cross_score_normalization = normalization
 
     def _normalize_cross_scores(
@@ -169,6 +185,9 @@ class CompositeTradingLossV3(CompositeTradingLossV2):
         # Delta is evaluated on the realized financial score before z-scoring,
         # so its unit remains the original score unit (e.g. simple return).
         pred_raw, target_raw = self._flatten_blocks(pred_scores, target_scores)
+
+        if self.cross_loss_name in PROXIMITY_LOSSES:
+            return self._proximity_cross_loss(pred_raw, target_raw)
 
         if self.cross_loss_name == "mse":
             pred, target = self._normalize_cross_scores(pred_raw, target_raw)
@@ -202,6 +221,81 @@ class CompositeTradingLossV3(CompositeTradingLossV2):
 
         # BPR: pairwise logistic with realized ordering as orientation.
         return self._masked_mean(F.softplus(-(sign * pred_diff)), valid)
+
+    def _proximity_cross_loss(
+        self,
+        pred_raw: torch.Tensor,
+        target_raw: torch.Tensor,
+    ) -> torch.Tensor:
+        """Proximity-weighted pairs, including exact realized-score ties.
+
+        Normalize weights independently within each [N]-asset cross-section,
+        then average its loss over batch elements and trading blocks. A uniform
+        mask with no eligible pair contributes a differentiable zero. This
+        intentionally does not use V2's tie-excluding pair validity helper.
+
+        As in the original V3, optional z-scoring couples all asset scores:
+        an individual tie term favors equal normalized scores, but does not
+        guarantee a nonzero gradient for every degenerate cross-section (e.g.
+        two distinct predicted scores always normalize to a fixed gap).
+        """
+        n_assets = pred_raw.shape[1]
+        if n_assets < 2:
+            return pred_raw.sum() * 0.0
+
+        rows, cols = torch.triu_indices(
+            n_assets, n_assets, offset=1, device=pred_raw.device
+        )
+        # Float64 protects the financial-unit mask when subtracting large
+        # float32 values or dividing by a very small Gaussian bandwidth.
+        realized = target_raw.to(torch.float64)
+        realized_diff = realized[:, rows] - realized[:, cols]
+        gap = realized_diff.abs()
+        mask_name, bandwidth = self.cross_mask
+        if mask_name == "uniform":
+            weights = (gap <= bandwidth).to(pred_raw.dtype)
+        else:
+            # exp(log(w) - max(log(w))) cancels in the weighted mean. Compute
+            # differences of squares in factored form so every closest pair
+            # has weight 1 even when ALL original Gaussian weights underflow.
+            min_gap = gap.amin(dim=1, keepdim=True)
+            distance_from_min = gap - min_gap
+            relative_energy = (
+                (distance_from_min / bandwidth)
+                * ((gap + min_gap) / bandwidth)
+                * 0.5
+            )
+            relative_energy = torch.where(
+                distance_from_min == 0,
+                torch.zeros_like(relative_energy),
+                relative_energy,
+            )
+            weights = torch.exp(-relative_energy).to(pred_raw.dtype)
+
+        pred, target = self._normalize_cross_scores(pred_raw, target_raw)
+        pred_diff = pred[:, rows] - pred[:, cols]
+        target_diff = target[:, rows] - target[:, cols]
+        sign = realized_diff.sign().to(pred_diff.dtype)
+        base_loss = PROXIMITY_LOSSES[self.cross_loss_name]
+        if base_loss == "hinge":
+            values = torch.where(
+                realized_diff == 0,
+                pred_diff.abs(),
+                F.relu(self.hinge_margin - sign * pred_diff),
+            )
+        elif base_loss == "ranknet":
+            values = F.binary_cross_entropy_with_logits(
+                self.ranknet_alpha * pred_diff,
+                (1.0 + sign) * 0.5,
+                reduction="none",
+            )
+        else:
+            values = (pred_diff - target_diff).square()
+
+        # At least one Gaussian weight is exactly 1. For uniform masks only,
+        # an empty section has numerator 0 and denominator clamped to 1.
+        denominator = weights.sum(dim=1).clamp_min(1.0)
+        return ((weights * values).sum(dim=1) / denominator).mean()
 
     def forward(
         self,

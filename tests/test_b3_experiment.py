@@ -225,7 +225,7 @@ def test_submission_respects_smaller_discovered_array_limit(monkeypatch, tmp_pat
 def prepared_design(config, monkeypatch, tmp_path, request):
     # Isolate generated inputs and audit files from the actual repository.
     fake_root = tmp_path / "checkout"
-    for relative in ("scripts/b3_experiment.py", "scripts/b3_experiment_io.py", "scripts/run_benchmark_composite_trading_loss_v3.py", "ts_benchmark/baselines/composite_trading_loss_v2.py", "ts_benchmark/baselines/composite_trading_loss_v3.py", "ts_benchmark/baselines/self_impl/VAR/VAR.py", "ts_benchmark/baselines/deep_forecasting_model_base.py"):
+    for relative in ("scripts/b3_experiment.py", "scripts/b3_experiment_io.py", "scripts/run_benchmark_composite_trading_loss_v3.py", "ts_benchmark/baselines/composite_trading_loss_v2.py", "ts_benchmark/baselines/composite_trading_loss_v3.py", "ts_benchmark/baselines/proximity_losses.py", "ts_benchmark/baselines/self_impl/VAR/VAR.py", "ts_benchmark/baselines/deep_forecasting_model_base.py"):
         destination = fake_root / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(REPO / relative, destination)

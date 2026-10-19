@@ -142,11 +142,15 @@ def test_var_fits_once_per_cut_and_exports_all_six_horizons(config, tmp_path, mo
     pytest.importorskip('pyarrow')
     from ts_benchmark.baselines.self_impl.VAR.VAR import VAR
     cfg = copy.deepcopy(config)
+    # This fixture writes 401 prices and expects their 400 log-return differences;
+    # the production launcher now defaults to already-computed log returns.
+    cfg['source_data_kind'] = 'price'
     fake_root = tmp_path/'checkout'
     relatives = ['scripts/b3_experiment.py', 'scripts/b3_experiment_io.py',
                  'scripts/run_benchmark_composite_trading_loss_v3.py',
                  'ts_benchmark/baselines/composite_trading_loss_v2.py',
                  'ts_benchmark/baselines/composite_trading_loss_v3.py',
+                 'ts_benchmark/baselines/proximity_losses.py',
                  'ts_benchmark/baselines/self_impl/VAR/VAR.py',
                  'ts_benchmark/baselines/deep_forecasting_model_base.py']
     for relative in relatives:

@@ -180,6 +180,93 @@ mesmo se `DELTAS` não contiver zero. Alterar `DELTAS` afeta somente ranknet,
 hinge e pairwise_mse. Foram eliminadas 7.776 repetições da grade anterior de
 41.472 tarefas, preservando as configurações distintas.
 
+### Losses de proximidade e empates (opcionais)
+
+O mesmo `scripts/run_composite_trading_experiment.sh` aceita três variantes novas:
+`hinge_proximity`, `ranknet_proximity` e `pairwise_mse_proximity`. As losses
+originais `hinge`, `ranknet`, `pairwise_mse` e `listnet` conservam suas fórmulas,
+filtros, grade padrão e caminhos. Para executar somente as novas, edite:
+
+```bash
+CROSS_LOSSES=(hinge_proximity ranknet_proximity pairwise_mse_proximity)
+CROSS_MASK=(uniform 0.025)
+# Para outra execução, troque o vetor por:
+# CROSS_MASK=(gaussian 0.025)
+```
+
+`CROSS_MASK` é um vetor de dois elementos: nome da máscara e largura `a`.
+Ele chega aos adaptadores como `loss_cross_mask=["uniform", 0.025]` (ou
+`["gaussian", 0.025]`). Cada execução usa um único vetor, comum às variantes
+novas selecionadas. `a` é medido na escala do score realizado antes do z-score:
+com `SCORE_KIND=simple_return`, `0.025` representa 2,5 pontos percentuais do
+retorno acumulado em K passos. Não é uma margem nos escores padronizados.
+
+Para cada par distinto de ativos `i < j`, seja `gap = R_i - R_j`:
+
+| Máscara | Peso | Domínio |
+| --- | --- | --- |
+| `uniform` | `1` se `abs(gap) <= a`, senão `0` | `a >= 0`; zero seleciona somente empates exatos |
+| `gaussian` | `exp(-gap² / (2a²))` | `a > 0`; peso máximo nos empates e decrescente com a distância |
+
+Os pesos dependem somente dos retornos realizados. A gaussiana é normalizada
+de forma numericamente estável: subtrair o maior log-peso de cada cross-section
+preserva a média ponderada e evita que todos os pesos virem zero por underflow.
+Uma gaussiana muito estreita concentra o peso nos pares mais próximos, mesmo
+quando nenhum par está dentro de `a`; ela não contém um corte rígido.
+
+Com `d = z_i - z_j`, `d_hat = z_hat_i - z_hat_j` e `s = sign(gap)`, os termos são:
+
+| Variante | Sem empate (`gap != 0`) | Empate exato (`gap == 0`) |
+| --- | --- | --- |
+| `hinge_proximity` | `max(0, HINGE_MARGIN - s*d_hat)` | `abs(d_hat)` |
+| `ranknet_proximity` | `softplus(-RANKNET_ALPHA*s*d_hat)` | Entropia cruzada com alvo `0.5` e logit `RANKNET_ALPHA*d_hat` |
+| `pairwise_mse_proximity` | `(d_hat - d)²` | `d_hat²` |
+
+Os empates são incluídos; não se utiliza a máscara antiga que excluía
+`gap == 0`. Pares próximos, mas não empatados, mantêm a supervisão de ordem
+nas variantes Hinge/RankNet. Na Pairwise MSE também há supervisão da distância.
+O mínimo da RankNet em um empate tem valor `log(2)` e ocorre em `d_hat=0`.
+
+Em cada amostra/bloco calcula-se `sum(w*loss)/sum(w)`. Uma cross-section sem
+pares elegíveis contribui com zero diferenciável; depois se calcula a média
+sobre todas as amostras e blocos. Esse cálculo é próprio das variantes novas;
+a redução das losses originais permanece intacta. A agregação financeira em K,
+o z-score e a composição com a MSE temporal continuam os mesmos.
+
+O incentivo de igualdade é definido no espaço dos escores da loss. O z-score
+acopla os ativos e remove escala: com apenas dois ativos, ou todos os alvos
+empatados na Pairwise MSE, pode haver gradiente nulo em previsões não constantes
+por invariância de escala. As variantes preservam essa normalização existente;
+`CROSS_SCORE_NORMALIZATION=none` continua disponível para estudar esse efeito.
+
+`DELTAS` não afeta as variantes novas. Cada uma roda uma vez por corte, modelo,
+lookback, (H,K) e lambda, com `delta=0` e `delta_effective=False` na auditoria.
+Com somente as três novas losses e os demais vetores padrão, são **7.776**
+treinamentos (2.592 por loss), independentemente do tamanho de `DELTAS`.
+O script mostra essa contagem antes de submeter:
+
+```bash
+bash scripts/run_composite_trading_experiment.sh --print-config
+bash scripts/run_composite_trading_experiment.sh --task 0
+bash scripts/run_composite_trading_experiment.sh --dry-run
+```
+
+Os novos destinos incluem máscara e largura, sem reutilizar saídas originais:
+
+```text
+treino=70/experimento=composto/loss=hinge_proximity/lambda=0.1/delta=0/mask=uniform/a=0.025/modelo=DUET/lookback=32/pred_len=5/k_dir=5/part.parquet
+```
+
+`mask_type`, `mask_a` e `mask_effective` ficam na auditoria. Para as losses
+originais, os campos de máscara ficam vazios/inativos e `loss_cross_mask` não
+é encaminhado ao modelo. Configurações antigas sem esse vetor seguem válidas.
+
+**Use um `OUT_ROOT` novo para cada desenho/máscara/largura e após atualizar o
+código.** A proteção existente de `run_config.json` rejeita dados, configuração
+ou código diferentes na mesma raiz preparada; os subdiretórios distintos não
+desativam essa verificação. Não atualize o checkout enquanto jobs preparados
+com a revisão anterior ainda estiverem em execução.
+
 ### VAR
 
 O script usa `lags=32` e ajusta o VAR **uma única vez por corte**:

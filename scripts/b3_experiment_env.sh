@@ -22,6 +22,16 @@ if [[ "$EXPERIMENT" != "composto" ]]; then
   TRADE_WINDOWS=(1); CROSS_LOSSES=(ranknet); LAMBDAS=(0.5); DELTAS=(0)
 fi
 
+# Optional for old launcher copies/configs; mandatory only for *_proximity losses.
+# Pass each array item independently so malformed vectors cannot be truncated.
+mask_arguments=()
+if [[ "$EXPERIMENT" == "composto" ]] && declare -p CROSS_MASK &>/dev/null; then
+  mask_arguments+=(loss.loss_cross_mask present)
+  for mask_item in "${CROSS_MASK[@]}"; do
+    mask_arguments+=(loss.loss_cross_mask_item "$mask_item")
+  done
+fi
+
 # Cada valor chega ao Python como argumento separado, sem interpolação em código.
 export B3_INLINE_CONFIG
 B3_INLINE_CONFIG=$("$PYTHON_BIN" - \
@@ -41,7 +51,8 @@ B3_INLINE_CONFIG=$("$PYTHON_BIN" - \
   loss.loss_inverse_norm "${LOSS_INVERSE_NORM:-true}" \
   loss.loss_track_components "${LOSS_TRACK_COMPONENTS:-true}" \
   strategy.train_ratio_in_tv "${TRAIN_RATIO_IN_TV:-0.875}" \
-  strategy.stride "$STRIDE" strategy.num_rollings "$NUM_ROLLINGS" strategy.seed "$SEED" <<'PY'
+  strategy.stride "$STRIDE" strategy.num_rollings "$NUM_ROLLINGS" strategy.seed "$SEED" \
+  "${mask_arguments[@]}" <<'PY'
 import json
 import sys
 
@@ -54,7 +65,14 @@ floats = {'training.lr', 'strategy.train_ratio_in_tv', 'loss.loss_cross_scale',
           'loss.loss_ranknet_alpha', 'loss.loss_listnet_tau', 'loss.loss_hinge_margin'}
 booleans = {'loss.loss_inverse_norm', 'loss.loss_track_components'}
 config = {}
+mask_items = None
 for key, raw in zip(sys.argv[1::2], sys.argv[2::2]):
+    if key == 'loss.loss_cross_mask':
+        mask_items = []
+        continue
+    if key == 'loss.loss_cross_mask_item':
+        mask_items.append(raw)
+        continue
     if key in integer_lists:
         value = [int(x) for x in raw.split()]
     elif key in float_lists:
@@ -78,6 +96,10 @@ for key, raw in zip(sys.argv[1::2], sys.argv[2::2]):
     for part in parts[:-1]:
         node = node.setdefault(part, {})
     node[parts[-1]] = value
+if mask_items is not None:
+    if len(mask_items) != 2:
+        raise ValueError('CROSS_MASK deve conter exatamente (tipo a)')
+    config['loss']['loss_cross_mask'] = [mask_items[0], float(mask_items[1])]
 print(json.dumps(config, allow_nan=False))
 PY
 )

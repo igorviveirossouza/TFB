@@ -25,6 +25,10 @@ import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from ts_benchmark.baselines.proximity_losses import PROXIMITY_LOSSES, validate_cross_mask
+
 LAUNCHERS = {'temporal': 'run_temporal_experiment.sh',
              'composto': 'run_composite_trading_experiment.sh',
              'var': 'run_var_experiment.sh'}
@@ -67,8 +71,11 @@ def load_config():
         raise ValueError('train_percentages: inteiros entre 1 e 99')
     if set(config['models']) - set(config['model_defaults']):
         raise ValueError('Modelo sem defaults de arquitetura')
-    if set(config['cross_losses']) - {'ranknet', 'hinge', 'listnet', 'pairwise_mse'}:
+    if set(config['cross_losses']) - ({'ranknet', 'hinge', 'listnet', 'pairwise_mse'} | set(PROXIMITY_LOSSES)):
         raise ValueError('Loss cross não suportada nesta grade')
+    if any(loss in PROXIMITY_LOSSES for loss in config['cross_losses']):
+        config['loss']['loss_cross_mask'] = list(validate_cross_mask(
+            config['loss'].get('loss_cross_mask')))
     if any(not 0 < x < 1 for x in config['lambdas']):
         raise ValueError('Lambda composto deve estar em (0,1)')
     if any(not math.isfinite(x) or x < 0 for x in config['deltas']):
@@ -84,9 +91,9 @@ def load_config():
 
 
 def cross_deltas(config, loss):
-    # ListNet has no pairwise dead zone. Keep one canonical, inactive delta
+    # ListNet and proximity losses have no pairwise dead zone. Keep one inactive delta
     # for paths/audits, independent of the editable DELTAS vector.
-    return [0] if loss == 'listnet' else config['deltas']
+    return [0] if loss == 'listnet' or loss in PROXIMITY_LOSSES else config['deltas']
 
 
 def make_tasks(config, mode):
@@ -98,14 +105,19 @@ def make_tasks(config, mode):
         lookbacks = config['lookbacks'] if mode != 'var' else [config['var_lags']]
         horizons = config['horizons'] if mode != 'var' else [max(config['horizons'])]
         for loss in losses:
+            mask = (validate_cross_mask(config['loss'].get('loss_cross_mask'))
+                    if loss in PROXIMITY_LOSSES else None)
             deltas = cross_deltas(config, loss) if mode == 'composto' else [0]
             for lam, delta, model, lb, horizon in itertools.product(
                     lambdas, deltas, models, lookbacks, horizons):
                 ks = [k for k in config['trade_windows'] if k <= horizon and horizon % k == 0] if mode == 'composto' else [None]
                 for k in ks:
-                    tasks.append(dict(array_index=len(tasks), treino=pct, experimento=mode,
-                                      loss=loss, cross_lambda=lam, cross_delta=delta,
-                                      modelo=model, lookback=lb, pred_len=horizon, k=k))
+                    task = dict(array_index=len(tasks), treino=pct, experimento=mode,
+                                loss=loss, cross_lambda=lam, cross_delta=delta,
+                                modelo=model, lookback=lb, pred_len=horizon, k=k)
+                    if mask is not None:
+                        task.update(mask_type=mask[0], mask_a=mask[1])
+                    tasks.append(task)
     return tasks
 
 
@@ -118,6 +130,9 @@ def output_path(task):
     path = group_path(task) / f"loss={task['loss']}" / f'lambda={lam}'
     if task['experimento'] == 'composto':
         path /= f"delta={task['cross_delta']:g}"
+        if task['loss'] in PROXIMITY_LOSSES:
+            # repr preserves distinct float widths; :g would round to six digits.
+            path = path / f"mask={task['mask_type']}" / f"a={float(task['mask_a'])!r}"
     path = path / f"modelo={task['modelo']}" / f"lookback={task['lookback']}" / f"pred_len={task['pred_len']}"
     if task['k'] is not None:
         path /= f"k_dir={task['k']}"
@@ -138,6 +153,11 @@ def model_spec(config, task):
     # Ordinary MSE is exactly the composite's temporal term. Do not evaluate
     # unused cross scores at lambda=0 (0 * NaN would still contaminate the loss).
     hyper.update(config['loss'])
+    # Inactive masks must not change the original models' hyperparameters/cache keys.
+    hyper.pop('loss_cross_mask', None)
+    if task['loss'] in PROXIMITY_LOSSES:
+        hyper['loss_cross_mask'] = list(validate_cross_mask(
+            [task['mask_type'], task['mask_a']]))
     hyper.update(loss='composite_trading' if task['experimento'] == 'composto' else config['loss']['loss_temporal'], loss_cross=task['loss'],
                  loss_trade_window=task['k'] or 1,
                  loss_cross_lambda=task['cross_lambda'], loss_cross_delta=task['cross_delta'])
@@ -206,7 +226,9 @@ def audit_row(config, task, metadata, out_root, signature):
                 source_sha256=metadata['source_sha256'], dataset_sha256=metadata['dataset_sha256'],
                 n_assets=metadata['n_assets'], seed=config['strategy']['seed'],
                 temporal_loss=config['loss']['loss_temporal'],
-                delta_effective=task['experimento'] == 'composto' and task['loss'] != 'listnet',
+                delta_effective=task['experimento'] == 'composto' and task['loss'] != 'listnet' and task['loss'] not in PROXIMITY_LOSSES,
+                mask_type=task.get('mask_type', ''), mask_a=task.get('mask_a', ''),
+                mask_effective=task['loss'] in PROXIMITY_LOSSES,
                 cross_blocks=cross_blocks,
                 cross_steps=cross_blocks * task['k'] if task['k'] is not None else '',
                 cross_tail_steps=task['pred_len'] % task['k'] if task['k'] is not None else '',
@@ -260,6 +282,7 @@ def provenance(config, metadata):
                   'scripts/run_benchmark_composite_trading_loss_v3.py',
                   'ts_benchmark/baselines/composite_trading_loss_v2.py',
                   'ts_benchmark/baselines/composite_trading_loss_v3.py',
+                  'ts_benchmark/baselines/proximity_losses.py',
                   'ts_benchmark/baselines/self_impl/VAR/VAR.py',
                   'ts_benchmark/baselines/deep_forecasting_model_base.py']
     return dict(config=config, source_sha256=metadata['source_sha256'],
@@ -517,6 +540,10 @@ def main():
         print(f'{pairs} pares H/K válidos; {variants} combinações efetivas de loss/delta.', flush=True)
         if 'listnet' in config['cross_losses']:
             print('ListNet: delta não se aplica; uma execução por combinação, registrada como delta=0.', flush=True)
+        if any(loss in PROXIMITY_LOSSES for loss in config['cross_losses']):
+            mask_type, mask_a = validate_cross_mask(config['loss']['loss_cross_mask'])
+            print(f'Proximity: máscara={mask_type}, a={mask_a!r}; inclui empates; '
+                  'delta não se aplica, sem repetir DELTAS.', flush=True)
     if args.dry_run:
         chunks = array_chunks(len(tasks), int(os.environ.get('ARRAY_CHUNK_SIZE','1000')))
         print(f'{len(chunks)} array(s), tamanho máximo {max(c for _,c in chunks)}; último: 0-{chunks[-1][1]-1}')

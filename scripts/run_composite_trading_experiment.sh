@@ -29,6 +29,15 @@ CROSS_LOSSES=(ranknet hinge listnet pairwise_mse)
 LAMBDAS=(0.1 0.5 0.8)
 DELTAS=(0 0.025 0.05 0.1)
 
+# Novas losses opcionais: hinge_proximity, ranknet_proximity, pairwise_mse_proximity.
+# Para executar apenas as novas, substitua CROSS_LOSSES acima por:
+# CROSS_LOSSES=(hinge_proximity ranknet_proximity pairwise_mse_proximity)
+# Vetor: primeiro elemento = máscara; segundo = a, na escala do score realizado.
+# uniform: |R_i-R_j| <= a (a >= 0); gaussian: exp(-gap²/(2a²)) (a > 0).
+# Empates entram nas novas losses; DELTAS não as multiplica nem as filtra.
+# Cada execução usa este único par; mude o vetor para comparar outra máscara/a.
+CROSS_MASK=(uniform 0.025)   # Alternativa: CROSS_MASK=(gaussian 0.025)
+
 CROSS_SCALE=1
 RANKNET_ALPHA=1
 LISTNET_TAU=1
