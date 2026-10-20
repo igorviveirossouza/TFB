@@ -57,6 +57,30 @@ Saída padrão:
 
 ## Como adicionar estimativas sem refazer tarefas concluídas
 
+### Quando o plano mostra zero previsões
+
+O planejamento informa a raiz efetivamente lida, as losses/máscara da grade,
+o número de conclusões registradas e os arquivos registrados ausentes. Se um
+grupo não tem previsões disponíveis, verifica também se há Parquets da grade
+sem registro, sem os incorporar ou modificar. Esse diagnóstico está no código
+atual; contratos existentes continuam usando sua versão congelada.
+
+`squeue` mostra tarefas na fila, não o sucesso das tarefas que já saíram dela.
+Para conferir um array de treinamento, por exemplo:
+
+```bash
+sacct -j 64728 -X --format=JobID,State,ExitCode,Elapsed --parsable2
+```
+
+Se não há arquivos publicados, compare `PREDICTIONS_ROOT` com o `OUT_ROOT`
+efetivamente usado na submissão e confira os logs de treinamento/exportação.
+`COMPOSITE_RUN_ID` identifica a saída do backtest; não seleciona a raiz de
+previsões de uma execução nova. Para contratos existentes, a raiz vem do
+contrato. Não registre Parquets soltos manualmente nem refaça treinos antes
+de identificar a causa.
+
+### Incorporar novas conclusões
+
 Quando novas previsões estiverem prontas, repita **o mesmo comando e o mesmo
 COMPOSITE_RUN_ID**:
 

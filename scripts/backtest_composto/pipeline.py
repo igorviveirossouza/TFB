@@ -163,6 +163,28 @@ def prepare(args):
           f"{plan['discovery']['awaiting']} estimativas ainda aguardadas na grade conhecida.", flush=True)
     print(f"Treinos={plan['discovery']['requested_train']}; K={plan['k']}; "
           f"{market.n} pregoes, {len(market.tickers)} ativos. Saida: {run}", flush=True)
+    print(f"Raiz de previsoes efetivamente lida: {predictions}", flush=True)
+    for group in plan["discovery"]["groups"]:
+        directory = predictions/f"treino={group['treino']}"/"experimento=composto"
+        print(f"Treino {group['treino']}: status={group['status']}; "
+              f"grade={group['expected']}; registradas={group['registered']}; "
+              f"disponiveis={group['available']}; "
+              f"registradas_sem_arquivo={group['registered_missing']}. "
+              f"Losses={group.get('losses')}; mascara={group.get('cross_mask')}.", flush=True)
+        if group["available"] == 0:
+            print(f"Confira: {directory/'run_config.json'} e {directory/'completed_tasks.csv'}", flush=True)
+            if group.get("unregistered_parquets"):
+                print(f"ATENCAO: {group['unregistered_parquets']} Parquets da grade ainda sem registro; "
+                      "nao entram no backtest. Verifique a conclusao/exportacao dos treinos.", flush=True)
+                for path in group["unregistered_examples"]:
+                    print(f"  Sem registro: {path}", flush=True)
+            elif group["registered_missing"]:
+                for path in group["missing_paths"][:3]:
+                    print(f"  Arquivo registrado ausente: {path}", flush=True)
+            elif group["expected"] is not None:
+                print("Nenhum Parquet publicado encontrado nessa grade/raiz. "
+                      "Confira PREDICTIONS_ROOT contra OUT_ROOT do treino e consulte sacct; "
+                      "sair do squeue nao comprova sucesso.", flush=True)
     if plan["discovery"]["missing_groups"]:
         print(f"Treinos ainda sem cadastro: {plan['discovery']['missing_groups']}", flush=True)
     if args.dry_run:

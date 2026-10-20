@@ -298,6 +298,7 @@ def discover_composite_tasks(root, percentages, market, source_sha256):
         raise ValueError("Cortes de treino vazios/invalidos/duplicados.")
     discovery = {"root": str(root), "requested_train": sorted(percentages), "manifests": {}, "groups": []}
     tasks = []
+    unpublished_candidates = {}
     for pct in sorted(percentages):
         group = root/f"treino={pct}"/"experimento=composto"
         config_path, done_path = group/"run_config.json", group/"completed_tasks.csv"
@@ -312,6 +313,10 @@ def discover_composite_tasks(root, percentages, market, source_sha256):
         discovery["manifests"][str(config_path)] = sha
         cfg, meta, cut, hmax = _validate_config(plan, pct, market, source_sha256, config_path)
         expected = _expected_tasks(cfg, pct)
+        unpublished_candidates[pct] = {t["training_array_index"]: t["relpath"] for t in expected}
+        info.update(losses=list(cfg["cross_losses"]),
+                    cross_mask=cfg["loss"].get("loss_cross_mask")
+                    if set(cfg["cross_losses"]) & _PROXIMITY else None)
         indexed = {t["training_array_index"]: t for t in expected}
         info.update(status="MISSING_REGISTRY", design_sha256=plan["design_sha256"], hmax=hmax,
                     common_last_origin=market.n-hmax, expected=len(expected),
@@ -328,6 +333,7 @@ def discover_composite_tasks(root, percentages, market, source_sha256):
             if array_index in seen:
                 raise ValueError(f"Conclusao duplicada: array_index={array_index} em {done_path}")
             seen.add(array_index)
+            unpublished_candidates[pct].pop(array_index, None)
             if array_index not in indexed:
                 raise ValueError(f"Conclusao fora da grade/corte: array_index={array_index} em {done_path}")
             task = dict(indexed[array_index])
@@ -348,6 +354,15 @@ def discover_composite_tasks(root, percentages, market, source_sha256):
             info["available"] += 1
         info.update(status="READY", registered=len(rows), registered_missing=len(info["missing_paths"]),
                     awaiting_registration=len(expected)-len(rows), awaiting=len(expected)-info["available"])
+    # Only an empty group needs this extra metadata scan. Do not load matrices,
+    # hash files, or publish an orphan: registration remains the commit point.
+    for info in discovery["groups"]:
+        if info["available"] == 0 and info["expected"] is not None:
+            orphans = [str(root/path/"part.parquet")
+                       for path in unpublished_candidates[info["treino"]].values()
+                       if (root/path/"part.parquet").is_file()]
+            info["unregistered_parquets"] = len(orphans)
+            info["unregistered_examples"] = orphans[:3]
     for name in ("expected", "registered", "available", "awaiting_registration", "registered_missing", "awaiting"):
         discovery[name] = sum(g[name] or 0 for g in discovery["groups"])
     discovery["missing_groups"] = [g["treino"] for g in discovery["groups"] if g["expected"] is None]

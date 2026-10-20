@@ -21,6 +21,42 @@ LOSSES = ('hinge', 'ranknet', 'pairwise_mse', 'listnet',
           'hinge_proximity', 'ranknet_proximity', 'pairwise_mse_proximity')
 
 
+@pytest.mark.parametrize('state', ['empty', 'orphan', 'missing_registry', 'missing_parquet'])
+def test_empty_plan_explains_publication_state_without_accepting_orphans(tmp_path, state):
+    f = make_composite_fixture(tmp_path, losses=('hinge_proximity',),
+                               cross_mask=['uniform', .025], available_indices=())
+    group = f.root/'treino=50'/'experimento=composto'
+    if state != 'empty':
+        row = publish_composite_task(f, 0, register=state == 'missing_parquet')
+        if state == 'missing_parquet':
+            (Path(row['output_dir'])/'part.parquet').unlink()
+        elif state == 'missing_registry':
+            (group/'completed_tasks.csv').unlink()
+    tasks, info = discover(f)
+    assert tasks == []
+    detail = info['groups'][0]
+    assert detail['unregistered_parquets'] == int(state in ('orphan', 'missing_registry'))
+    assert detail['registered_missing'] == int(state == 'missing_parquet')
+    assert detail['losses'] == ['hinge_proximity']
+    assert detail['cross_mask'] == ['uniform', .025]
+    before = {str(p): (p.read_bytes(), p.stat().st_mtime_ns)
+              for p in f.root.rglob('*') if p.is_file()}
+    run = tmp_path/'diagnostic_run'
+    result = cli(*prepare_args(f, run), '--dry-run')
+    assert not run.exists()
+    assert str(f.root) in result.stdout and str(group/'completed_tasks.csv') in result.stdout
+    assert 'hinge_proximity' in result.stdout and 'uniform' in result.stdout
+    if state in ('orphan', 'missing_registry'):
+        assert '1 Parquets da grade ainda sem registro' in result.stdout
+    elif state == 'missing_parquet':
+        assert 'registradas_sem_arquivo=1' in result.stdout
+        assert 'Arquivo registrado ausente' in result.stdout
+    else:
+        assert 'consulte sacct' in result.stdout
+    assert before == {str(p): (p.read_bytes(), p.stat().st_mtime_ns)
+                      for p in f.root.rglob('*') if p.is_file()}
+
+
 @pytest.mark.parametrize('mask', [['uniform', 0], ['uniform', .025], ['gaussian', .025],
                                   ['gaussian', .02500000001]])
 def test_grid_and_paths_match_training_without_delta_duplicates(tmp_path, mask):
