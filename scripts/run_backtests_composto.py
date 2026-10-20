@@ -8,6 +8,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import traceback
 
 sys.dont_write_bytecode = True
 for key in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
@@ -77,6 +78,8 @@ if __name__ == "__main__":
     try:
         resume_frozen_run()
     except (ValueError, OSError, KeyError, TypeError) as error:
+        if isinstance(error, OSError):
+            traceback.print_exc(file=sys.stderr)
         print(f"ERRO: {error}", file=sys.stderr, flush=True)
         raise SystemExit(1) from error
     sys.path.insert(0, str(Path(__file__).resolve().parent))

@@ -1,5 +1,6 @@
 import argparse
 import sys
+import traceback
 
 from .pipeline import prepare, run_tasks
 
@@ -36,6 +37,8 @@ def main():
     try:
         status = prepare(args) if args.command == "prepare" else run_tasks(args)
     except (ValueError, OSError, KeyError) as error:
+        if isinstance(error, OSError):
+            traceback.print_exc(file=sys.stderr)
         print(f"ERRO: {error}", file=sys.stderr, flush=True)
         raise SystemExit(1) from error
     raise SystemExit(status or 0)
