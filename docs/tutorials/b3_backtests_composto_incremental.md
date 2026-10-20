@@ -39,8 +39,10 @@ Padrões pedidos para esta etapa:
 | Ks de avaliação | `K_EVAL_VALUES="1 5 10 15 20 25"` |
 | Custos e slippage | zero bps por ponta |
 
-`TIME_LIMIT`, `PARTITION`, `WORKERS`, `MEMORY`, `N_LOTES`, `TRAIN_VALUES` e
-`K_EVAL_VALUES` podem ser definidos no ambiente. O script sem argumento só
+O launcher fixa `PARTITION=gorgonas_dev` e `TIME_LIMIT=01:30:00`, mesmo que
+essas variáveis tenham outros valores exportados na sessão. `WORKERS`,
+`MEMORY`, `N_LOTES`, `TRAIN_VALUES` e `K_EVAL_VALUES` podem ser definidos
+no ambiente. O script sem argumento só
 planeja. `submeter`, `piloto` e `consolidar` devolvem JobID e caminhos dos logs.
 O identificador é **`COMPOSITE_RUN_ID`**: o `RUN_ID` usado pelo temporal/VAR
 não seleciona esta execução por acidente.
@@ -136,7 +138,8 @@ Para um ID existente, o launcher recupera do contrato `PREDICTIONS_ROOT`, mercad
 retornos, estratégias, Ks, custos e slippage; valores dessas variáveis no ambiente
 não substituem o contrato. `TRAIN_VALUES`, quando explicitamente definido, ainda
 permite incluir novos cortes; se omitido, usa os cortes do plano salvo. Recursos
-Slurm (`WORKERS`, partição, memória, tempo e lotes) continuam configuráveis.
+Slurm (`WORKERS`, memória e lotes) continuam configuráveis; a partição fica
+fixa em `gorgonas_dev`, com limite de `01:30:00`.
 
 ```bash
 export COMPOSITE_RUN_ID=composto_abertura_fechamento_s0_c0_cdi_v1

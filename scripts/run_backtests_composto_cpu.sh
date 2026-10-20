@@ -21,8 +21,9 @@ COST_BPS="${COST_BPS:-0}"
 WORKERS="${WORKERS:-16}"
 N_LOTES="${N_LOTES:-1}"  # Ate tres nos; WORKERS processos independentes por no.
 MEMORY="${MEMORY:-56G}"
-TIME_LIMIT="${TIME_LIMIT:-01:30:00}"
-PARTITION="${PARTITION:-gorgonas_dev}"
+# Destino fixo do backtest; nao herdar particao/tempo de sessoes de treinamento.
+TIME_LIMIT="01:30:00"
+PARTITION="gorgonas_dev"
 
 ACTION="${1:-planejar}"
 if [[ $# -gt 1 || ! "$ACTION" =~ ^(planejar|piloto|submeter|consolidar)$ ]]; then
