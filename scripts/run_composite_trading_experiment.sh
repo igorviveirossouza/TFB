@@ -23,6 +23,7 @@ LOOKBACKS=(32 128 256)
 HORIZONS=(1 5 10 15 20 25)
 
 NUM_EPOCHS=100
+BATCH_SIZE=32
 PATIENCE=10
 LEARNING_RATE=0.0001
 TEMPORAL_LOSS="mse"
@@ -69,14 +70,14 @@ LOSS_TRACK_COMPONENTS=true
 # lr, num_epochs, patience, seq_len e pred_len vêm das variáveis acima.
 # Os campos restantes herdam os defaults dos adaptadores do TFB.
 # -----------------------------------------------------------------------------
-MODEL_DEFAULTS_JSON=$(cat <<'JSON'
+MODEL_DEFAULTS_JSON=$(cat <<JSON
 {
-  "DUET": {"CI": 1, "batch_size": 32, "d_ff": 32, "d_model": 32, "dropout": 0.5, "e_layers": 1, "factor": 3, "fc_dropout": 0.2, "hidden_size": 256, "k": 1, "lradj": "type1", "n_heads": 2, "norm": true, "num_experts": 4, "patch_len": 48},
-  "TimesNet": {"batch_size": 32, "d_ff": 512, "d_model": 256, "factor": 3, "norm": true, "top_k": 5},
-  "FEDformer": {"batch_size": 32, "d_ff": 512, "d_model": 256, "factor": 3, "norm": true},
-  "Nonstationary_Transformer": {"d_ff": 256, "d_model": 128, "dropout": 0.1, "factor": 3, "norm": true, "p_hidden_dims": [32, 32], "p_hidden_layers": 2},
-  "simpleFORMER": {"d_model": 512, "e_layers": 2, "d_ff": 2048, "n_heads": 8, "temporal_hidden_dim": 0, "dropout": 0.1, "norm": true, "use_norm": true, "norm_eps": 1e-05, "batch_size": 32, "lradj": "type1"},
-  "simpleMLP": {"d_model": 512, "e_layers": 2, "d_ff": 2048, "n_heads": 8, "temporal_hidden_dim": 0, "dropout": 0.1, "norm": true, "use_norm": true, "norm_eps": 1e-05, "batch_size": 32, "lradj": "type1"}
+  "DUET": {"CI": 1, "batch_size": ${BATCH_SIZE}, "d_ff": 32, "d_model": 32, "dropout": 0.5, "e_layers": 1, "factor": 3, "fc_dropout": 0.2, "hidden_size": 256, "k": 1, "lradj": "type1", "n_heads": 2, "norm": true, "num_experts": 4, "patch_len": 48},
+  "TimesNet": {"batch_size": ${BATCH_SIZE}, "d_ff": 512, "d_model": 256, "factor": 3, "norm": true, "top_k": 5},
+  "FEDformer": {"batch_size": ${BATCH_SIZE}, "d_ff": 512, "d_model": 256, "factor": 3, "norm": true},
+  "Nonstationary_Transformer": {"batch_size": ${BATCH_SIZE}, "d_ff": 256, "d_model": 128, "dropout": 0.1, "factor": 3, "norm": true, "p_hidden_dims": [32, 32], "p_hidden_layers": 2},
+  "simpleFORMER": {"d_model": 512, "e_layers": 2, "d_ff": 2048, "n_heads": 8, "temporal_hidden_dim": 0, "dropout": 0.1, "norm": true, "use_norm": true, "norm_eps": 1e-05, "batch_size": ${BATCH_SIZE}, "lradj": "type1"},
+  "simpleMLP": {"d_model": 512, "e_layers": 2, "d_ff": 2048, "n_heads": 8, "temporal_hidden_dim": 0, "dropout": 0.1, "norm": true, "use_norm": true, "norm_eps": 1e-05, "batch_size": ${BATCH_SIZE}, "lradj": "type1"}
 }
 JSON
 )
