@@ -4,6 +4,13 @@
 # Use: bash scripts/run_composite_trading_experiment.sh --dry-run
 set -euo pipefail
 
+# -----------------------------------------------------------------------------
+# Modo de execução:
+# temporal	- Treinamento com a loss temporal, sem o componente cross-sectional
+# composto	- Treinamento com loss temporal mais componente cross-sectional
+# var	      - Execução do baseline VAR.
+# -----------------------------------------------------------------------------
+
 EXPERIMENT="composto"
 
 # -----------------------------------------------------------------------------
