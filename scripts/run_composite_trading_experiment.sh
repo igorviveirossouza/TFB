@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+#SBATCH --exclude=medusa5
 # Edite a grade, os hiperparâmetros e o cluster diretamente neste arquivo.
 # Use: bash scripts/run_composite_trading_experiment.sh --dry-run
 set -euo pipefail
@@ -8,7 +9,8 @@ EXPERIMENT="composto"
 # -----------------------------------------------------------------------------
 # GRADE E TREINAMENTO — edite aqui
 # -----------------------------------------------------------------------------
-TRAIN_PERCENTAGES=(70 80 90)
+#TRAIN_PERCENTAGES=(70 80 90)
+TRAIN_PERCENTAGES=(80)
 MODELS=(DUET Nonstationary_Transformer FEDformer TimesNet simpleFORMER simpleMLP)
 LOOKBACKS=(32 128 256)
 HORIZONS=(1 5 10 15 20 25)
@@ -24,10 +26,14 @@ NUM_ROLLINGS=48000
 
 # Apenas K <= H e H % K == 0 (16 pares na grade padrão).
 # DELTAS varia em ranknet, hinge e pairwise_mse; ListNet roda uma vez por combinação.
-TRADE_WINDOWS=(1 5 10 15 20 25)
-CROSS_LOSSES=(ranknet hinge listnet pairwise_mse)
+#TRADE_WINDOWS=(1 5 10 15 20 25)
+
+TRADE_WINDOWS=(1)
+CROSS_LOSSES=(hinge_proximity ranknet_proximity pairwise_mse_proximity)
+#CROSS_LOSSES=(ranknet hinge listnet pairwise_mse)
 LAMBDAS=(0.1 0.5 0.8)
-DELTAS=(0 0.025 0.05 0.1)
+#DELTAS=(0 0.025 0.05 0.1)
+DELTAS=(0)
 
 # Novas losses opcionais: hinge_proximity, ranknet_proximity, pairwise_mse_proximity.
 # Para executar apenas as novas, substitua CROSS_LOSSES acima por:
@@ -36,7 +42,8 @@ DELTAS=(0 0.025 0.05 0.1)
 # uniform: |R_i-R_j| <= a (a >= 0); gaussian: exp(-gap²/(2a²)) (a > 0).
 # Empates entram nas novas losses; DELTAS não as multiplica nem as filtra.
 # Cada execução usa este único par; mude o vetor para comparar outra máscara/a.
-CROSS_MASK=(uniform 0.025)   # Alternativa: CROSS_MASK=(gaussian 0.025)
+
+CROSS_MASK=(gaussian 0.025)   # Alternativa: CROSS_MASK=(gaussian 0.025)
 
 CROSS_SCALE=1
 RANKNET_ALPHA=1
@@ -71,20 +78,26 @@ JSON
 # CAMINHOS E CLUSTER — edite estes valores neste próprio script
 # -----------------------------------------------------------------------------
 TFB_ROOT="${TFB_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+RUN_TAG="composto_${CROSS_MASK[0]}_a${CROSS_MASK[1]}_k1_t80_v1"
+
+
 VENV_PATH="${VENV_PATH:-/sonic_home/igor.viveiros/py310/bin/activate}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 DATASET_PATH="${DATASET_PATH:-$TFB_ROOT/dataset/forecasting/b3_daily_tfb_new.csv}"
 export SOURCE_DATA_KIND="${SOURCE_DATA_KIND:-log_return}"  # log_return: base nova já corrigida; price: calcular diff(log(P))
-OUT_ROOT="${OUT_ROOT:-/snfs2/igor.viveiros/previsoes/novas_previsoes}"
-RESULT_ROOT="${RESULT_ROOT:-/snfs2/igor.viveiros/result/b3_new}"
-LOG_ROOT="${LOG_ROOT:-$TFB_ROOT/logs/b3_new}"
 
-PARTITION="${PARTITION:-medusas_dev}"    # Partição do Slurm
+
+OUT_ROOT="/snfs2/igor.viveiros/previsoes/${RUN_TAG}"
+RESULT_ROOT="/snfs2/igor.viveiros/result/${RUN_TAG}"
+LOG_ROOT="$TFB_ROOT/logs/${RUN_TAG}"
+
+
+PARTITION="${PARTITION:-gorgonas}"    # Partição do Slurm
 # GPU: valor passado literalmente a sbatch --gres (ex.: gpu:1 ou gpu:<tipo>:1).
 # O tipo deve existir no cluster; vazio = não solicitar GPU.
 # Não fixe CUDA_VISIBLE_DEVICES: preserve a GPU alocada pelo Slurm.
-GRES="${GRES-gpu:1}"
-TIME_LIMIT="${TIME_LIMIT:-08:00:00}"     # Tempo máximo por job
+GRES="${GRES-gpu:0}"
+TIME_LIMIT="${TIME_LIMIT:-01:30:00}"     # Tempo máximo por job
 NODELIST="${NODELIST:-}"                # Ex.: medusa3; vazio = Slurm escolhe
 CPUS_PER_TASK="${CPUS_PER_TASK:-3}"
 MEMORY="${MEMORY:-}"                    # Ex.: 16G; vazio = padrão da partição
