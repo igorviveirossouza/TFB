@@ -11,37 +11,37 @@ set -euo pipefail
 # var	      - Execução do baseline VAR.
 # -----------------------------------------------------------------------------
 
-EXPERIMENT="composto"
+EXPERIMENT="${EXPERIMENT:-composto}"
 
 # -----------------------------------------------------------------------------
 # GRADE E TREINAMENTO — edite aqui
 # -----------------------------------------------------------------------------
 #TRAIN_PERCENTAGES=(70 80 90)
-TRAIN_PERCENTAGES=(80)
-MODELS=(DUET Nonstationary_Transformer FEDformer TimesNet simpleFORMER simpleMLP)
-LOOKBACKS=(32 128 256)
-HORIZONS=(1 5 10 15 20 25)
+read -r -a TRAIN_PERCENTAGES <<< "${TRAIN_PERCENTAGES[*]:-80}"
+read -r -a MODELS <<< "${MODELS[*]:-DUET Nonstationary_Transformer FEDformer TimesNet simpleFORMER simpleMLP}"
+read -r -a LOOKBACKS <<< "${LOOKBACKS[*]:-32 128 256}"
+read -r -a HORIZONS <<< "${HORIZONS[*]:-1 5 10 15 20 25}"
 
-NUM_EPOCHS=100
-BATCH_SIZE=32
-PATIENCE=10
-LEARNING_RATE=0.0001
-TEMPORAL_LOSS="mse"
-TRAIN_RATIO_IN_TV=0.875   # Validação = 12,5% do bloco anterior ao teste
-SEED=2026
-STRIDE=1
-NUM_ROLLINGS=48000
+NUM_EPOCHS="${NUM_EPOCHS:-100}"
+BATCH_SIZE="${BATCH_SIZE:-32}"
+PATIENCE="${PATIENCE:-10}"
+LEARNING_RATE="${LEARNING_RATE:-0.0001}"
+TEMPORAL_LOSS="${TEMPORAL_LOSS:-mse}"
+TRAIN_RATIO_IN_TV="${TRAIN_RATIO_IN_TV:-0.875}"   # Validação = 12,5% do bloco anterior ao teste
+SEED="${SEED:-2026}"
+STRIDE="${STRIDE:-1}"
+NUM_ROLLINGS="${NUM_ROLLINGS:-48000}"
 
 # Apenas K <= H e H % K == 0 (16 pares na grade padrão).
 # DELTAS varia em ranknet, hinge e pairwise_mse; ListNet roda uma vez por combinação.
 #TRADE_WINDOWS=(1 5 10 15 20 25)
 
-TRADE_WINDOWS=(1)
-CROSS_LOSSES=(hinge_proximity ranknet_proximity pairwise_mse_proximity)
+read -r -a TRADE_WINDOWS <<< "${TRADE_WINDOWS[*]:-1}"
+read -r -a CROSS_LOSSES <<< "${CROSS_LOSSES[*]:-hinge_proximity ranknet_proximity pairwise_mse_proximity}"
 #CROSS_LOSSES=(ranknet hinge listnet pairwise_mse)
-LAMBDAS=(0.1 0.5 0.8)
+read -r -a LAMBDAS <<< "${LAMBDAS[*]:-0.1 0.5 0.8}"
 #DELTAS=(0 0.025 0.05 0.1)
-DELTAS=(0)
+read -r -a DELTAS <<< "${DELTAS[*]:-0}"
 
 # Novas losses opcionais: hinge_proximity, ranknet_proximity, pairwise_mse_proximity.
 # Para executar apenas as novas, substitua CROSS_LOSSES acima por:
@@ -51,16 +51,16 @@ DELTAS=(0)
 # Empates entram nas novas losses; DELTAS não as multiplica nem as filtra.
 # Cada execução usa este único par; mude o vetor para comparar outra máscara/a.
 
-CROSS_MASK=(gaussian 0.025)   # Alternativa: CROSS_MASK=(gaussian 0.025)
+read -r -a CROSS_MASK <<< "${CROSS_MASK[*]:-gaussian 0.025}"   # Alternativa: CROSS_MASK=(gaussian 0.025)
 
-CROSS_SCALE=1
-RANKNET_ALPHA=1
-LISTNET_TAU=1
-HINGE_MARGIN=0.1
-SCORE_KIND="simple_return"
-CROSS_SCORE_NORMALIZATION="zscore"
-LOSS_INVERSE_NORM=true
-LOSS_TRACK_COMPONENTS=true
+CROSS_SCALE="${CROSS_SCALE:-1}"
+RANKNET_ALPHA="${RANKNET_ALPHA:-1}"
+LISTNET_TAU="${LISTNET_TAU:-1}"
+HINGE_MARGIN="${HINGE_MARGIN:-0.1}"
+SCORE_KIND="${SCORE_KIND:-simple_return}"
+CROSS_SCORE_NORMALIZATION="${CROSS_SCORE_NORMALIZATION:-zscore}"
+LOSS_INVERSE_NORM="${LOSS_INVERSE_NORM:-true}"
+LOSS_TRACK_COMPONENTS="${LOSS_TRACK_COMPONENTS:-true}"
 # Todos os H passos ficam cobertos por blocos completos de K.
 # ListNet não usa delta: pasta/auditoria usam delta=0 e delta_effective=False.
 # Grade padrão: 33.696 tarefas (10.368 por loss de pares; 2.592 para ListNet).
@@ -86,7 +86,7 @@ JSON
 # CAMINHOS E CLUSTER — edite estes valores neste próprio script
 # -----------------------------------------------------------------------------
 TFB_ROOT="${TFB_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
-RUN_TAG="composto_${CROSS_MASK[0]}_a${CROSS_MASK[1]}_k1_t80_v1"
+export RUN_TAG="${RUN_TAG:-composto_${CROSS_MASK[0]}_a${CROSS_MASK[1]}_k1_t80_v1}"
 
 
 VENV_PATH="${VENV_PATH:-/sonic_home/igor.viveiros/py310/bin/activate}"

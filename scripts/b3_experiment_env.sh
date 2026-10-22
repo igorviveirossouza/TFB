@@ -13,6 +13,10 @@ if [[ -f "$VENV_PATH" ]]; then
 fi
 cd "$TFB_ROOT"
 
+if [[ "${1:-}" == worker && -n "${B3_INLINE_CONFIG:-}" ]]; then
+  return
+fi
+
 # Campos sem uso em um experimento recebem apenas valores internos neutros.
 if [[ "$EXPERIMENT" == "var" ]]; then
   MODELS=(VAR); LOOKBACKS=("$VAR_LAGS")
