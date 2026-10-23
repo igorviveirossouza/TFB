@@ -134,7 +134,7 @@ def test_k_does_not_change_temporal_or_var_models(config):
         assert before == after
         assert all(t['k'] is None for t in before)
         assert [experiment.model_spec(config, t) for t in before] == [experiment.model_spec(modified, t) for t in after]
-    assert len(experiment.make_tasks(config, 'var')) == 3
+    assert len(experiment.make_tasks(config, 'var')) == len(config['train_percentages'])
 
 
 def test_var_fits_once_per_cut_and_exports_all_six_horizons(config, tmp_path, monkeypatch):

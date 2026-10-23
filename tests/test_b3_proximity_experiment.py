@@ -88,9 +88,11 @@ def test_legacy_config_preserves_task_ids_paths_and_hyperparameters(config, monk
         assert "loss_cross_mask" not in experiment.model_spec(changed, new)[1]
 
 
-def test_default_does_not_expand_existing_grid(shell_config):
-    assert shell_config["cross_losses"] == ["ranknet", "hinge", "listnet", "pairwise_mse"]
-    assert len(experiment.make_tasks(shell_config, "composto")) == 33696
+def test_original_grid_counts_remain_unchanged(shell_config):
+    config = copy.deepcopy(shell_config)
+    config.update(train_percentages=[70, 80, 90], trade_windows=[1, 5, 10, 15, 20, 25],
+                  cross_losses=list(ORIGINAL), deltas=[0, .025, .05, .1])
+    assert len(experiment.make_tasks(config, "composto")) == 33696
 
 
 @pytest.mark.parametrize("mask", [
@@ -99,6 +101,8 @@ def test_default_does_not_expand_existing_grid(shell_config):
     ["gaussian", 0], ["gaussian", -.1], ["uniform", float("nan")],
     ["uniform", float("inf")], ["gaussian", float("-inf")],
     ["uniform", True], ["uniform", "abc"],
+    ["cauchy", 0], ["cauchy", -.1], ["gaussian", .1, "inverse"],
+    ["uniform", .1, "natural", "extra"],
 ])
 def test_bad_mask_fails_before_any_training(config, monkeypatch, mask):
     config["loss"]["loss_cross_mask"] = mask
@@ -112,7 +116,9 @@ def test_missing_mask_for_new_loss_is_rejected(config, monkeypatch):
         load_inline(config, monkeypatch)
 
 
-@pytest.mark.parametrize("mask", [["uniform", 0], ["uniform", .025], ["gaussian", .025]])
+@pytest.mark.parametrize("mask", [["uniform", 0], ["uniform", .025], ["gaussian", .025],
+                                  ["cauchy", .025], ["cauchy", .025, "complementary"],
+                                  ["uniform", 0, "complementary"]])
 def test_valid_masks_are_accepted(config, monkeypatch, mask):
     config["loss"]["loss_cross_mask"] = mask
     loaded = load_inline(config, monkeypatch)
@@ -122,7 +128,7 @@ def test_valid_masks_are_accepted(config, monkeypatch, mask):
 def test_paths_preserve_mask_identity_even_for_adjacent_float_values(config):
     config["cross_losses"] = ["hinge_proximity"]
     paths = []
-    for mode in ("uniform", "gaussian"):
+    for mode in ("uniform", "gaussian", "cauchy"):
         for radius in (.025, math.nextafter(.025, math.inf)):
             config["loss"]["loss_cross_mask"] = [mode, radius]
             task = experiment.make_tasks(config, "composto")[0]
@@ -131,10 +137,34 @@ def test_paths_preserve_mask_identity_even_for_adjacent_float_values(config):
             assert f"mask={mode}" in path.parts
             assert float(next(p[2:] for p in path.parts if p.startswith("a="))) == radius
             paths.append(path)
-    assert len(set(paths)) == 4
+    assert len(set(paths)) == 6
 
 
-def test_mixed_audit_rows_have_consistent_mask_columns(config, tmp_path):
+@pytest.mark.parametrize("kernel", ["uniform", "gaussian", "cauchy"])
+def test_natural_is_legacy_identity_and_complementary_has_distinct_paths(config, monkeypatch, kernel):
+    config["cross_losses"] = list(PROXIMITY)
+    config["loss"]["loss_cross_mask"] = [kernel, .025]
+    legacy = load_inline(config, monkeypatch)
+    old_tasks = experiment.make_tasks(legacy, "composto")
+    config["loss"]["loss_cross_mask"].append("natural")
+    natural = load_inline(config, monkeypatch)
+    assert natural == legacy
+    assert experiment.make_tasks(natural, "composto") == old_tasks
+    config["loss"]["loss_cross_mask"][-1] = "complementary"
+    complementary = load_inline(config, monkeypatch)
+    new_tasks = experiment.make_tasks(complementary, "composto")
+    for old, new in zip(old_tasks, new_tasks):
+        assert "mask_mode" not in old
+        assert new["mask_mode"] == "complementary"
+        assert experiment.output_path(old) != experiment.output_path(new)
+        assert "mask_mode=complementary" in experiment.output_path(new).parts
+        assert experiment.model_spec(legacy, old)[1]["loss_cross_mask"] == [kernel, .025]
+        assert experiment.model_spec(complementary, new)[1]["loss_cross_mask"] == [kernel, .025, "complementary"]
+
+
+@pytest.mark.parametrize("mask_mode", ["natural", "complementary"])
+def test_mixed_audit_rows_have_consistent_mask_columns(config, tmp_path, mask_mode):
+    config["loss"]["loss_cross_mask"].append(mask_mode)
     tasks = experiment.make_tasks(config, "composto")
     metadata = dict(n_rows=1000, source="synthetic.csv", source_data_kind="log_return",
                     step_offset=0, source_sha256="source", dataset_sha256="dataset", n_assets=3)
@@ -147,10 +177,13 @@ def test_mixed_audit_rows_have_consistent_mask_columns(config, tmp_path):
         if task["loss"] in PROXIMITY:
             assert row["mask_type"] == "uniform" and float(row["mask_a"]) == .025
             assert row["mask_effective"] == "True" and row["delta_effective"] == "False"
+            assert row["mask_mode"] == mask_mode
             assert float(row["cross_delta"]) == 0
-            assert hyper["loss_cross_mask"] == ["uniform", .025]
+            assert hyper["loss_cross_mask"] == (["uniform", .025] if mask_mode == "natural"
+                                                else ["uniform", .025, mask_mode])
         else:
             assert row["mask_type"] == row["mask_a"] == ""
+            assert row["mask_mode"] == ""
             assert row["mask_effective"] == "False"
             assert "loss_cross_mask" not in hyper
 
@@ -161,7 +194,8 @@ def editable_launcher(tmp_path, mask):
                   HORIZONS="5", TRADE_WINDOWS="5", LAMBDAS="0.5",
                   CROSS_LOSSES=" ".join(PROXIMITY), CROSS_MASK=mask)
     for name, value in arrays.items():
-        content, count = re.subn(rf"^{name}=\([^\n]*\)", f"{name}=({value})", content, flags=re.MULTILINE)
+        content, count = re.subn(rf"^(?:{name}=\([^\n]*\)|read -r -a {name} <<< [^\n]*)",
+                                f"{name}=({value})", content, flags=re.MULTILINE)
         assert count == 1, f"editable {name} vector is missing or ambiguous"
     script = tmp_path / "composite.sh"
     script.write_text(content)
@@ -176,25 +210,29 @@ def editable_launcher(tmp_path, mask):
     return script, env, marker
 
 
-@pytest.mark.parametrize("mode", ["uniform", "gaussian"])
-def test_shell_vector_reaches_inspection_and_dry_run_without_submission(tmp_path, mode):
-    script, env, marker = editable_launcher(tmp_path, f"{mode} 0.01234567890123456")
+@pytest.mark.parametrize("mode", ["uniform", "gaussian", "cauchy"])
+@pytest.mark.parametrize("mask_mode", ["", "natural", "complementary"])
+def test_shell_vector_reaches_inspection_and_dry_run_without_submission(tmp_path, mode, mask_mode):
+    script, env, marker = editable_launcher(tmp_path, f"{mode} 0.01234567890123456 {mask_mode}")
+    expected = [mode, .01234567890123456] + ([mask_mode] if mask_mode == "complementary" else [])
     command = ["bash", str(script)]
     printed = subprocess.run(command + ["--print-config"], env=env, check=True, capture_output=True, text=True)
-    assert json.loads(printed.stdout)["loss"]["loss_cross_mask"] == [mode, .01234567890123456]
+    assert json.loads(printed.stdout)["loss"]["loss_cross_mask"] == expected
     for index, loss in enumerate(PROXIMITY):
         shown = subprocess.run(command + ["--task", str(index)], env=env, check=True, capture_output=True, text=True)
         task = json.loads(shown.stdout)
         assert task["loss"] == loss and task["cross_delta"] == 0
-        assert task["model_spec"][1]["loss_cross_mask"] == [mode, .01234567890123456]
+        assert task["model_spec"][1]["loss_cross_mask"] == expected
         assert f"mask={mode}" in Path(task["output_dir"]).parts
+        assert ("mask_mode=complementary" in Path(task["output_dir"]).parts) == (mask_mode == "complementary")
     preview = subprocess.run(command + ["--dry-run"], env=env, check=True, capture_output=True, text=True)
     assert "3 tarefas" in preview.stdout
     assert not marker.exists()
     assert not any((tmp_path / name).exists() for name in ("out", "results", "logs"))
 
 
-@pytest.mark.parametrize("mask", ["uniform", "uniform 0.1 0.2", "gaussian 0", "uniform nan"])
+@pytest.mark.parametrize("mask", ["uniform", "uniform 0.1 0.2", "gaussian 0", "uniform nan",
+                                  "cauchy 0", "gaussian .1 complementary extra", "cauchy .1 inverse"])
 def test_invalid_shell_vector_fails_without_submission_or_outputs(tmp_path, mask):
     script, env, marker = editable_launcher(tmp_path, mask)
     result = subprocess.run(["bash", str(script), "--dry-run"], env=env, capture_output=True, text=True)
@@ -202,18 +240,36 @@ def test_invalid_shell_vector_fails_without_submission_or_outputs(tmp_path, mask
     assert not marker.exists() and not (tmp_path / "out").exists()
 
 
-@pytest.mark.parametrize("mode", ["uniform", "gaussian"])
+@pytest.mark.parametrize("mask_mode", ["natural", "complementary"])
+def test_environment_mask_mode_reaches_model_and_automatic_run_tag(tmp_path, mask_mode):
+    env = dict(PATH=os.environ["PATH"], TFB_ROOT=str(REPO), PYTHON_BIN=sys.executable,
+               VENV_PATH=str(tmp_path / "no-venv"), CROSS_MASK=f"cauchy 0.025 {mask_mode}")
+    result = subprocess.run(
+        ["bash", str(REPO / "scripts/run_composite_trading_experiment.sh"), "--task", "0"],
+        env=env, check=True, capture_output=True, text=True,
+    )
+    task = json.loads(result.stdout)
+    suffix = "_complementary" if mask_mode == "complementary" else ""
+    assert f"composto_cauchy_a0.025{suffix}_k1_t80_v1" in Path(task["output_dir"]).parts
+    expected = ["cauchy", .025] + ([mask_mode] if suffix else [])
+    assert task["model_spec"][1]["loss_cross_mask"] == expected
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("mode", ["uniform", "gaussian", "cauchy"])
+@pytest.mark.parametrize("mask_mode", ["natural", "complementary"])
 @pytest.mark.parametrize("loss_name", PROXIMITY)
-def test_serialized_benchmark_hyperparameters_build_the_intended_loss(config, tmp_path, mode, loss_name):
+def test_serialized_benchmark_hyperparameters_build_the_intended_loss(config, tmp_path, mode, mask_mode, loss_name):
     torch = pytest.importorskip("torch")
     from ts_benchmark.baselines.composite_trading_loss_v3 import build_loss
 
     config.update(cross_losses=[loss_name], horizons=[1], trade_windows=[1])
-    config["loss"].update(loss_cross_mask=[mode, .025], loss_cross_score_normalization="none")
+    config["loss"].update(loss_cross_mask=[mode, .025, mask_mode], loss_cross_score_normalization="none")
     task = experiment.make_tasks(config, "composto")[0]
     command = experiment.benchmark_command(config, task, "synthetic.csv", 1000, tmp_path)
     hyper = json.loads(command[command.index("--model-hyper-params") + 1])
-    assert hyper["loss_cross"] == loss_name and hyper["loss_cross_mask"] == [mode, .025]
+    expected_mask = [mode, .025] + ([mask_mode] if mask_mode == "complementary" else [])
+    assert hyper["loss_cross"] == loss_name and hyper["loss_cross_mask"] == expected_mask
     criterion = build_loss(SimpleNamespace(**hyper), normalizer_mean=[0]*3, normalizer_scale=[1]*3)
     pred_returns, true_returns = [.03, -.01, .1], [.01, .01, .04]
     pred = torch.tensor([[[math.log1p(x) for x in pred_returns]]], dtype=torch.float64, requires_grad=True)
@@ -223,7 +279,14 @@ def test_serialized_benchmark_hyperparameters_build_the_intended_loss(config, tm
         for j in range(i + 1, 3):
             predicted_gap = pred_returns[i] - pred_returns[j]
             gap = true_returns[i] - true_returns[j]
-            weight = float(abs(gap) <= .025) if mode == "uniform" else math.exp(-gap**2 / (2*.025**2))
+            if mode == "uniform":
+                weight = float(abs(gap) <= .025)
+            elif mode == "gaussian":
+                weight = math.exp(-gap**2 / (2*.025**2))
+            else:
+                weight = 1 / (1 + (gap / .025)**2)
+            if mask_mode == "complementary":
+                weight = 1 - weight
             sign = 0 if gap == 0 else (1 if gap > 0 else -1)
             if loss_name == "hinge_proximity":
                 value = abs(predicted_gap) if sign == 0 else max(0., hyper["loss_hinge_margin"] - sign * predicted_gap)

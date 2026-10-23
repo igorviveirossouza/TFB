@@ -15,6 +15,7 @@ level/scale before the cross-sectional objective.
 """
 from __future__ import annotations
 
+import math
 from typing import Optional, Tuple
 
 import torch
@@ -227,11 +228,12 @@ class CompositeTradingLossV3(CompositeTradingLossV2):
         pred_raw: torch.Tensor,
         target_raw: torch.Tensor,
     ) -> torch.Tensor:
-        """Proximity-weighted pairs, including exact realized-score ties.
+        """Natural/complementary weighted pairs from realized financial gaps.
 
         Normalize weights independently within each [N]-asset cross-section,
-        then average its loss over batch elements and trading blocks. A uniform
-        mask with no eligible pair contributes a differentiable zero. This
+        then average its loss over batch elements and trading blocks. A mask
+        with no eligible pair contributes a differentiable zero. Natural masks
+        include ties; complementary masks give ties exactly zero weight. This
         intentionally does not use V2's tie-excluding pair validity helper.
 
         As in the original V3, optional z-scoring couples all asset scores:
@@ -251,10 +253,12 @@ class CompositeTradingLossV3(CompositeTradingLossV2):
         realized = target_raw.to(torch.float64)
         realized_diff = realized[:, rows] - realized[:, cols]
         gap = realized_diff.abs()
-        mask_name, bandwidth = self.cross_mask
+        mask_name, bandwidth = self.cross_mask[:2]
+        mode = self.cross_mask[2] if len(self.cross_mask) == 3 else "natural"
         if mask_name == "uniform":
-            weights = (gap <= bandwidth).to(pred_raw.dtype)
-        else:
+            eligible = gap <= bandwidth if mode == "natural" else gap > bandwidth
+            weights = eligible.to(pred_raw.dtype)
+        elif mask_name == "gaussian" and mode == "natural":
             # exp(log(w) - max(log(w))) cancels in the weighted mean. Compute
             # differences of squares in factored form so every closest pair
             # has weight 1 even when ALL original Gaussian weights underflow.
@@ -271,6 +275,31 @@ class CompositeTradingLossV3(CompositeTradingLossV2):
                 relative_energy,
             )
             weights = torch.exp(-relative_energy).to(pred_raw.dtype)
+        else:
+            log_ratio_squared = 2.0 * (gap.log() - math.log(bandwidth))
+            if mask_name == "cauchy":
+                # Natural: 1/(1+r²). Complementary: r²/(1+r²).
+                # Log-space sigmoid identities avoid overflow and preserve
+                # relative weights even when all absolute weights underflow.
+                log_weights = -F.softplus(
+                    log_ratio_squared if mode == "natural" else -log_ratio_squared
+                )
+            else:
+                # Complement the ORIGINAL Gaussian, never its row-rescaled
+                # natural weights: w=1-exp(-x), x=r²/2. expm1 preserves small
+                # positive weights; log(w)~log(x) below machine precision also
+                # handles x too small to be represented even in float64.
+                log_energy = log_ratio_squared - math.log(2.0)
+                log_weights = torch.where(
+                    log_energy < -36.0,
+                    log_energy,
+                    (-torch.expm1(-torch.exp(log_energy))).log(),
+                )
+            maximum = log_weights.amax(dim=1, keepdim=True)
+            # All exact ties in complementary mode: log weights are -inf.
+            # A finite shift preserves their zeros without an inf-inf NaN.
+            shift = torch.where(torch.isfinite(maximum), maximum, torch.zeros_like(maximum))
+            weights = torch.exp(log_weights - shift).to(pred_raw.dtype)
 
         pred, target = self._normalize_cross_scores(pred_raw, target_raw)
         pred_diff = pred[:, rows] - pred[:, cols]
@@ -292,8 +321,9 @@ class CompositeTradingLossV3(CompositeTradingLossV2):
         else:
             values = (pred_diff - target_diff).square()
 
-        # At least one Gaussian weight is exactly 1. For uniform masks only,
-        # an empty section has numerator 0 and denominator clamped to 1.
+        # Every nonempty section has maximum weight 1 after rescaling. Empty
+        # sections have numerator 0 and denominator clamped to 1. Rescaling
+        # cancels in the weighted mean, with no floor on any original weight.
         denominator = weights.sum(dim=1).clamp_min(1.0)
         return ((weights * values).sum(dim=1) / denominator).mean()
 

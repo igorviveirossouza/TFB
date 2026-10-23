@@ -189,14 +189,19 @@ filtros, grade padrão e caminhos. Para executar somente as novas, edite:
 
 ```bash
 CROSS_LOSSES=(hinge_proximity ranknet_proximity pairwise_mse_proximity)
-CROSS_MASK=(uniform 0.025)
+CROSS_MASK=(uniform 0.025 natural)
 # Para outra execução, troque o vetor por:
-# CROSS_MASK=(gaussian 0.025)
+# CROSS_MASK=(gaussian 0.025 natural)
+# CROSS_MASK=(cauchy 0.025 natural)
+# CROSS_MASK=(cauchy 0.025 complementary)
 ```
 
-`CROSS_MASK` é um vetor de dois elementos: nome da máscara e largura `a`.
-Ele chega aos adaptadores como `loss_cross_mask=["uniform", 0.025]` (ou
-`["gaussian", 0.025]`). Cada execução usa um único vetor, comum às variantes
+`CROSS_MASK` recebe nome da máscara, largura `a` e modo (`natural` ou
+`complementary`). O vetor antigo de dois elementos continua válido e significa
+`natural`. Para preservar a identidade dos experimentos anteriores, o modo
+natural é serializado como `loss_cross_mask=["uniform", 0.025]`; o complementar,
+como `["uniform", 0.025, "complementary"]`.
+Cada execução usa um único vetor, comum às variantes
 novas selecionadas. `a` é medido na escala do score realizado antes do z-score:
 com `SCORE_KIND=simple_return`, `0.025` representa 2,5 pontos percentuais do
 retorno acumulado em K passos. Não é uma margem nos escores padronizados.
@@ -207,6 +212,14 @@ Para cada par distinto de ativos `i < j`, seja `gap = R_i - R_j`:
 | --- | --- | --- |
 | `uniform` | `1` se `abs(gap) <= a`, senão `0` | `a >= 0`; zero seleciona somente empates exatos |
 | `gaussian` | `exp(-gap² / (2a²))` | `a > 0`; peso máximo nos empates e decrescente com a distância |
+| `cauchy` | `1 / (1 + (gap/a)²)` | `a > 0`; caudas mais pesadas que a gaussiana |
+
+A tabela mostra os pesos do modo `natural`. O modo `complementary` usa
+`1 - peso_natural`, antes da normalização, em qualquer um dos três kernels.
+Na uniforme, isso seleciona `abs(gap) > a`; na gaussiana e na Cauchy, o peso
+cresce suavemente com a distância. Os complementos valem zero nos empates;
+não há piso adicional. Na Cauchy, `a` é a distância de peso natural `0.5`;
+na gaussiana, essa distância é aproximadamente `1.177*a`.
 
 Os pesos dependem somente dos retornos realizados. A gaussiana é normalizada
 de forma numericamente estável: subtrair o maior log-peso de cada cross-section
@@ -222,8 +235,9 @@ Com `d = z_i - z_j`, `d_hat = z_hat_i - z_hat_j` e `s = sign(gap)`, os termos s�
 | `ranknet_proximity` | `softplus(-RANKNET_ALPHA*s*d_hat)` | Entropia cruzada com alvo `0.5` e logit `RANKNET_ALPHA*d_hat` |
 | `pairwise_mse_proximity` | `(d_hat - d)²` | `d_hat²` |
 
-Os empates são incluídos; não se utiliza a máscara antiga que excluía
-`gap == 0`. Pares próximos, mas não empatados, mantêm a supervisão de ordem
+No modo natural, os empates recebem peso positivo e os termos acima incentivam
+igualdade dos scores. No complementar, seu peso é zero e esse incentivo
+cross-sectional fica desligado. Pares próximos, mas não empatados, mantêm a supervisão de ordem
 nas variantes Hinge/RankNet. Na Pairwise MSE também há supervisão da distância.
 O mínimo da RankNet em um empate tem valor `log(2)` e ocorre em `d_hat=0`.
 
@@ -257,11 +271,22 @@ Os novos destinos incluem máscara e largura, sem reutilizar saídas originais:
 treino=70/experimento=composto/loss=hinge_proximity/lambda=0.1/delta=0/mask=uniform/a=0.025/modelo=DUET/lookback=32/pred_len=5/k_dir=5/part.parquet
 ```
 
-`mask_type`, `mask_a` e `mask_effective` ficam na auditoria. Para as losses
+O modo natural conserva esse caminho; o complementar acrescenta
+`mask_mode=complementary/` após `a=.../`. O `RUN_TAG` automático também recebe
+o sufixo `_complementary` antes de `_k1_t80_v1`; um `RUN_TAG` informado pelo
+usuário é respeitado. Pelo terminal, por exemplo:
+
+```bash
+CROSS_MASK="cauchy 0.025 complementary" \
+RUN_TAG=composto_cauchy_a0025_complementary_v1 \
+bash scripts/run_composite_trading_experiment.sh --dry-run
+```
+
+`mask_type`, `mask_a`, `mask_mode` e `mask_effective` ficam na auditoria. Para as losses
 originais, os campos de máscara ficam vazios/inativos e `loss_cross_mask` não
 é encaminhado ao modelo. Configurações antigas sem esse vetor seguem válidas.
 
-**Use um `OUT_ROOT` novo para cada desenho/máscara/largura e após atualizar o
+**Use um `OUT_ROOT` novo para cada desenho/máscara/largura/modo e após atualizar o
 código.** A proteção existente de `run_config.json` rejeita dados, configuração
 ou código diferentes na mesma raiz preparada; os subdiretórios distintos não
 desativam essa verificação. Não atualize o checkout enquanto jobs preparados

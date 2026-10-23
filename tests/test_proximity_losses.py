@@ -23,6 +23,11 @@ from ts_benchmark.baselines.proximity_losses import (
 
 
 NAMES = tuple(PROXIMITY_LOSSES)
+MASKS = [
+    (kernel, bandwidth, mode)
+    for kernel, bandwidth in (("uniform", 0.125), ("gaussian", 0.25), ("cauchy", 0.25))
+    for mode in ("natural", "complementary")
+]
 
 
 def criterion(name, mask=("uniform", 0.125), **kwargs):
@@ -61,11 +66,17 @@ def oracle(pred, target, name, mask, normalization="none", delta=None):
                 gap = float(abs(raw_t[i] - raw_t[j]))
                 if delta is not None and gap <= delta:
                     continue
-                weight = (
-                    float(gap <= mask[1])
-                    if mask[0] == "uniform"
-                    else math.exp(-gap * gap / (2 * mask[1] ** 2))
-                )
+                mode = mask[2] if len(mask) == 3 else "natural"
+                if mask[0] == "uniform":
+                    weight = float(gap <= mask[1])
+                    if mode == "complementary":
+                        weight = 1.0 - weight
+                elif mask[0] == "gaussian":
+                    energy = gap * gap / (2 * mask[1] ** 2)
+                    weight = math.exp(-energy) if mode == "natural" else -math.expm1(-energy)
+                else:
+                    ratio_squared = (gap / mask[1]) ** 2
+                    weight = (1.0 if mode == "natural" else ratio_squared) / (1.0 + ratio_squared)
                 sign = float(torch.sign(raw_t[i] - raw_t[j]))
                 difference = p[i] - p[j]
                 base_name = PROXIMITY_LOSSES.get(name, name)
@@ -100,6 +111,12 @@ def oracle(pred, target, name, mask, normalization="none", delta=None):
     (["uniform", 0], ("uniform", 0.0)),
     ((" Gaussian ", 0.025), ("gaussian", 0.025)),
     (["uniform", 2], ("uniform", 2.0)),
+    (["uniform", 2, "natural"], ("uniform", 2.0)),
+    (["gaussian", 0.1, " Natural "], ("gaussian", 0.1)),
+    (["cauchy", 0.1], ("cauchy", 0.1)),
+    (["cauchy", 0.1, "natural"], ("cauchy", 0.1)),
+    ([" Cauchy ", 0.1, " COMPLEMENTARY "], ("cauchy", 0.1, "complementary")),
+    (["uniform", 0, "complementary"], ("uniform", 0.0, "complementary")),
 ])
 def test_mask_validation_canonicalizes(value, expected):
     assert validate_cross_mask(value) == expected
@@ -111,6 +128,10 @@ def test_mask_validation_canonicalizes(value, expected):
     ["uniform", "0.1"], ["uniform", None], ["uniform", float("nan")],
     ["gaussian", float("inf")], ["uniform", -0.1], ["gaussian", 0],
     ["uniform", 10 ** 400], {"uniform": 0.1},
+    ["cauchy", 0], ["cauchy", -1], ["cauchy", float("nan")],
+    ["cauchy", True], ["cauchy", 0.1, None], ["cauchy", 0.1, True],
+    ["gaussian", 0.1, "complement"], ["cauchy", 0.1, "inverse"],
+    ["uniform", 0.1, "natural", 0], ["gaussian", 0.1, ""],
 ])
 def test_mask_validation_rejects_malformed(value):
     with pytest.raises(ValueError, match="loss_cross_mask"):
@@ -118,7 +139,7 @@ def test_mask_validation_rejects_malformed(value):
 
 
 @pytest.mark.parametrize("name", NAMES)
-@pytest.mark.parametrize("mask", [("uniform", 0.125), ("gaussian", 0.25)])
+@pytest.mark.parametrize("mask", MASKS)
 @pytest.mark.parametrize("normalization", ["none", "zscore"])
 def test_values_and_gradients_match_explicit_pair_oracle(name, mask, normalization):
     p = torch.tensor([
@@ -243,6 +264,96 @@ def test_gaussian_extreme_float32_financial_scales_stay_finite():
 
 
 @pytest.mark.parametrize("name", NAMES)
+@pytest.mark.parametrize("mask", [mask for mask in MASKS if mask[2] == "natural"])
+def test_two_field_and_explicit_natural_forms_are_identical(name, mask):
+    p = torch.tensor([[[0.3, -0.2, 0.4]]], dtype=torch.float64, requires_grad=True)
+    t = torch.tensor([[[0.0, 0.125, 0.5]]], dtype=torch.float64)
+    old_form, explicit = criterion(name, mask[:2]), criterion(name, mask)
+    assert old_form.cross_mask == explicit.cross_mask == mask[:2]
+    old_loss, new_loss = old_form._cross_loss(p, t), explicit._cross_loss(p, t)
+    torch.testing.assert_close(old_loss, new_loss, atol=0, rtol=0)
+    old_grad, = torch.autograd.grad(old_loss, p, retain_graph=True)
+    new_grad, = torch.autograd.grad(new_loss, p)
+    torch.testing.assert_close(old_grad, new_grad, atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("name", NAMES)
+@pytest.mark.parametrize("kernel", ["uniform", "gaussian", "cauchy"])
+def test_complementary_exact_ties_have_zero_value_and_gradient(name, kernel):
+    p = torch.tensor([[[0.2, -0.1, 0.4]]], dtype=torch.float64, requires_grad=True)
+    t = torch.full_like(p, 0.1)
+    value = criterion(name, (kernel, 0.1, "complementary"))._cross_loss(p, t)
+    assert value.item() == 0
+    value.backward()
+    torch.testing.assert_close(p.grad, torch.zeros_like(p))
+
+
+@pytest.mark.parametrize("name", NAMES)
+def test_uniform_complement_excludes_exact_boundary(name):
+    p = torch.tensor([[[0.3, -0.1]]], dtype=torch.float64, requires_grad=True)
+    t = torch.tensor([[[0.0, 0.125]]], dtype=torch.float64)
+    loss = criterion(name, ("uniform", 0.125, "complementary"))._cross_loss(p, t)
+    assert loss.item() == 0
+    loss.backward()
+    torch.testing.assert_close(p.grad, torch.zeros_like(p))
+
+
+@pytest.mark.parametrize("kernel", ["gaussian", "cauchy"])
+def test_complementary_tiny_positive_weights_remain_normalized(kernel):
+    # Direct squaring of gap/a underflows to zero. Relative weights still
+    # exist and converge to squared gaps: [1, 9, 4] for pairs 01, 02, 12.
+    p = torch.tensor([[[0.2, 0.0, 0.6]]], dtype=torch.float64, requires_grad=True)
+    t = torch.tensor([[[0.0, 1.0, 3.0]]], dtype=torch.float64)
+    actual = criterion("ranknet_proximity", (kernel, 1e300, "complementary"))._cross_loss(p, t)
+    differences = torch.stack([p[0, 0, 0] - p[0, 0, 1],
+                               p[0, 0, 0] - p[0, 0, 2],
+                               p[0, 0, 1] - p[0, 0, 2]])
+    expected = (F.softplus(1.7 * differences) * torch.tensor([1., 9., 4.])).sum() / 14
+    torch.testing.assert_close(actual, expected)
+    actual_grad, = torch.autograd.grad(actual, p, retain_graph=True)
+    expected_grad, = torch.autograd.grad(expected, p)
+    torch.testing.assert_close(actual_grad, expected_grad)
+
+
+@pytest.mark.parametrize("bandwidth", [1e-100, 1e-300, 5e-324])
+def test_cauchy_natural_keeps_relative_weights_when_all_absolute_weights_underflow(bandwidth):
+    p = torch.tensor([[[0.2, 0.0, 0.6]]], dtype=torch.float64, requires_grad=True)
+    t = torch.tensor([[[0.0, 1.0, 3.0]]], dtype=torch.float64)
+    actual = criterion("ranknet_proximity", ("cauchy", bandwidth))._cross_loss(p, t)
+    differences = torch.stack([p[0, 0, 0] - p[0, 0, 1],
+                               p[0, 0, 0] - p[0, 0, 2],
+                               p[0, 0, 1] - p[0, 0, 2]])
+    weights = torch.tensor([1., 1 / 9, 1 / 4], dtype=torch.float64)
+    expected = (F.softplus(1.7 * differences) * weights).sum() / weights.sum()
+    torch.testing.assert_close(actual, expected)
+    actual.backward()
+    assert torch.isfinite(p.grad).all()
+
+
+@pytest.mark.parametrize("kernel", ["gaussian", "cauchy"])
+@pytest.mark.parametrize("bandwidth", [1e-300, 1e300])
+def test_complementary_extreme_float32_scale_has_finite_value_and_gradient(kernel, bandwidth):
+    p = torch.tensor([[[0.2, 0.0, 0.6]]], requires_grad=True)
+    t = torch.tensor([[[-3e38, 0.0, 3e38]]])
+    value = criterion("ranknet_proximity", (kernel, bandwidth, "complementary"))._cross_loss(p, t)
+    assert torch.isfinite(value)
+    assert value > 0
+    value.backward()
+    assert torch.isfinite(p.grad).all()
+
+
+@pytest.mark.parametrize("kernel", ["gaussian", "cauchy"])
+def test_complementary_weights_zero_ties_before_row_normalization(kernel):
+    p = torch.tensor([[[0.7, -0.3, 0.1]]], dtype=torch.float64, requires_grad=True)
+    t = torch.tensor([[[0.0, 0.0, 0.01]]], dtype=torch.float64)
+    # Only two nontied pairs have equal positive (very tiny) weights.
+    actual = criterion("ranknet_proximity", (kernel, 1e300, "complementary"))._cross_loss(p, t)
+    expected = (F.softplus(1.7 * (p[0, 0, 0] - p[0, 0, 2]))
+                + F.softplus(1.7 * (p[0, 0, 1] - p[0, 0, 2]))) / 2
+    torch.testing.assert_close(actual, expected)
+
+
+@pytest.mark.parametrize("name", NAMES)
 def test_blocks_are_averaged_equally_even_with_empty_or_differently_sized_masks(name):
     p = torch.tensor([[[0.2, 0.1, 0.4], [0.0, 0.2, 0.8], [0.1, 0.5, -0.5]]], dtype=torch.float64)
     t = torch.tensor([[[0.0, 0.0, 0.1], [0.0, 0.0, 1.0], [0.0, 1.0, 2.0]]], dtype=torch.float64)
@@ -271,14 +382,15 @@ def test_v2_registry_is_not_modified():
 
 
 @pytest.mark.parametrize("name", NAMES)
-def test_factory_requires_and_passes_mask(name):
+@pytest.mark.parametrize("mask", MASKS)
+def test_factory_requires_and_passes_mask(name, mask):
     config = SimpleNamespace(loss="composite_trading", loss_trade_window=1, loss_cross=name)
     with pytest.raises(ValueError, match="loss_cross_mask"):
         build_loss(config)
-    config.loss_cross_mask = ["gaussian", 0.05]
+    config.loss_cross_mask = list(mask)
     built = build_loss(config)
     assert built.cross_loss_name == name
-    assert built.cross_mask == ("gaussian", 0.05)
+    assert built.cross_mask == validate_cross_mask(mask)
 
 
 @pytest.mark.parametrize("name", NAMES)

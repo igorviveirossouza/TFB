@@ -21,7 +21,7 @@ from backtest_cpu.io import digest, json_digest, load_bundle, load_strategies, r
 from backtest_cpu.pipeline import atomic_json, locked, runtime_versions, setup_runtime, storage_path, valid_result
 from .io import discover_composite_tasks, load_composite_predictions
 
-VERSION = "2026-10-19-composto-proximity-v2"
+VERSION = "2026-10-23-composto-kernel-modes-v3"
 _PLAN = None
 _MARKET = None
 SUMMARY_NAMES = ("metricas", "ic_resumo", "ic_acumulado_resumo", "falhas")
@@ -243,6 +243,7 @@ def with_meta(frame, task, plan):
                    "delta_effective": (task["delta_effective"], pa.bool_()),
                    "mask_type": (task.get("mask_type"), pa.string()),
                    "mask_a": (task.get("mask_a"), pa.float64()),
+                   "mask_mode": (task.get("mask_mode", "natural") if "mask_type" in task else None, pa.string()),
                    "mask_effective": ("mask_type" in task, pa.bool_()),
                    "k_loss": (task["k_dir"], pa.int64()), "task_id": (task["id"], pa.int64()),
                    "seed": (task.get("seed"), pa.int64()),
@@ -389,6 +390,7 @@ def consolidate(run):
                         statuses.append({"task_id": task["id"], "status": label,
                                          **{k: task[k] for k in ("treino", "modelo", "lookback", "pred_len", "loss", "lambda", "delta", "k_dir")},
                                          "mask_type": task.get("mask_type"), "mask_a": task.get("mask_a"),
+                                         "mask_mode": task.get("mask_mode", "natural") if "mask_type" in task else None,
                                          "mask_effective": "mask_type" in task,
                                          "seconds": result.get("seconds"), "erro": result.get("erro", "")})
             for name, parts in frames.items():
@@ -396,7 +398,7 @@ def consolidate(run):
                 if parts:
                     table = pd.concat(populated, ignore_index=True) if populated else parts[0].iloc[:0]
                     table.to_parquet(stage/f"{name}.parquet", index=False, compression="snappy")
-            pd.DataFrame(statuses, columns=["task_id", "status", "treino", "modelo", "lookback", "pred_len", "loss", "lambda", "delta", "k_dir", "mask_type", "mask_a", "mask_effective", "seconds", "erro"]).to_csv(stage/"status_tarefas.csv", index=False)
+            pd.DataFrame(statuses, columns=["task_id", "status", "treino", "modelo", "lookback", "pred_len", "loss", "lambda", "delta", "k_dir", "mask_type", "mask_a", "mask_mode", "mask_effective", "seconds", "erro"]).to_csv(stage/"status_tarefas.csv", index=False)
             counts = {s: sum(x["status"] == s for x in statuses) for s in ("COMPLETA", "PARCIAL", "ERRO", "PENDENTE")}
             state = {"signature": plan["signature"], "contract_signature": plan["contract_signature"],
                      "total": len(statuses), **counts,

@@ -50,12 +50,13 @@ read -r -a DELTAS <<< "${DELTAS[*]:-0}"
 # Novas losses opcionais: hinge_proximity, ranknet_proximity, pairwise_mse_proximity.
 # Para executar apenas as novas, substitua CROSS_LOSSES acima por:
 # CROSS_LOSSES=(hinge_proximity ranknet_proximity pairwise_mse_proximity)
-# Vetor: primeiro elemento = máscara; segundo = a, na escala do score realizado.
+# Vetor: máscara, a (escala do score realizado), modo natural/complementary.
 # uniform: |R_i-R_j| <= a (a >= 0); gaussian: exp(-gap²/(2a²)) (a > 0).
-# Empates entram nas novas losses; DELTAS não as multiplica nem as filtra.
-# Cada execução usa este único par; mude o vetor para comparar outra máscara/a.
+# cauchy: 1/(1+(gap/a)²) (a > 0); complementary usa 1-peso e zera empates.
+# Dois elementos continuam válidos: modo natural. DELTAS não filtra essas losses.
+# Cada execução usa um único vetor; mude-o para comparar outra máscara/a/modo.
 
-read -r -a CROSS_MASK <<< "${CROSS_MASK[*]:-gaussian 0.025}"   # Alternativa: CROSS_MASK=(gaussian 0.025)
+read -r -a CROSS_MASK <<< "${CROSS_MASK[*]:-gaussian 0.025 natural}"   # Ex.: CROSS_MASK=(cauchy 0.025 complementary)
 
 CROSS_SCALE="${CROSS_SCALE:-1}"
 RANKNET_ALPHA="${RANKNET_ALPHA:-1}"
@@ -90,7 +91,11 @@ JSON
 # CAMINHOS E CLUSTER — edite estes valores neste próprio script
 # -----------------------------------------------------------------------------
 TFB_ROOT="${TFB_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
-export RUN_TAG="${RUN_TAG:-composto_${CROSS_MASK[0]}_a${CROSS_MASK[1]}_k1_t80_v1}"
+MASK_MODE_TAG=""
+if [[ "${CROSS_MASK[2]:-natural}" != natural ]]; then
+  MASK_MODE_TAG="_${CROSS_MASK[2]}"
+fi
+export RUN_TAG="${RUN_TAG:-composto_${CROSS_MASK[0]}_a${CROSS_MASK[1]}${MASK_MODE_TAG}_k1_t80_v1}"
 
 
 VENV_PATH="${VENV_PATH:-/sonic_home/igor.viveiros/py310/bin/activate}"

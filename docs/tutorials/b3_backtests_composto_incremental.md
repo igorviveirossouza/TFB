@@ -150,8 +150,11 @@ bash scripts/run_backtests_composto_cpu.sh submeter
 ### Execução separada das novas losses de proximidade
 
 O treinamento usa `hinge_proximity`, `ranknet_proximity` e
-`pairwise_mse_proximity`, com `CROSS_MASK=(uniform 0.025)` ou
-`CROSS_MASK=(gaussian 0.025)`. Use outro `OUT_ROOT` no treinamento e aponte
+`pairwise_mse_proximity`, com `CROSS_MASK=(uniform 0.025 natural)`,
+`CROSS_MASK=(gaussian 0.025 natural)` ou `CROSS_MASK=(cauchy 0.025 natural)`.
+O terceiro elemento também aceita `complementary`, para usar `1-peso` e dar
+mais peso aos pares distantes. Vetores antigos de dois elementos significam
+`natural`. Use outro `OUT_ROOT` no treinamento e aponte
 `PREDICTIONS_ROOT` para essa raiz no backtest. Escolha um **novo**
 `COMPOSITE_RUN_ID`; não reutilize o contrato antigo para esse desenho.
 
@@ -169,7 +172,9 @@ A descoberta lê tipo de máscara e `a` do desenho de treinamento; não é preci
 repeti-los no launcher do backtest. As novas losses têm `delta=0` inativo, sem
 repetir tarefas pelo vetor `DELTAS`. Seus caminhos incluem `mask=<tipo>/a=<valor>`.
 As tabelas de ICs, carteiras, posições, métricas, falhas e o status das tarefas
-preservam `mask_type`, `mask_a` e `mask_effective`. Nas losses originais de um
+preservam `mask_type`, `mask_a`, `mask_mode` e `mask_effective`. Registros antigos
+de proximidade sem `mask_mode` são interpretados como `natural`; contratos já
+preparados continuam usando seu snapshot. Nas losses originais de um
 contrato novo, os dois primeiros campos são nulos e o último é falso. Contratos
 antigos mantêm seu schema original. A fusão entre execuções fica para a análise
 local em R; IDs de tarefa são locais a cada execução.

@@ -30,18 +30,23 @@ _LOSSES = {"ranknet", "hinge", "listnet", "pairwise_mse"} | _PROXIMITY
 def _cross_mask(cfg):
     """Mirror the producer's mask contract in the self-contained CPU snapshot."""
     value = cfg["loss"].get("loss_cross_mask")
-    if not isinstance(value, (list, tuple)) or len(value) != 2:
-        raise ValueError("loss_cross_mask deve ser [tipo, a].")
-    name, bandwidth = value
-    if not isinstance(name, str) or name.strip().lower() not in {"uniform", "gaussian"}:
+    if not isinstance(value, (list, tuple)) or len(value) not in (2, 3):
+        raise ValueError("loss_cross_mask deve ser [tipo, a] ou [tipo, a, modo].")
+    name, bandwidth = value[:2]
+    mode = value[2] if len(value) == 3 else "natural"
+    if not isinstance(name, str) or name.strip().lower() not in {"uniform", "gaussian", "cauchy"}:
         raise ValueError("Tipo de loss_cross_mask invalido.")
     name = name.strip().lower()
+    if not isinstance(mode, str) or mode.strip().lower() not in {"natural", "complementary"}:
+        raise ValueError("Modo de loss_cross_mask invalido.")
+    mode = mode.strip().lower()
     if isinstance(bandwidth, bool) or not isinstance(bandwidth, Real):
         raise ValueError("a da mascara deve ser numerico e finito.")
     bandwidth = _number(bandwidth, "mask_a")
-    if bandwidth < 0 or (name == "gaussian" and bandwidth == 0):
-        raise ValueError("Mascara exige a >= 0 (uniform) ou a > 0 (gaussian).")
-    return name, bandwidth
+    if bandwidth < 0 or (name in {"gaussian", "cauchy"} and bandwidth == 0):
+        raise ValueError("Mascara exige a >= 0 (uniform) ou a > 0 (gaussian/cauchy).")
+    # Natural remains the original two-item identity, including explicit natural.
+    return (name, bandwidth) if mode == "natural" else (name, bandwidth, mode)
 
 
 def _sha(data):
@@ -168,6 +173,8 @@ def _expected_tasks(cfg, pct):
                                         "k_dir": k_dir, "delta_effective": loss != "listnet" and mask is None})
                     if mask is not None:
                         definitions[-1].update(mask_type=mask[0], mask_a=mask[1])
+                        if len(mask) == 3:
+                            definitions[-1]["mask_mode"] = mask[2]
     if not definitions:
         raise ValueError("Grade composta sem pares H/K de treino elegiveis.")
     offset = cfg["train_percentages"].index(pct)*len(definitions)
@@ -177,6 +184,8 @@ def _expected_tasks(cfg, pct):
                 /f"lambda={task['lambda']}"/f"delta={task['delta']}")
         if task["loss"] in _PROXIMITY:
             path = path/f"mask={task['mask_type']}"/f"a={task['mask_a']!r}"
+            if "mask_mode" in task:
+                path = path/f"mask_mode={task['mask_mode']}"
         task["relpath"] = str(path/f"modelo={task['modelo']}"/f"lookback={task['lookback']}"
                               /f"pred_len={task['pred_len']}"/f"k_dir={task['k_dir']}")
     if len({t["relpath"] for t in definitions}) != len(definitions):
@@ -220,9 +229,10 @@ def _validate_row(row, task, cfg, meta, plan, market, cut):
     if task["loss"] in _PROXIMITY:
         if (row.get("mask_type") != task["mask_type"]
                 or _number(row.get("mask_a"), "mask_a") != task["mask_a"]
+                or row.get("mask_mode", "natural") != task.get("mask_mode", "natural")
                 or row.get("mask_effective", "").lower() != "true"):
             raise ValueError(f"Mascara divergente na auditoria: {identity}")
-    elif (row.get("mask_type", "") or row.get("mask_a", "")
+    elif (row.get("mask_type", "") or row.get("mask_a", "") or row.get("mask_mode", "")
           or row.get("mask_effective", "false").lower() != "false"):
         raise ValueError(f"Mascara ativa para loss original: {identity}")
     horizon = task["pred_len"]
@@ -242,6 +252,8 @@ def _validate_row(row, task, cfg, meta, plan, market, cut):
     hyper.pop("loss_cross_mask", None)
     if task["loss"] in _PROXIMITY:
         hyper["loss_cross_mask"] = [task["mask_type"], task["mask_a"]]
+        if "mask_mode" in task:
+            hyper["loss_cross_mask"].append(task["mask_mode"])
     hyper.update(loss="composite_trading", loss_cross=task["loss"], loss_trade_window=task["k_dir"],
                  loss_cross_lambda=task["cross_lambda"], loss_cross_delta=task["cross_delta"])
     strategy = dict(cfg["strategy"])
