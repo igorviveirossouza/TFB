@@ -177,7 +177,7 @@ def coordinator_fixture(tmp_path, monkeypatch, blocked_tag=None, raw_tag=None):
         recovery.atomic_json(original / 'run_config.json', dict(git_commit='a' * 40, metadata=dict(dataset_sha256='b' * 64)))
         for name in ('completed_tasks.csv', 'design_composite_trading.csv'):
             (original / name).write_text('array_index\n')
-    monkeypatch.setattr(recovery, 'check_no_original_workers', lambda: None)
+    monkeypatch.setattr(recovery, 'check_no_original_workers', lambda roots: None)
     monkeypatch.setattr(recovery, 'verify_previous_submissions', lambda root: None)
     monkeypatch.setattr(recovery, 'create_snapshot', lambda *a: None)
     monkeypatch.setattr(recovery, 'materialize_dataset', lambda *a: None)
@@ -214,6 +214,18 @@ def test_coordinator_respects_cluster_max_array_size(monkeypatch, tmp_path):
     monkeypatch.setattr(recovery, 'submit_run', lambda run, state, size, resources: calls.append((run['run_tag'], size)) or [])
     assert recovery.coordinator(args) == 0
     assert calls == [('one', 500), ('two', 500)]
+
+
+def test_initial_block_reason_is_visible_in_coordinator_output(monkeypatch, tmp_path, capsys):
+    args = coordinator_fixture(tmp_path, monkeypatch)
+
+    def blocked(roots):
+        assert roots == [Path(args.out_base) / tag for tag in args.run_tag]
+        raise RuntimeError('conflito na grade selecionada: 71017_1')
+
+    monkeypatch.setattr(recovery, 'check_no_original_workers', blocked)
+    assert recovery.coordinator(args) == 2
+    assert 'BLOCKED: conflito na grade selecionada: 71017_1' in capsys.readouterr().out
 
 
 def test_coordinator_reports_partial_submission_and_journal_blocks_repeat(monkeypatch, tmp_path):

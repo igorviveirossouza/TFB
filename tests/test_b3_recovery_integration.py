@@ -77,8 +77,15 @@ def test_real_snapshot_audits_completed_output_and_resubmits_only_missing(tmp_pa
 
     binary = tmp_path / 'fake_slurm'
     binary.mkdir()
-    script(binary / 'squeue', 'exit 0\n')
-    script(binary / 'scontrol', "printf 'MaxArraySize = 1000\\n'\n")
+    # A parallel MASTER pilot shares the name b3_composto but belongs to a
+    # different output tree. It must not block recovery of the original grade.
+    script(binary / 'squeue', "printf '71017_1|b3_composto|RUNNING\\n'\n")
+    script(binary / 'scontrol', '''if [[ "$1" == --oneliner ]]; then
+  printf '%s\\n' 'JobId=71017_1 JobName=b3_composto JobState=RUNNING Command=/repo/scripts/run_master_experiment.sh --on-node composto worker --offset 0 StdOut=/repo/logs/master/pilot/composto/composto_71017_1.out StdErr=/repo/logs/master/pilot/composto/composto_71017_1.err'
+else
+  printf 'MaxArraySize = 1000\\n'
+fi
+''')
     script(binary / 'sbatch', 'printf "%s\\n" "$@" > "$RECOVERY_TEST_CAPTURE"\nprintf "1234;fixture\\n"\n')
     capture = tmp_path / 'sbatch_args'
     state = tmp_path / 'recovery_state'

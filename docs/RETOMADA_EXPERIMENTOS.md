@@ -68,6 +68,12 @@ isolado e a configuração original, com mapeamento explícito dos índices glob
 das tarefas. As saídas continuam nos diretórios originais, preservando os resultados
 já concluídos.
 
+Jobs de outras grades, inclusive do MASTER, podem continuar executando. Como
+todos podem usar o nome Slurm `b3_composto`, a recuperação identifica a grade
+pelo launcher e pelos caminhos de logs registrados no Slurm. Jobs ativos das
+grades selecionadas continuam bloqueando a retomada; uma identidade ambígua
+também bloqueia, indicando o job a inspecionar. Nenhum job é cancelado.
+
 Bloqueios encontrados na auditoria impedem todos os novos workers. Se o Slurm
 aceitar um array e falhar durante uma submissão posterior, o relatório recebe
 `SUBMISSION_INCOMPLETE` e mostra os registros de submissão, incluindo os IDs já

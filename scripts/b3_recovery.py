@@ -106,12 +106,92 @@ def raw_artifacts(result_root):
             for p in sorted(directory.rglob('*')) if p.is_file()]
 
 
-def check_no_original_workers():
-    rows = command_output(['squeue', '--me', '--noheader', '--format=%i|%j|%T'])
-    active = [line for line in rows.splitlines() if len(line.split('|')) == 3
-              and line.split('|')[1].strip() in {'b3_composto', 'composto'}]
-    if active:
-        raise RuntimeError('Ainda há jobs originais ativos; aguarde o encerramento: ' + '; '.join(active))
+def slurm_job_fields(details):
+    # scontrol --oneliner leaves command arguments and spaces in paths intact.
+    matches = list(re.finditer(r'(?:^|\s)([A-Za-z][A-Za-z0-9_]*)=', details))
+    fields = {}
+    for position, match in enumerate(matches):
+        key = match.group(1)
+        if key in fields:
+            raise ValueError('Resposta Slurm contém mais de um registro ou campo duplicado: ' + key)
+        end = matches[position + 1].start() if position + 1 < len(matches) else len(details)
+        fields[key] = details[match.end():end].strip()
+    return fields
+
+
+def original_job_scope(details, out_roots):
+    """Identify the run from its launcher and log paths, never the shared name.
+
+    The original composite launcher fixes both output and log paths from the
+    same RUN_TAG. MASTER uses a distinct launcher/log tree. Unrecognized layouts
+    remain blocked instead of being guessed safe.
+    """
+    fields = slurm_job_fields(details)
+    tags = {Path(root).name for root in out_roots}
+    logs = [Path(fields.get(key, '')) for key in ('StdOut', 'StdErr')]
+    if any(tags.intersection(path.parts) for path in logs):
+        return 'selected'
+    if (any(not path.is_absolute() for path in logs) or logs[0].parent != logs[1].parent
+            or not logs[0].name.startswith('composto_') or not logs[1].name.startswith('composto_')
+            or logs[0].suffix != '.out' or logs[1].suffix != '.err'):
+        return 'unknown'
+    try:
+        command = shlex.split(fields.get('Command', ''))
+    except ValueError:
+        return 'unknown'
+    if not command:
+        return 'unknown'
+    launcher = Path(command[0]).name
+    parent = logs[0].parent
+    if launcher == 'run_composite_trading_experiment.sh' and parent.parent.name == 'logs':
+        return 'unrelated'
+    if launcher == 'run_master_experiment.sh':
+        if any(p.name == 'master' and p.parent.name == 'logs' for p in [parent, *parent.parents]):
+            return 'unrelated'
+    return 'unknown'
+
+
+def original_workers_in_queue():
+    rows = command_output(['squeue', '--me', '--array', '--noheader', '--format=%i|%j|%T'])
+    active = []
+    for line in rows.splitlines():
+        columns = [part.strip() for part in line.split('|')]
+        if len(columns) != 3:
+            raise RuntimeError('Resposta de squeue não reconhecida: ' + line)
+        if columns[1] in {'b3_composto', 'composto'}:
+            active.append(columns)
+    return active
+
+
+def check_no_original_workers(out_roots):
+    conflicts, unknown = [], []
+    for job_id, name, state in original_workers_in_queue():
+        try:
+            details = command_output(['scontrol', '--oneliner', 'show', 'job', job_id])
+        except subprocess.CalledProcessError:
+            # The job may finish between squeue and scontrol. Confirm absence;
+            # an inspection failure for a still-active job cannot be ignored.
+            if job_id not in {row[0] for row in original_workers_in_queue()}:
+                continue
+            unknown.append(job_id)
+            continue
+        try:
+            fields = slurm_job_fields(details)
+            if fields.get('JobState') in TERMINAL:
+                continue
+            scope = original_job_scope(details, out_roots)
+        except ValueError:
+            scope = 'unknown'
+        if scope == 'selected':
+            conflicts.append(f'{job_id}|{name}|{state}')
+        elif scope == 'unknown':
+            unknown.append(job_id)
+    if conflicts:
+        raise RuntimeError('Ainda há jobs ativos nas grades selecionadas; preservar o trabalho em curso: '
+                           + '; '.join(conflicts))
+    if unknown:
+        raise RuntimeError('Não foi possível identificar a grade dos jobs ativos ' + ', '.join(unknown)
+                           + '. Inspecione: scontrol show job ' + unknown[0])
 
 
 def verify_previous_submissions(out_root):
@@ -264,8 +344,9 @@ def coordinator(args):
                   python=sys.executable, python_version=sys.version, resources=resources)
     report_path = state / 'report.json'
     atomic_json(report_path, report)
+    out_roots = [Path(args.out_base).resolve() / tag for tag in tags]
     try:
-        check_no_original_workers()
+        check_no_original_workers(out_roots)
         with ExitStack() as stack:
             # Serialize all coordinators for these roots, including audit-only.
             for tag in sorted(tags):
@@ -315,7 +396,7 @@ def coordinator(args):
             report['status'] = 'BLOCKED' if blocked else 'READY'
             atomic_json(report_path, report)
             if args.action == 'resume' and not blocked:
-                check_no_original_workers()
+                check_no_original_workers(out_roots)
                 settings = command_output(['scontrol', 'show', 'config'])
                 match = re.search(r'MaxArraySize\s*=\s*(\d+)', settings)
                 if not match:
@@ -339,6 +420,7 @@ def coordinator(args):
         else:
             report['status'] = 'BLOCKED'
         report['error'] = str(exc)
+        print(f'{report["status"]}: {exc}', flush=True)
     finally:
         atomic_json(report_path, report)
         print('Relatório: ' + str(report_path), flush=True)
