@@ -78,7 +78,8 @@
 
 **Experimentos B3 (branch `experiment/b3-loss-clean-v1`):**
 [treinamento e previsões](docs/tutorials/b3_main_experiments.md) ·
-[IC e backtests Python em CPU no servidor](docs/tutorials/b3_backtests_cpu.md).
+[IC e backtests Python em CPU no servidor](docs/tutorials/b3_backtests_cpu.md) ·
+[validação e carregamento dos dados MASTER](docs/tutorials/b3_master_data.md).
 O pós-processamento remoto usa `scripts/run_backtests_cpu.sh`; gráficos e
 tabelas em R ficam no repositório local `analise_resultados`.
 
