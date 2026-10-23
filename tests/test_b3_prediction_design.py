@@ -142,6 +142,9 @@ def test_var_fits_once_per_cut_and_exports_all_six_horizons(config, tmp_path, mo
     pytest.importorskip('pyarrow')
     from ts_benchmark.baselines.self_impl.VAR.VAR import VAR
     cfg = copy.deepcopy(config)
+    # This regression exercises three cuts independently of the launcher's
+    # editable production defaults (currently only 80%).
+    cfg['train_percentages'] = [70, 80, 90]
     # This fixture writes 401 prices and expects their 400 log-return differences;
     # the production launcher now defaults to already-computed log returns.
     cfg['source_data_kind'] = 'price'

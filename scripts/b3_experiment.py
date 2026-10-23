@@ -71,7 +71,7 @@ def load_config():
         raise ValueError('train_percentages: inteiros entre 1 e 99')
     if set(config['models']) - set(config['model_defaults']):
         raise ValueError('Modelo sem defaults de arquitetura')
-    if set(config['cross_losses']) - ({'ranknet', 'hinge', 'listnet', 'pairwise_mse'} | set(PROXIMITY_LOSSES)):
+    if set(config['cross_losses']) - ({'mse', 'bpr', 'ranknet', 'hinge', 'listnet', 'pairwise_mse'} | set(PROXIMITY_LOSSES)):
         raise ValueError('Loss cross não suportada nesta grade')
     if any(loss in PROXIMITY_LOSSES for loss in config['cross_losses']):
         config['loss']['loss_cross_mask'] = list(validate_cross_mask(
@@ -93,13 +93,14 @@ def load_config():
 def cross_deltas(config, loss):
     # ListNet and proximity losses have no pairwise dead zone. Keep one inactive delta
     # for paths/audits, independent of the editable DELTAS vector.
-    return [0] if loss == 'listnet' or loss in PROXIMITY_LOSSES else config['deltas']
+    return [0] if loss in {'mse', 'listnet'} or loss in PROXIMITY_LOSSES else config['deltas']
 
 
 def make_tasks(config, mode):
     tasks = []
     for pct in config['train_percentages']:
-        losses = config['cross_losses'] if mode == 'composto' else ['mse']
+        losses = (config['cross_losses'] if mode == 'composto' else
+                  [config['loss']['loss_temporal'] if mode == 'temporal' else 'mse'])
         lambdas = config['lambdas'] if mode == 'composto' else [0]
         models = config['models'] if mode != 'var' else ['VAR']
         lookbacks = config['lookbacks'] if mode != 'var' else [config['var_lags']]
@@ -165,6 +166,9 @@ def model_spec(config, task):
     hyper.update(loss='composite_trading' if task['experimento'] == 'composto' else config['loss']['loss_temporal'], loss_cross=task['loss'],
                  loss_trade_window=task['k'] or 1,
                  loss_cross_lambda=task['cross_lambda'], loss_cross_delta=task['cross_delta'])
+    if name == 'MASTER':
+        hyper['seed'] = config['strategy']['seed']
+        return 'master.MASTER', hyper, None, 'full'
     qualified = 'duet.DUET' if name == 'DUET' else f'time_series_library.{name}'
     adapter = None if name == 'DUET' else 'transformer_adapter'
     return qualified, hyper, adapter, 'efficient' if name == 'TimesNet' else 'full'
@@ -230,7 +234,7 @@ def audit_row(config, task, metadata, out_root, signature):
                 source_sha256=metadata['source_sha256'], dataset_sha256=metadata['dataset_sha256'],
                 n_assets=metadata['n_assets'], seed=config['strategy']['seed'],
                 temporal_loss=config['loss']['loss_temporal'],
-                delta_effective=task['experimento'] == 'composto' and task['loss'] != 'listnet' and task['loss'] not in PROXIMITY_LOSSES,
+                delta_effective=task['experimento'] == 'composto' and task['loss'] not in {'mse', 'listnet'} and task['loss'] not in PROXIMITY_LOSSES,
                 mask_type=task.get('mask_type', ''), mask_a=task.get('mask_a', ''),
                 mask_mode=task.get('mask_mode', 'natural') if task['loss'] in PROXIMITY_LOSSES else '',
                 mask_effective=task['loss'] in PROXIMITY_LOSSES,
@@ -252,8 +256,10 @@ def validate_lengths(config, tasks, metadata):
         max_windows = metadata['n_rows'] - split['n_pretest'] - min(config['horizons']) + 1 if task['modelo'] == 'VAR' else split['n_windows']
         if split['n_windows'] < 1 or max_windows > config['strategy']['num_rollings']:
             raise ValueError('Teste sem janelas ou NUM_ROLLINGS insuficiente para cobrir todo o teste')
-        if split['n_train'] < task['lookback'] + task['pred_len'] + 31:
-            raise ValueError('Treino insuficiente para contexto, horizonte e batch de 32')
+        # MASTER keeps partial batches (a sample contains the whole universe).
+        minimum = task['lookback'] + task['pred_len'] + (0 if task['modelo'] == 'MASTER' else 31)
+        if split['n_train'] < minimum:
+            raise ValueError('Treino insuficiente para contexto, horizonte e batch do modelo')
         if task['modelo'] != 'VAR' and split['n_validation'] < task['pred_len']:
             raise ValueError('Validação menor que o horizonte')
         if task['modelo'] == 'VAR':
@@ -290,11 +296,34 @@ def provenance(config, metadata):
                   'ts_benchmark/baselines/proximity_losses.py',
                   'ts_benchmark/baselines/self_impl/VAR/VAR.py',
                   'ts_benchmark/baselines/deep_forecasting_model_base.py']
-    return dict(config=config, source_sha256=metadata['source_sha256'],
+    master_data = None
+    if 'MASTER' in config['models']:
+        hyper = config['model_defaults']['MASTER']
+        source = Path(hyper['master_returns_path']).resolve()
+        if source != Path(metadata['source']).resolve():
+            raise ValueError('MASTER deve usar o mesmo painel bruto do desenho B3')
+        if config['source_data_kind'] != 'log_return':
+            raise ValueError('MASTER requer os log-retornos econômicos reconstruídos')
+        bundle = Path(hyper['master_bundle_dir']).resolve()
+        # Hash all exported files, not only the manifest: mutation of a feature
+        # file must invalidate a prepared design before a task can be skipped.
+        master_data = dict(returns_sha256=file_hash(source),
+                           bundle_sha256={p.name:file_hash(p) for p in sorted(bundle.iterdir()) if p.is_file()})
+        code_files += ['ts_benchmark/data/master.py', 'ts_benchmark/data/master_dataset.py',
+                       'scripts/run_master_experiment.sh',
+                       'ts_benchmark/baselines/custom_losses.py',
+                       'ts_benchmark/baselines/composite_trading_loss.py',
+                       'ts_benchmark/baselines/master/__init__.py',
+                       'ts_benchmark/baselines/master/network.py',
+                       'ts_benchmark/baselines/master/master.py']
+    result = dict(config=config, source_sha256=metadata['source_sha256'],
                 dataset_sha256=metadata['dataset_sha256'],
                 source_data_kind=metadata.get('source_data_kind', 'price'),
                 step_offset=metadata['step_offset'],
                 code_sha256={p:file_hash(ROOT / p) for p in code_files})
+    if master_data is not None:
+        result['master_data'] = master_data
+    return result
 
 
 def prepare(config_path, config, tasks, out_root):
@@ -306,6 +335,14 @@ def prepare(config_path, config, tasks, out_root):
         print(f"Entrada: {config['source_data_kind']}; {metadata['n_rows']} pregões de log-retornos, "
               f"{metadata['n_assets']} ativos; step inicial={metadata['step_offset']}.", flush=True)
         validate_lengths(config, tasks, metadata)
+        if 'MASTER' in config['models']:
+            from ts_benchmark.data.master import load_master_bundle
+            hyper = config['model_defaults']['MASTER']
+            load_master_bundle(hyper['master_bundle_dir'], hyper['master_returns_path'],
+                               asset_blocks=hyper.get('master_asset_blocks', ('retornos', 'ohlcv', 'atividade')),
+                               use_market=hyper.get('master_use_market', True),
+                               expected_assets=hyper.get('master_expected_assets'),
+                               expected_dates=hyper.get('master_expected_dates'))
         signature = digest(provenance(config, metadata))
         groups = sorted({group_path(t) for t in tasks})
         # Check every destination before writing any manifest.
@@ -330,8 +367,11 @@ def prepare(config_path, config, tasks, out_root):
     return metadata
 
 
-def benchmark_command(config, task, dataset, n_rows, result_dir):
+def benchmark_command(config, task, dataset, n_rows, result_dir, model_artifact_dir=None):
     model, hyper, adapter, deterministic = model_spec(config, task)
+    if task['modelo'] == 'MASTER' and model_artifact_dir is not None:
+        hyper.update(master_audit_path=str(model_artifact_dir / 'master_training.json'),
+                     master_checkpoint_path=str(model_artifact_dir / 'master_checkpoint.pt'))
     command = [sys.executable, str(ROOT / 'scripts/run_benchmark_composite_trading_loss_v3.py'),
                '--config-path', 'rolling_forecast_config.json', '--data-name-list', Path(dataset).name,
                '--strategy-args', json.dumps(strategy_args(config, task, n_rows)),
@@ -432,7 +472,7 @@ def worker(config, tasks, out_root, index):
             result_root = Path(os.environ.get('RESULT_ROOT', '/snfs2/igor.viveiros/result/b3_new'))
             result_root.mkdir(parents=True, exist_ok=True)
             with tempfile.TemporaryDirectory(prefix='task_', dir=result_root) as temporary:
-                command = benchmark_command(config, task, metadata['dataset'], len(panel), Path(temporary))
+                command = benchmark_command(config, task, metadata['dataset'], len(panel), Path(temporary), output)
                 print(f'TASK={index}: {output}', flush=True)
                 subprocess.run(command, cwd=ROOT, check=True)
                 export_predictions(Path(temporary), panel, split['n_pretest'], task['pred_len'], output,
@@ -471,7 +511,11 @@ def sbatch_command(mode, offset, count, previous=None):
         command.append(f'--gres={gres}')
     if previous:
         command += [f'--dependency=afterany:{previous}']
-    command += [str(ROOT/'scripts'/LAUNCHERS[mode]),'worker','--offset',str(offset)]
+    launcher = os.environ.get('B3_WORKER_LAUNCHER')
+    if launcher:
+        command += [launcher, '--on-node', mode, 'worker', '--offset', str(offset)]
+    else:
+        command += [str(ROOT/'scripts'/LAUNCHERS[mode]),'worker','--offset',str(offset)]
     return command
 
 

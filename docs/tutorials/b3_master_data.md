@@ -114,3 +114,6 @@ python -m pytest -q tests/test_master_data.py tests/test_b3_experiment_io.py
 ```
 
 Os testes locais usam dados sintéticos e verificam alinhamento, integridade, CSV/Parquet, ausência de vazamento temporal e preservação das origens. A conferência dos 55 ativos reais deve ser executada no cluster pelos comandos acima.
+
+Após validar o bundle, siga [MASTER multihorizonte no experimento B3](b3_master_model.md)
+para o teste de treinamento no Slurm, as losses e as ablations do modelo.

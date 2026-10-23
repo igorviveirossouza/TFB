@@ -80,6 +80,8 @@
 [treinamento e previsões](docs/tutorials/b3_main_experiments.md) ·
 [IC e backtests Python em CPU no servidor](docs/tutorials/b3_backtests_cpu.md) ·
 [validação e carregamento dos dados MASTER](docs/tutorials/b3_master_data.md).
+O [MASTER multihorizonte](docs/tutorials/b3_master_model.md) usa esse bundle,
+as losses temporais/compostas/Proximity e o mesmo exportador de previsões B3.
 O pós-processamento remoto usa `scripts/run_backtests_cpu.sh`; gráficos e
 tabelas em R ficam no repositório local `analise_resultados`.
 
