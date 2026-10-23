@@ -468,6 +468,67 @@ def test_end_to_end_parallel_resume_parquet_calendar_and_corruption(tmp_path):
     assert read_json(run/"resumos/estado_execucao.json")["ERRO"] == 1
 
 
+@pytest.mark.parametrize("mode,n_tasks,n_metrics", [("temporal", 4, 24), ("var", 2, 8)])
+def test_single_mode_prepare_pilot_shards_and_resume(tmp_path, mode, n_tasks, n_metrics):
+    args = prepare_args(tmp_path)
+    other = "var" if mode == "temporal" else "temporal"
+    group = tmp_path/"previsoes/treino=50"/f"experimento={other}"
+    group.rename(tmp_path/f"unused_{other}")
+    cli(*args, "--dry-run")
+    run = tmp_path/"run"
+    assert not run.exists()
+    cli(*args)
+    plan = read_json(run/"plano.json")
+    assert len(plan["tasks"]) == n_tasks
+    assert {t["experimento"] for t in plan["tasks"]} == {mode}
+    assert {t["common_last_origin"] for t in plan["tasks"]} == {13}
+    cli("run", "--run-dir", run, "--workers", "1", "--pilot")
+    for shard in range(2):
+        cli("run", "--run-dir", run, "--workers", "2", "--shards", "2", "--shard", str(shard))
+    state = read_json(run/"resumos/estado_execucao.json")
+    assert state["completa"] and state["COMPLETA"] == n_tasks
+    metrics_all = pd.read_parquet(run/"resumos/metricas.parquet")
+    assert len(metrics_all) == n_metrics
+    assert set(metrics_all.experimento) == {mode}
+    assert metrics_all.sharpe_cdi.notna().all()
+    assert metrics_all.status_rf.eq(RF_SOURCE).all()
+    daily = run/"resumos/ic_diario.parquet"
+    assert set(pd.read_parquet(daily).experimento) == {mode}
+    outputs = [run/"tasks"/t["relpath"]/"ic.parquet" for t in plan["tasks"]]
+    before = {p: (digest(p), p.stat().st_mtime_ns) for p in outputs}
+    result = cli("run", "--run-dir", run, "--workers", "1")
+    assert result.stdout.count("REUTILIZADA") == n_tasks
+    assert before == {p: (digest(p), p.stat().st_mtime_ns) for p in outputs}
+
+
+@pytest.mark.parametrize("mode", ["temporal", "var"])
+def test_single_mode_rejects_incomplete_grid(tmp_path, mode):
+    args = prepare_args(tmp_path)
+    other = "var" if mode == "temporal" else "temporal"
+    group = tmp_path/"previsoes/treino=50"/f"experimento={other}"
+    group.rename(tmp_path/f"unused_{other}")
+    done_path = tmp_path/"previsoes/treino=50"/f"experimento={mode}"/"completed_tasks.csv"
+    pd.read_csv(done_path).iloc[:-1].to_csv(done_path, index=False)
+    result = cli(*args, check=False)
+    assert result.returncode == 1 and "Grade incompleta" in result.stderr
+    assert not (tmp_path/"run").exists()
+
+
+@pytest.mark.parametrize("missing", ["all", "cut", "metadata"])
+def test_missing_forecast_groups_do_not_produce_an_empty_or_partial_plan(tmp_path, missing):
+    args = prepare_args(tmp_path)
+    if missing == "all":
+        (tmp_path/"previsoes/treino=50").rename(tmp_path/"unused_train")
+    elif missing == "cut":
+        args += ["--train", "50", "70"]
+    else:
+        (tmp_path/"previsoes/treino=50/experimento=var/run_config.json").unlink()
+    result = cli(*args, check=False)
+    assert result.returncode == 1
+    assert ("Nenhuma previsao temporal/VAR" if missing != "metadata" else "run_config.json") in result.stderr
+    assert not (tmp_path/"run").exists()
+
+
 def test_consolidate_daily_ic_from_existing_run_without_inputs_or_recalculation(tmp_path):
     args = prepare_args(tmp_path, invalid_ic=True)
     cli(*args)

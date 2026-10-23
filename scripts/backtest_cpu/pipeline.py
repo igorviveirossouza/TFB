@@ -395,6 +395,8 @@ def run_tasks(args):
         chosen = set()
         for mode in ("temporal", "var"):
             candidates = [t for t in plan["tasks"] if t["experimento"] == mode]
+            if not candidates:
+                continue
             for select in (min, max):
                 chosen.add(select(candidates, key=lambda t: t["pred_len"])["id"])
         tasks = [t for t in tasks if t["id"] in chosen]

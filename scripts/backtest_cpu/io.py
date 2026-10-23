@@ -162,6 +162,8 @@ def discover_tasks(root, percentages, market, source_sha256):
     tasks, provenance = [], {}
     for pct, mode in itertools.product(percentages, ("temporal", "var")):
         group = root/f"treino={pct}"/f"experimento={mode}"
+        if not group.exists():
+            continue
         plan = read_json(group/"run_config.json")
         meta, cfg = plan["metadata"], plan["config"]
         if (meta.get("source_data_kind") != "log_return" or meta["step_offset"] != 1
@@ -217,13 +219,15 @@ def discover_tasks(root, percentages, market, source_sha256):
                           "corte": cut, "relpath": str(rel), "path": str(path),
                           "sha256": expected_hash, "size": path.stat().st_size})
     for pct in percentages:
+        if not any(t["treino"] == pct for t in tasks):
+            raise ValueError(f"Nenhuma previsao temporal/VAR encontrada para treino={pct} em {root}")
         # Todos os modelos/L/H do corte usam o mesmo limite de ORIGENS.
         hmax = max(t["pred_len"] for t in tasks if t["treino"] == pct)
         for t in tasks:
             if t["treino"] == pct:
                 t["common_last_origin"] = market.n-hmax
         var = max((t for t in tasks if t["treino"] == pct and t["experimento"] == "var"),
-                  key=lambda t: t["pred_len"])
+                  key=lambda t: t["pred_len"], default=None)
         for t in tasks:
             if t["treino"] == pct:
                 # As seis saidas VAR sao prefixos do mesmo ajuste/previsao.
