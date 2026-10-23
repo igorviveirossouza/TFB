@@ -86,6 +86,55 @@ Relatório: `result/master/smoke_JOBID.json`, com `status=PASSED`, seis casos,
 formas das previsões, losses de validação, proveniência e `limited_run=true`.
 Em caso de falha, o job termina com erro e o relatório registra `status=FAILED`.
 
+## Piloto com treinamento completo
+
+Após o smoke, execute na máquina de acesso:
+
+```bash
+bash scripts/run_master_pilot.sh
+```
+
+O wrapper fixa exatamente **três treinamentos**: MSE temporal, MSE + RankNet
+e MSE + RankNet Proximity. Usa treino externo 80%, validação 12,5% do pré-teste,
+`L=32`, `H=5`, `K=1`, lambda 0,5 nas compostas, delta zero e máscara gaussiana
+`a=0.025`, modo natural. Todos os blocos de features estão ativos. Mantém
+`d_model=64`, batch 32, learning rate 0,0001, scheduler `type1` e seed 2026.
+São até 100 épocas, com early stopping de patience 10, sem limitar batches.
+
+Com 3.664 pregões, cada modelo usa 2.528 janelas de treino, 363 de validação
+e prevê as 729 origens possíveis do teste. São 3.645 linhas por `part.parquet`
+(729 origens × 5 passos), com os 55 ativos como colunas. Cada tarefa grava
+também `master_training.json` e `master_checkpoint.pt`; o audit deve registrar
+`limited_run=false`. As losses de validação selecionam a melhor época dentro
+de cada objetivo; a comparação entre objetivos deve usar métricas comuns.
+
+O comando retorna **dois IDs de preparação**, para temporal e composto. A
+preparação acontece em `gorgonas_dev` e submete os workers automaticamente:
+um temporal e um array composto com dois elementos, limitado a um por vez.
+Os workers usam CPU em `gorgonas`, 32 GB e até 8 horas, evitando o limite de
+1h30 da partição dev. Nenhum Python roda na phocus4. Os nomes dos jobs de
+treino e seus IDs aparecem nos logs das duas preparações.
+
+- Logs: `logs/master/master_piloto_l32_h5_k1_t80_v1/{temporal,composto}/`.
+- Previsões e auditorias: `/snfs2/igor.viveiros/previsoes/master_piloto_l32_h5_k1_t80_v1/`.
+- Cada diretório `treino=80/experimento=...` contém `completed_tasks.csv`:
+  deve haver uma tarefa temporal e duas compostas concluídas.
+
+`--dry-run` submete somente as duas preparações para descrever as grades;
+`--prepare` valida os dados e grava os desenhos sem criar workers. O wrapper
+usa nomes de parâmetros próprios para evitar herdar caminhos de outra grade:
+`MASTER_PILOT_TAG`, `MASTER_PILOT_OUT_ROOT`, `MASTER_PILOT_RESULT_ROOT` e
+`MASTER_PILOT_LOG_ROOT`. Os recursos podem ser alterados por
+`MASTER_PILOT_PARTITION`, `MASTER_PILOT_TIME_LIMIT` e `MASTER_PILOT_MEMORY`.
+Para modificar o desenho científico, use `run_master_experiment.sh` com outro
+`RUN_TAG`; o wrapper do piloto mantém seus três casos fixos.
+
+Para verificar consumo e estado após obter os IDs dos workers:
+
+```bash
+sacct -j ID_TEMPORAL,ID_COMPOSTO --format=JobID,State,ExitCode,Elapsed,MaxRSS
+```
+
 ## Grades e ablations
 
 Os comandos abaixo também submetem a preparação ao Slurm. `--dry-run` grava
