@@ -6,12 +6,16 @@ set -euo pipefail
 
 # -----------------------------------------------------------------------------
 # Modo de execução:
-# temporal	- Treinamento com a loss temporal, sem o componente cross-sectional
+# temporal	- Use run_temporal_experiment.sh para a loss temporal
 # composto	- Treinamento com loss temporal mais componente cross-sectional
-# var	      - Execução do baseline VAR.
+# var	      - Use run_var_experiment.sh para o baseline VAR.
 # -----------------------------------------------------------------------------
 
-EXPERIMENT="${EXPERIMENT:-composto}"
+if [[ "${EXPERIMENT:-composto}" != composto ]]; then
+  echo "Este script executa apenas composto; use run_temporal_experiment.sh para temporal ou run_var_experiment.sh para VAR." >&2
+  exit 2
+fi
+EXPERIMENT="composto"
 
 # -----------------------------------------------------------------------------
 # GRADE E TREINAMENTO — edite aqui

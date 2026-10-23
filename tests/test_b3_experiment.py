@@ -5,7 +5,9 @@ import copy
 from collections import Counter
 import csv
 import json
+import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -23,11 +25,16 @@ import b3_experiment as experiment
 import b3_experiment_io as experiment_io
 
 
+FULL_GRID_ENV = dict(TRAIN_PERCENTAGES='70 80 90', TRADE_WINDOWS='1 5 10 15 20 25',
+                     CROSS_LOSSES='ranknet hinge listnet pairwise_mse',
+                     DELTAS='0 0.025 0.05 0.1')
+
+
 @pytest.fixture
 def config():
     result = subprocess.run(
         ["bash", str(REPO / "scripts/run_composite_trading_experiment.sh"), "--print-config"],
-        env=dict(__import__("os").environ, TFB_ROOT=str(REPO), PYTHON_BIN=sys.executable),
+        env=dict(os.environ, **FULL_GRID_ENV, TFB_ROOT=str(REPO), PYTHON_BIN=sys.executable),
         check=True, capture_output=True, text=True,
     )
     return json.loads(result.stdout)
@@ -394,7 +401,7 @@ def test_completed_task_is_replaced_by_global_id_without_duplicate_rows(prepared
 def test_dry_run_and_task_inspection_make_no_output(tmp_path):
     import os
 
-    env = dict(os.environ, OUT_ROOT=str(tmp_path / "absent"), DATASET_PATH=str(tmp_path / "missing.csv"))
+    env = dict(os.environ, **FULL_GRID_ENV, OUT_ROOT=str(tmp_path / "absent"), DATASET_PATH=str(tmp_path / "missing.csv"))
     for options in (["--dry-run"], ["--task", "33695"]):
         result = subprocess.run(["bash", str(REPO / "scripts/run_composite_trading_experiment.sh"), *options], env=env, check=True, text=True, capture_output=True)
         assert result.stdout.strip()
@@ -476,8 +483,10 @@ def test_editable_shell_parameters_reach_python_without_json(tmp_path):
         'HINGE_MARGIN=0.1': 'HINGE_MARGIN=0.2',
     }
     for before, after in substitutions.items():
-        assert before in content
-        content = content.replace(before, after)
+        name = before.split('=')[0]
+        content, count = re.subn(r'^(?:read -r -a ' + name + r' <<< .+|' + name + r'=.+)$',
+                                 lambda _: after, content, flags=re.MULTILINE)
+        assert count == 1
     edited.write_text(content)
     env = dict(os.environ, TFB_ROOT=str(REPO), PYTHON_BIN=sys.executable,
                OUT_ROOT=str(tmp_path / 'out'), DATASET_PATH=str(tmp_path / 'missing.csv'))
@@ -493,9 +502,62 @@ def test_editable_shell_parameters_reach_python_without_json(tmp_path):
                              check=True, text=True, capture_output=True)
     assert '1 tarefas' in preview.stdout
     assert not (tmp_path / 'out').exists()
-    original = subprocess.run(['bash', str(script), '--dry-run'], env=env,
+    original = subprocess.run(['bash', str(script), '--dry-run'], env=dict(env, **FULL_GRID_ENV),
                               check=True, text=True, capture_output=True)
     assert '33696 tarefas' in original.stdout
+
+
+@pytest.mark.parametrize('mode', ['temporal', 'composto'])
+def test_terminal_grid_paths_resources_and_worker_config(mode, tmp_path):
+    script = REPO / 'scripts' / experiment.LAUNCHERS[mode]
+    env = dict(os.environ, TFB_ROOT=str(REPO), PYTHON_BIN=sys.executable,
+               TRAIN_PERCENTAGES='70 80 90', LOOKBACKS='512', BATCH_SIZE='16',
+               HORIZONS='1 5 10 15 20 25', RUN_TAG=f'{mode}_512_t70_80_90',
+               PARTITION='medusas_dev', NODELIST='medusa6', GRES='gpu:1', TIME_LIMIT='01:30:00',
+               CROSS_LOSSES='hinge_proximity ranknet_proximity pairwise_mse_proximity',
+               TRADE_WINDOWS='1', LAMBDAS='0.1 0.5 0.8', DELTAS='0', CROSS_MASK='gaussian 0.025',
+               DATASET_PATH=str(tmp_path / 'missing.csv'))
+    for key in ('EXPERIMENT', 'B3_INLINE_CONFIG', 'OUT_ROOT', 'RESULT_ROOT', 'LOG_ROOT'):
+        env.pop(key, None)
+    def run(*args, overrides=None):
+        return subprocess.run(['bash', str(script), *args], env=dict(env, **(overrides or {})),
+                              capture_output=True, text=True, check=True)
+    cfg = json.loads(run('--print-config').stdout)
+    tasks = experiment.make_tasks(cfg, mode)
+    assert len(tasks) == (108 if mode == 'temporal' else 972)
+    assert {t['pred_len'] for t in tasks} == {1, 5, 10, 15, 20, 25}
+    assert {t['treino'] for t in tasks} == {70, 80, 90}
+    assert {t['lookback'] for t in tasks} == {512}
+    assert {experiment.model_spec(cfg, t)[1]['batch_size'] for t in tasks} == {16}
+    if mode == 'temporal':
+        assert {t['cross_lambda'] for t in tasks} == {0}
+        assert {t['k'] for t in tasks} == {None}
+        assert 'loss_cross_mask' not in cfg['loss']
+    else:
+        assert {t['k'] for t in tasks} == {1}
+        assert {t['mask_a'] for t in tasks} == {0.025}
+    task = json.loads(run('--task', '107').stdout)
+    assert task['experimento'] == mode
+    assert task['output_dir'].startswith(f'/snfs2/igor.viveiros/previsoes/{env["RUN_TAG"]}/')
+    preview = run('--dry-run').stdout
+    for value in ('-p medusas_dev', '--nodelist=medusa6', '--gres=gpu:1', '--time=01:30:00',
+                  f'/logs/{env["RUN_TAG"]}/', f'{script} worker'):
+        assert value in preview
+    # Slurm workers must preserve the submitted configuration, even with other shell defaults.
+    frozen = run('worker', '--print-config', overrides={
+        'B3_INLINE_CONFIG': json.dumps(cfg), 'LOOKBACKS': '32', 'HORIZONS': '1', 'BATCH_SIZE': '32'})
+    assert json.loads(frozen.stdout) == cfg
+
+
+@pytest.mark.parametrize('mode,wrong', [('temporal', 'composto'), ('temporal', 'var'),
+                                      ('composto', 'temporal'), ('composto', 'var')])
+def test_launchers_reject_other_experiments(mode, wrong):
+    result = subprocess.run(['bash', str(REPO / 'scripts' / experiment.LAUNCHERS[mode]), '--dry-run'],
+                            env=dict(os.environ, EXPERIMENT=wrong), capture_output=True, text=True)
+    assert result.returncode == 2
+    assert f'apenas {mode}' in result.stderr
+    assert experiment.LAUNCHERS[wrong] in result.stderr
+    assert not result.stdout
 
 
 def test_cluster_node_cpu_and_memory_fields_reach_sbatch(monkeypatch, tmp_path):

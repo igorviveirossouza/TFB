@@ -3,38 +3,43 @@
 # Use: bash scripts/run_temporal_experiment.sh --dry-run
 set -euo pipefail
 
+if [[ "${EXPERIMENT:-temporal}" != temporal ]]; then
+  echo "Este script executa apenas temporal; use run_composite_trading_experiment.sh para composto ou run_var_experiment.sh para VAR." >&2
+  exit 2
+fi
 EXPERIMENT="temporal"
 
 # -----------------------------------------------------------------------------
 # GRADE E TREINAMENTO — edite aqui
 # -----------------------------------------------------------------------------
-TRAIN_PERCENTAGES=(70 80 90)
-MODELS=(DUET Nonstationary_Transformer FEDformer TimesNet simpleFORMER simpleMLP)
-LOOKBACKS=(32 128 256)
-HORIZONS=(1 5 10 15 20 25)
+read -r -a TRAIN_PERCENTAGES <<< "${TRAIN_PERCENTAGES[*]:-70 80 90}"
+read -r -a MODELS <<< "${MODELS[*]:-DUET Nonstationary_Transformer FEDformer TimesNet simpleFORMER simpleMLP}"
+read -r -a LOOKBACKS <<< "${LOOKBACKS[*]:-32 128 256}"
+read -r -a HORIZONS <<< "${HORIZONS[*]:-1 5 10 15 20 25}"
 
-NUM_EPOCHS=100
-PATIENCE=10
-LEARNING_RATE=0.0001
-TEMPORAL_LOSS="mse"
-TRAIN_RATIO_IN_TV=0.875   # Validação = 12,5% do bloco anterior ao teste
-SEED=2026
-STRIDE=1
-NUM_ROLLINGS=48000
+NUM_EPOCHS="${NUM_EPOCHS:-100}"
+BATCH_SIZE="${BATCH_SIZE:-32}"
+PATIENCE="${PATIENCE:-10}"
+LEARNING_RATE="${LEARNING_RATE:-0.0001}"
+TEMPORAL_LOSS="${TEMPORAL_LOSS:-mse}"
+TRAIN_RATIO_IN_TV="${TRAIN_RATIO_IN_TV:-0.875}"   # Validação = 12,5% do bloco anterior ao teste
+SEED="${SEED:-2026}"
+STRIDE="${STRIDE:-1}"
+NUM_ROLLINGS="${NUM_ROLLINGS:-48000}"
 
 # -----------------------------------------------------------------------------
 # HIPERPARÂMETROS ESPECÍFICOS DOS MODELOS — também editáveis neste script
 # lr, num_epochs, patience, seq_len e pred_len vêm das variáveis acima.
 # Os campos restantes herdam os defaults dos adaptadores do TFB.
 # -----------------------------------------------------------------------------
-MODEL_DEFAULTS_JSON=$(cat <<'JSON'
+MODEL_DEFAULTS_JSON=$(cat <<JSON
 {
-  "DUET": {"CI": 1, "batch_size": 32, "d_ff": 32, "d_model": 32, "dropout": 0.5, "e_layers": 1, "factor": 3, "fc_dropout": 0.2, "hidden_size": 256, "k": 1, "lradj": "type1", "n_heads": 2, "norm": true, "num_experts": 4, "patch_len": 48},
-  "TimesNet": {"batch_size": 32, "d_ff": 512, "d_model": 256, "factor": 3, "norm": true, "top_k": 5},
-  "FEDformer": {"batch_size": 32, "d_ff": 512, "d_model": 256, "factor": 3, "norm": true},
-  "Nonstationary_Transformer": {"d_ff": 256, "d_model": 128, "dropout": 0.1, "factor": 3, "norm": true, "p_hidden_dims": [32, 32], "p_hidden_layers": 2},
-  "simpleFORMER": {"d_model": 512, "e_layers": 2, "d_ff": 2048, "n_heads": 8, "temporal_hidden_dim": 0, "dropout": 0.1, "norm": true, "use_norm": true, "norm_eps": 1e-05, "batch_size": 32, "lradj": "type1"},
-  "simpleMLP": {"d_model": 512, "e_layers": 2, "d_ff": 2048, "n_heads": 8, "temporal_hidden_dim": 0, "dropout": 0.1, "norm": true, "use_norm": true, "norm_eps": 1e-05, "batch_size": 32, "lradj": "type1"}
+  "DUET": {"CI": 1, "batch_size": ${BATCH_SIZE}, "d_ff": 32, "d_model": 32, "dropout": 0.5, "e_layers": 1, "factor": 3, "fc_dropout": 0.2, "hidden_size": 256, "k": 1, "lradj": "type1", "n_heads": 2, "norm": true, "num_experts": 4, "patch_len": 48},
+  "TimesNet": {"batch_size": ${BATCH_SIZE}, "d_ff": 512, "d_model": 256, "factor": 3, "norm": true, "top_k": 5},
+  "FEDformer": {"batch_size": ${BATCH_SIZE}, "d_ff": 512, "d_model": 256, "factor": 3, "norm": true},
+  "Nonstationary_Transformer": {"batch_size": ${BATCH_SIZE}, "d_ff": 256, "d_model": 128, "dropout": 0.1, "factor": 3, "norm": true, "p_hidden_dims": [32, 32], "p_hidden_layers": 2},
+  "simpleFORMER": {"d_model": 512, "e_layers": 2, "d_ff": 2048, "n_heads": 8, "temporal_hidden_dim": 0, "dropout": 0.1, "norm": true, "use_norm": true, "norm_eps": 1e-05, "batch_size": ${BATCH_SIZE}, "lradj": "type1"},
+  "simpleMLP": {"d_model": 512, "e_layers": 2, "d_ff": 2048, "n_heads": 8, "temporal_hidden_dim": 0, "dropout": 0.1, "norm": true, "use_norm": true, "norm_eps": 1e-05, "batch_size": ${BATCH_SIZE}, "lradj": "type1"}
 }
 JSON
 )
@@ -43,13 +48,14 @@ JSON
 # CAMINHOS E CLUSTER — edite estes valores neste próprio script
 # -----------------------------------------------------------------------------
 TFB_ROOT="${TFB_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+export RUN_TAG="${RUN_TAG:-}"
 VENV_PATH="${VENV_PATH:-/sonic_home/igor.viveiros/py310/bin/activate}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 DATASET_PATH="${DATASET_PATH:-$TFB_ROOT/dataset/forecasting/b3_daily_tfb_new.csv}"
 export SOURCE_DATA_KIND="${SOURCE_DATA_KIND:-log_return}"  # log_return: base nova já corrigida; price: calcular diff(log(P))
-OUT_ROOT="${OUT_ROOT:-/snfs2/igor.viveiros/previsoes/novas_previsoes}"
-RESULT_ROOT="${RESULT_ROOT:-/snfs2/igor.viveiros/result/b3_new}"
-LOG_ROOT="${LOG_ROOT:-$TFB_ROOT/logs/b3_new}"
+OUT_ROOT="${OUT_ROOT:-/snfs2/igor.viveiros/previsoes/${RUN_TAG:-novas_previsoes}}"
+RESULT_ROOT="${RESULT_ROOT:-/snfs2/igor.viveiros/result/${RUN_TAG:-b3_new}}"
+LOG_ROOT="${LOG_ROOT:-$TFB_ROOT/logs/${RUN_TAG:-b3_new}}"
 
 PARTITION="${PARTITION:-medusas_dev}"    # Partição do Slurm
 # GPU: valor passado literalmente a sbatch --gres (ex.: gpu:1 ou gpu:<tipo>:1).
