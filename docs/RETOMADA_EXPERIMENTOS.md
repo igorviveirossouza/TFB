@@ -81,6 +81,28 @@ aceitos. Nesse caso, não se presume que a fila esteja vazia. O diário
 `.b3_recovery_submissions.json`, em cada diretório de grade, impede duplicações;
 uma resposta ambígua do Slurm exige conferir o token registrado antes de repetir.
 
+Se a causa da rejeição foi confirmada (por exemplo, partição incorreta), mas o
+diário antigo ficou sem `JobID`, use `resume --reject-token TOKEN` com os recursos
+corrigidos. A opção declara que essa submissão foi rejeitada: exige um registro
+de falha do `sbatch` ou o relatório original `SUBMISSION_INCOMPLETE` correspondente,
+recusa tokens com JobID ou ativos na fila e anota a resolução sem apagar o histórico.
+Uma resposta ambígua ou a fila vazia, isoladamente, não permitem regularizar o token.
+A rotina então faz a auditoria habitual e submete apenas as tarefas faltantes.
+
+```bash
+RECOVERY_WORKER_PARTITION=medusas_dev \
+RECOVERY_WORKER_GRES=gpu:1 RECOVERY_WORKER_NODELIST= \
+RECOVERY_WORKER_TIME=01:30:00 RECOVERY_MAX_CONCURRENT=2 \
+  bash scripts/recover_composite_experiments.sh resume --reject-token TOKEN
+```
+
+Substitua `TOKEN` pelo identificador exato da tentativa rejeitada. O comando vale
+para as quatro grades padrão; `--run-tag` continua disponível. A preparação roda
+em `gorgonas_dev` e os treinos usam a partição selecionada (`medusas_dev` no exemplo).
+Novas falhas de `sbatch` passam a preservar `returncode`, `stdout` e `stderr` no
+diário e mostram o motivo diretamente no log do coordenador. Respostas sem
+confirmação permanecem bloqueadas até investigação; nenhum job é cancelado.
+
 O relatório `report.json` e os dois logs do coordenador bastam para a primeira
 revisão da execução no cluster. Os manifestos originais também são copiados para
 o diretório dessa solicitação; as bases e os Parquets permanecem onde estão.

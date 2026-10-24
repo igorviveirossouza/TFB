@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager, ExitStack
+from datetime import datetime, timezone
 import fcntl
 import hashlib
 import importlib.util
@@ -194,6 +195,89 @@ def check_no_original_workers(out_roots):
                            + '. Inspecione: scontrol show job ' + unknown[0])
 
 
+def rejection_resolved(record):
+    resolution = record.get('rejection_resolution', {})
+    return (not record.get('job_id') and isinstance(resolution, dict)
+            and resolution.get('kind') == 'user_confirmed_rejection'
+            and resolution.get('token') == record.get('token')
+            and bool(resolution.get('evidence')))
+
+
+def rejection_evidence(record, out_root):
+    """Require an actual failed sbatch, not just a missing receipt or empty queue."""
+    failure = record.get('submission_failure')
+    if failure is not None:
+        if (not isinstance(failure, dict) or type(failure.get('returncode')) is not int
+                or failure['returncode'] <= 0 or not isinstance(failure.get('stdout'), str)
+                or failure['stdout'].strip() or not isinstance(failure.get('stderr'), str)):
+            raise RuntimeError('Falha ambígua; não confirmar rejeição do token ' + record['token'])
+        return {'submission_failure': failure}
+    # Legacy versions discarded stderr, but their report retains the exact
+    # CalledProcessError command/returncode and the unacknowledged journal entry.
+    report_path = Path(record['execution_plan']).parent.parent / 'report.json'
+    report = json.loads(report_path.read_text())
+    entries = [entry for run in report.get('runs', [])
+               if Path(run.get('out_root', '')).resolve() == Path(out_root).resolve()
+               for entry in run.get('submission_records', [])
+               if entry.get('token') == record['token']]
+    match = re.search(r' returned non-zero exit status ([1-9][0-9]*)\.$', report.get('error', ''))
+    keys = ('token', 'job_id', 'command', 'indices', 'execution_plan')
+    if (report.get('status') != 'SUBMISSION_INCOMPLETE' or len(entries) != 1
+            or any(entries[0].get(k) != record.get(k) for k in keys) or not match
+            or report['error'] != str(subprocess.CalledProcessError(int(match.group(1)), record['command']))):
+        raise RuntimeError('Relatório não comprova falha do sbatch deste token: ' + record['token'])
+    return {'report': str(report_path), 'report_sha256': sha(report_path),
+            'returncode': int(match.group(1))}
+
+
+def reconcile_rejected_submissions(out_roots, tokens):
+    """Record the user's explicit rejection diagnosis; callers hold all root locks.
+
+The empty queue alone never authorizes this transition. A failed submission
+record/report and --reject-token are both required. No journal entry is deleted.
+"""
+    if not tokens:
+        return []
+    if len(tokens) != len(set(tokens)) or any(not re.fullmatch(r'[0-9a-f]{32}', token) for token in tokens):
+        raise ValueError('--reject-token exige tokens únicos de 32 caracteres hexadecimais.')
+    journals = {}
+    for root in out_roots:
+        path = Path(root) / '.b3_recovery_submissions.json'
+        if path.exists():
+            journals[path] = json.loads(path.read_text())
+    changes, resolutions = [], []
+    for token in tokens:
+        matches = [(path, record) for path, rows in journals.items() for record in rows
+                   if record.get('token') == token]
+        if len(matches) != 1:
+            raise RuntimeError('Token ausente ou duplicado nas grades selecionadas: ' + token)
+        path, record = matches[0]
+        if record.get('job_id'):
+            raise RuntimeError('Token possui JobID; preservar a submissão aceita: ' + token)
+        if rejection_resolved(record):
+            resolutions.append(dict(token=token, out_root=str(path.parent), already_resolved=True))
+            continue
+        evidence = rejection_evidence(record, path.parent)
+        changes.append((path, record, evidence))
+        resolutions.append(dict(token=token, out_root=str(path.parent), evidence=evidence))
+    queued = command_output(['squeue', '--me', '--all', '--noheader', '--format=%i|%k'])
+    for line in queued.splitlines():
+        fields = line.split('|', 1)
+        if len(fields) != 2:
+            raise RuntimeError('Resposta de squeue não reconhecida: ' + line)
+        if fields[1].strip() in {'b3-recovery:' + token for token in tokens}:
+            raise RuntimeError('Token possui job ativo; preservar trabalho: ' + fields[0].strip())
+    for path, record, evidence in changes:
+        record['rejection_resolution'] = dict(
+            kind='user_confirmed_rejection', token=record['token'], evidence=evidence,
+            resolved_utc=datetime.now(timezone.utc).isoformat())
+    for path in {path for path, _, _ in changes}:
+        atomic_json(path, journals[path])
+    for resolution in resolutions:
+        print('Submissão rejeitada regularizada, histórico preservado: ' + resolution['token'], flush=True)
+    return resolutions
+
+
 def verify_previous_submissions(out_root):
     path = Path(out_root) / '.b3_recovery_submissions.json'
     if not path.exists():
@@ -204,6 +288,8 @@ def verify_previous_submissions(out_root):
     active_ids = {line.split('|')[0].strip().split('_')[0]
                   for line in queued.splitlines() if '|' in line}
     for record in records:
+        if rejection_resolved(record):
+            continue
         if not record.get('job_id'):
             raise RuntimeError('Submissão anterior com confirmação incompleta; conferir token '
                                + record['token'] + ' antes de tentar novamente.')
@@ -322,7 +408,14 @@ def submit_run(run, state, chunk_size, resources):
         # Persist intent BEFORE sbatch. An ambiguous submission blocks a second
         # attempt instead of risking another training of the same task.
         atomic_json(journal_path, records)
-        result = subprocess.run(command, env=clean_env(), check=True, capture_output=True, text=True)
+        try:
+            result = subprocess.run(command, env=clean_env(), check=True, capture_output=True, text=True)
+        except subprocess.CalledProcessError as exc:
+            record['submission_failure'] = dict(returncode=exc.returncode,
+                                                stdout=exc.stdout or '', stderr=exc.stderr or '')
+            atomic_json(journal_path, records)
+            detail = (exc.stderr or exc.stdout or str(exc)).strip()
+            raise RuntimeError(f'sbatch falhou (exit={exc.returncode}, token={token}): {detail}') from exc
         job_id = result.stdout.strip().split(';')[0]
         if not job_id.isdigit():
             raise RuntimeError('Resposta inesperada de sbatch; conferir token ' + token + ': ' + result.stdout)
@@ -354,6 +447,11 @@ def coordinator(args):
                 if not root.is_dir():
                     raise FileNotFoundError('Grade original não encontrada: ' + str(root))
                 stack.enter_context(locked(root / '.b3_recovery.lock'))
+            if getattr(args, 'reject_token', None):
+                if args.action != 'resume':
+                    raise ValueError('--reject-token só pode ser usado com resume.')
+                report['resolved_rejections'] = reconcile_rejected_submissions(out_roots, args.reject_token)
+            for root in out_roots:
                 verify_previous_submissions(root)
             for tag in tags:
                 out_root = Path(args.out_base).resolve() / tag
@@ -499,6 +597,9 @@ def main():
         command.add_argument('--out-base', default='/snfs2/igor.viveiros/previsoes')
         command.add_argument('--result-base', default='/snfs2/igor.viveiros/result')
         command.add_argument('--run-tag', action='append')
+        if action == 'resume':
+            command.add_argument('--reject-token', action='append',
+                                 help='Confirmar rejeição conhecida de um sbatch sem JobID; preserva o histórico.')
     command = sub.add_parser('_audit')
     for name in ('snapshot', 'out-root', 'report'):
         command.add_argument('--' + name, required=True)

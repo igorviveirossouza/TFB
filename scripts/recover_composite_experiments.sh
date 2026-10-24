@@ -3,7 +3,7 @@
 set -euo pipefail
 
 usage() {
-  echo 'Uso: bash scripts/recover_composite_experiments.sh [audit|resume] [--run-tag TAG]...' >&2
+  echo 'Uso: bash scripts/recover_composite_experiments.sh [audit|resume] [--run-tag TAG]... [--reject-token TOKEN]...' >&2
 }
 
 if [[ "${1:-}" == '--on-node' ]]; then
@@ -28,11 +28,17 @@ case "$ACTION" in
 esac
 EXTRA_ARGS=()
 while [[ $# -gt 0 ]]; do
-  if [[ "$1" != '--run-tag' || $# -lt 2 || -z "$2" || "$2" == -* ]]; then
+  if [[ $# -lt 2 || -z "$2" || "$2" == -* ]]; then
     usage
     exit 2
   fi
-  EXTRA_ARGS+=(--run-tag "$2")
+  case "$1" in
+    --run-tag) ;;
+    --reject-token)
+      if [[ "$ACTION" != resume || ! "$2" =~ ^[0-9a-f]{32}$ ]]; then usage; exit 2; fi ;;
+    *) usage; exit 2 ;;
+  esac
+  EXTRA_ARGS+=("$1" "$2")
   shift 2
 done
 
