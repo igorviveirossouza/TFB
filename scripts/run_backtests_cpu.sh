@@ -13,8 +13,8 @@ RETURNS_FILE="${RETURNS_FILE:-$TFB_ROOT/dataset/forecasting/b3_daily_tfb_new.csv
 STRATEGIES_FILE="${STRATEGIES_FILE:-$TFB_ROOT/config/estrategias_backtest.json}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-/snfs2/igor.viveiros/analise_resultados/backtests}"
 RUN_ID="${RUN_ID:-temporal_var_abertura_fechamento_s0_c0_cdi_v3}"
-TRAIN=(70 80 90)
-K_EVAL=(1 5 10 15 20 25)
+read -r -a TRAIN <<< "${TRAIN_VALUES:-70 80 90}"
+read -r -a K_EVAL <<< "${K_EVAL_VALUES:-1 5 10 15 20 25}"
 SLIPPAGE_BPS="${SLIPPAGE_BPS:-0}"  # Por ponta: 5 bps = 0,05%; compra pior e venda pior.
 COST_BPS="${COST_BPS:-0}"          # Por ponta, proporcional ao financeiro efetivo.
 
