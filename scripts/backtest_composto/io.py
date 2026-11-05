@@ -136,8 +136,8 @@ def _validate_config(plan, pct, market, source_sha256, path):
         raise ValueError("Loss composta nao suportada no contrato B3.")
     lambdas = [_number(x, "lambdas") for x in _vector(cfg, "lambdas")]
     deltas = [_number(x, "deltas") for x in _vector(cfg, "deltas")]
-    if any(not 0 < x < 1 for x in lambdas) or any(x < 0 for x in deltas):
-        raise ValueError("Lambda/delta fora do dominio composto.")
+    if any(not 0 < x <= 1 for x in lambdas) or any(x < 0 for x in deltas):
+        raise ValueError("Lambda deve estar em (0,1] e delta deve ser nao negativo.")
     # O produtor usa :g nos caminhos. Valores distintos que colidam ali sao ambiguos.
     for name, values in (("lambda", lambdas), ("delta", deltas)):
         if len({format(x, "g") for x in values}) != len(values):

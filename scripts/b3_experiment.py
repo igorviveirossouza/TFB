@@ -76,8 +76,8 @@ def load_config():
     if any(loss in PROXIMITY_LOSSES for loss in config['cross_losses']):
         config['loss']['loss_cross_mask'] = list(validate_cross_mask(
             config['loss'].get('loss_cross_mask')))
-    if any(not 0 < x < 1 for x in config['lambdas']):
-        raise ValueError('Lambda composto deve estar em (0,1)')
+    if any(not 0 < x <= 1 for x in config['lambdas']):
+        raise ValueError('Lambda composto deve estar em (0,1]')
     if any(not math.isfinite(x) or x < 0 for x in config['deltas']):
         raise ValueError('Delta deve ser finito e não negativo')
     if config['strategy']['stride'] != 1:
