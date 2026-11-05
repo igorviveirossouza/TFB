@@ -32,7 +32,7 @@ NS_MEMORY="${NS_MEMORY:-}"
 NS_NODELIST="${NS_NODELIST:-}"
 NS_CPU_WORKERS="${NS_CPU_WORKERS:-16}"
 
-# MODEL e CROSS_LOSSES_VALUES aceitam listas e NS_MASK_A aceita um valor pelo ambiente.
+# MODEL e CROSS_LOSSES_VALUES aceitam listas; NS_MASK_* define a mascara pelo ambiente.
 # Listas separadas por espacos. Lambda zero e apenas temporal.
 readonly MODEL="${MODEL:-Nonstationary_Transformer}"
 readonly LOOKBACKS_VALUES='256 512'
@@ -40,7 +40,9 @@ readonly HORIZON_VALUES='25'
 readonly K_LOSS_VALUES='1 5 25'
 readonly POSITIVE_LAMBDAS='0.5 0.8 1'
 readonly CROSS_LOSSES_VALUES="${CROSS_LOSSES_VALUES:-ranknet ranknet_proximity}"
+readonly NS_MASK_TYPE="${NS_MASK_TYPE:-cauchy}"
 readonly NS_MASK_A="${NS_MASK_A:-0.025}"
+readonly NS_MASK_MODE="${NS_MASK_MODE:-natural}"
 readonly K_EVAL_VALUES_FIXED='1 5 10 15 20 25'
 
 usage() {
@@ -57,7 +59,7 @@ Uso: bash run_ns_kloss_isolado.sh ACAO [acao_cpu]
 
 Grade: treino 80; modelos: $MODEL; LB: $LOOKBACKS_VALUES; H: $HORIZON_VALUES.
 K_loss: $K_LOSS_VALUES; lambdas compostos: $POSITIVE_LAMBDAS; controle: lambda 0.
-Losses positivas: $CROSS_LOSSES_VALUES; proximity usa Cauchy natural a=$NS_MASK_A.
+Losses positivas: $CROSS_LOSSES_VALUES; proximity usa $NS_MASK_TYPE $NS_MASK_MODE a=$NS_MASK_A.
 Controle: MSE temporal, uma vez por modelo/LB/H, compartilhado por losses e K_loss.
 Composto considera somente K_loss <= H e H divisivel por K_loss.
 Todos usam batch 16, seed 2026, 100 epocas, patience 10, LR 1e-4 e split interno .875.
@@ -74,7 +76,9 @@ NS_MEMORY, NS_NODELIST, NS_CPU_WORKERS. Caminhos opcionais: NS_PYTHON_BIN,
 NS_VENV_PATH, NS_RETURNS_FILE, NS_MARKET_DIR, NS_STRATEGIES_FILE.
 EXPERIMENT_TAG, MODEL e CROSS_LOSSES_VALUES podem ser informados pelo ambiente.
 MODEL e CROSS_LOSSES_VALUES: nomes separados por espacos.
-NS_MASK_A define o parametro a da Proximity: um numero positivo; padrao 0.025 (use ponto decimal).
+NS_MASK_TYPE: uniform, gaussian ou cauchy (padrao cauchy).
+NS_MASK_MODE: natural ou complementary (padrao natural).
+NS_MASK_A: padrao 0.025, com ponto decimal; >= 0 para uniform e > 0 para gaussian/cauchy.
 RUN_TAG e derivado de EXPERIMENT_TAG; os demais parametros da grade sao definidos neste SH.
 
 Concorrencia de treino: 1 tarefa por array em cada um dos dois ramos = maximo 2
@@ -114,7 +118,7 @@ training_grid() {
     done
     for loss in "${losses[@]}"; do
         mask='sem mascara'
-        [[ "$loss" != *_proximity ]] || mask="cauchy $NS_MASK_A natural"
+        [[ "$loss" != *_proximity ]] || mask="$NS_MASK_TYPE $NS_MASK_A $NS_MASK_MODE"
         for lam in "${lambdas[@]}"; do
             for model in "${models[@]}"; do
                 for lb in "${lookbacks[@]}"; do
@@ -226,7 +230,7 @@ training_launcher() {
         BATCH_SIZE=16 NUM_EPOCHS=100 PATIENCE=10 LEARNING_RATE=0.0001 TEMPORAL_LOSS=mse \
         TRAIN_RATIO_IN_TV=0.875 SEED=2026 STRIDE=1 NUM_ROLLINGS=48000 \
         TRADE_WINDOWS="$K_LOSS_VALUES" CROSS_LOSSES="$CROSS_LOSSES_VALUES" \
-        LAMBDAS="$POSITIVE_LAMBDAS" DELTAS=0 CROSS_MASK="cauchy $NS_MASK_A natural" \
+        LAMBDAS="$POSITIVE_LAMBDAS" DELTAS=0 CROSS_MASK="$NS_MASK_TYPE $NS_MASK_A $NS_MASK_MODE" \
         CROSS_SCALE=1 RANKNET_ALPHA=1 LISTNET_TAU=1 HINGE_MARGIN=0.1 \
         SCORE_KIND=simple_return CROSS_SCORE_NORMALIZATION=zscore \
         LOSS_INVERSE_NORM=true LOSS_TRACK_COMPONENTS=true \
