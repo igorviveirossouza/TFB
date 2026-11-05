@@ -14,7 +14,7 @@ NS_STRATEGIES_FILE="${NS_STRATEGIES_FILE:-$TFB_ROOT/config/estrategias_backtest.
 
 # O launcher composto atual fixa estes tres prefixos; apenas RUN_TAG e editavel.
 # O prefixo novo agrupa os dois ramos para --pred-root do R local.
-readonly EXPERIMENT_TAG='ns_kloss_isolado_t80_20261105'
+readonly EXPERIMENT_TAG="${EXPERIMENT_TAG:-ns_kloss_isolado_t80_20261105}"
 readonly REMOTE_BASE='/snfs2/igor.viveiros'
 readonly PRED_ROOT="$REMOTE_BASE/previsoes/$EXPERIMENT_TAG"
 readonly RESULT_ROOT_BASE="$REMOTE_BASE/result/$EXPERIMENT_TAG"
@@ -32,8 +32,9 @@ NS_MEMORY="${NS_MEMORY:-}"
 NS_NODELIST="${NS_NODELIST:-}"
 NS_CPU_WORKERS="${NS_CPU_WORKERS:-16}"
 
-# Grade editavel neste bloco; listas separadas por espacos. Lambda zero e apenas temporal.
-readonly MODEL='Nonstationary_Transformer'
+# MODEL tambem aceita lista pelo ambiente; demais listas sao editaveis neste bloco.
+# Listas separadas por espacos. Lambda zero e apenas temporal.
+readonly MODEL="${MODEL:-Nonstationary_Transformer}"
 readonly LOOKBACKS_VALUES='256 512'
 readonly HORIZON_VALUES='25'
 readonly K_LOSS_VALUES='1 5 25'
@@ -70,7 +71,8 @@ Caminho do repo: TFB_ROOT=/sonic_home/igor.viveiros/src/TFB (pode ser informado)
 Recursos opcionais: NS_PARTITION, NS_GRES, NS_TIME_LIMIT, NS_CPUS_PER_TASK,
 NS_MEMORY, NS_NODELIST, NS_CPU_WORKERS. Caminhos opcionais: NS_PYTHON_BIN,
 NS_VENV_PATH, NS_RETURNS_FILE, NS_MARKET_DIR, NS_STRATEGIES_FILE.
-RUN_TAG e grade sao definidos neste SH; variaveis de outras grades nao entram.
+EXPERIMENT_TAG e MODEL podem ser informados pelo ambiente (MODEL: nomes separados por espacos).
+RUN_TAG e derivado de EXPERIMENT_TAG; os demais parametros da grade sao definidos neste SH.
 
 Concorrencia de treino: 1 tarefa por array em cada um dos dois ramos = maximo 2
 jobs desta submissao. Arrays adicionais de um mesmo ramo sao encadeados pelo
