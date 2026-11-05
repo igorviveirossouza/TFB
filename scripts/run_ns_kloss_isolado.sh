@@ -32,7 +32,7 @@ NS_MEMORY="${NS_MEMORY:-}"
 NS_NODELIST="${NS_NODELIST:-}"
 NS_CPU_WORKERS="${NS_CPU_WORKERS:-16}"
 
-# Grade cientifica fixa; lambda zero e treinado somente no ramo temporal.
+# Grade editavel neste bloco; listas separadas por espacos. Lambda zero e apenas temporal.
 readonly MODEL='Nonstationary_Transformer'
 readonly LOOKBACKS_VALUES='256 512'
 readonly HORIZON_VALUES='25'
@@ -42,20 +42,22 @@ readonly CROSS_LOSSES_VALUES='ranknet ranknet_proximity'
 readonly K_EVAL_VALUES_FIXED='1 5 10 15 20 25'
 
 usage() {
-    cat <<'HELP'
+    cat <<HELP
 Uso: bash run_ns_kloss_isolado.sh ACAO [acao_cpu]
 
   --help                     Mostra esta ajuda; nao acessa o cluster.
-  --plan                     Lista os 38 treinos; nao usa Python ou Slurm.
+  --plan                     Lista e conta a grade configurada; nao usa Python ou Slurm.
   --dry-run                  Preflight + previas dos dois launchers; nao submete.
   --train | --submit         Preflight e duas previas antes de submeter os treinos.
   --backtest [planejar]       Planeja backtests CPU dos dois ramos; nao submete.
   --backtest submeter         Planeja ambos e depois submete dois jobs CPU.
   --backtest consolidar       Submete consolidacao dos dois backtests existentes.
 
-Grade: treino 80; NS; LB 256/512; H 25; K_loss 1/5/25; lambda 0/.5/.8/1.
-Losses positivas: ranknet sem mascara e ranknet_proximity/Cauchy natural a=.025.
-Controle: MSE temporal, uma vez por LB, compartilhado por losses e K_loss.
+Grade: treino 80; modelos: $MODEL; LB: $LOOKBACKS_VALUES; H: $HORIZON_VALUES.
+K_loss: $K_LOSS_VALUES; lambdas compostos: $POSITIVE_LAMBDAS; controle: lambda 0.
+Losses positivas: $CROSS_LOSSES_VALUES; proximity usa Cauchy natural a=.025.
+Controle: MSE temporal, uma vez por modelo/LB/H, compartilhado por losses e K_loss.
+Composto considera somente K_loss <= H e H divisivel por K_loss.
 Todos usam batch 16, seed 2026, 100 epocas, patience 10, LR 1e-4 e split interno .875.
 
 IMPORTANTE: o checkout utilizado deve conter os dois validadores atualizados
@@ -68,7 +70,7 @@ Caminho do repo: TFB_ROOT=/sonic_home/igor.viveiros/src/TFB (pode ser informado)
 Recursos opcionais: NS_PARTITION, NS_GRES, NS_TIME_LIMIT, NS_CPUS_PER_TASK,
 NS_MEMORY, NS_NODELIST, NS_CPU_WORKERS. Caminhos opcionais: NS_PYTHON_BIN,
 NS_VENV_PATH, NS_RETURNS_FILE, NS_MARKET_DIR, NS_STRATEGIES_FILE.
-RUN_TAG e grade sao fixos neste experimento; variaveis de outras grades nao entram.
+RUN_TAG e grade sao definidos neste SH; variaveis de outras grades nao entram.
 
 Concorrencia de treino: 1 tarefa por array em cada um dos dois ramos = maximo 2
 jobs desta submissao. Arrays adicionais de um mesmo ramo sao encadeados pelo
@@ -84,34 +86,73 @@ HELP
 
 die() { printf 'ERRO: %s\n' "$*" >&2; exit 2; }
 
-plan() {
-    local lb loss lam k index=0
-    printf 'NS treino 80 | H 25 | batch 16 | seed 2026 | LR 1e-4 | epocas 100 | patience 10\n'
-    printf 'Previsoes: %s\nResultados: %s\nBacktests: %s\n' "$PRED_ROOT" "$RESULT_ROOT_BASE" "$BACKTEST_ROOT"
-    printf 'Concorrencia: 1 por array de treino; ate 2 jobs entre os dois ramos.\n'
-    printf 'Pre-requisito: checkout com os dois validadores Python aceitando 0 < lambda <= 1.\n'
-    printf 'id\tramo\tloss\tlambda\tLB\tH\tK_loss\tmascara\n'
-    for lb in $LOOKBACKS_VALUES; do
-        index=$((index+1))
-        printf '%d\ttemporal\tmse\t0\t%d\t25\tNA\tcontrole compartilhado\n' "$index" "$lb"
+training_grid() {
+    local model lb h loss lam k mask value
+    local -a models lookbacks horizons windows losses lambdas
+    read -r -a models <<< "$MODEL"
+    read -r -a lookbacks <<< "$LOOKBACKS_VALUES"
+    read -r -a horizons <<< "$HORIZON_VALUES"
+    read -r -a windows <<< "$K_LOSS_VALUES"
+    read -r -a losses <<< "$CROSS_LOSSES_VALUES"
+    read -r -a lambdas <<< "$POSITIVE_LAMBDAS"
+    [[ ${#models[@]} -gt 0 && ${#lookbacks[@]} -gt 0 && ${#horizons[@]} -gt 0 &&
+       ${#windows[@]} -gt 0 && ${#losses[@]} -gt 0 && ${#lambdas[@]} -gt 0 ]] || die 'Lista vazia na grade.'
+    for value in "${lookbacks[@]}" "${horizons[@]}" "${windows[@]}"; do
+        [[ "$value" =~ ^[1-9][0-9]*$ ]] || die 'LB, H e K_loss devem ser inteiros positivos sem zeros a esquerda.'
     done
-    for loss in $CROSS_LOSSES_VALUES; do
-        for lam in $POSITIVE_LAMBDAS; do
-            for lb in $LOOKBACKS_VALUES; do
-                for k in $K_LOSS_VALUES; do
-                    index=$((index+1))
-                    if [[ "$loss" == ranknet_proximity ]]; then
-                        printf '%d\tcomposto\t%s\t%s\t%d\t25\t%d\tcauchy .025 natural\n' "$index" "$loss" "$lam" "$lb" "$k"
-                    else
-                        printf '%d\tcomposto\t%s\t%s\t%d\t25\t%d\tsem mascara\n' "$index" "$loss" "$lam" "$lb" "$k"
-                    fi
+    for model in "${models[@]}"; do
+        for lb in "${lookbacks[@]}"; do
+            for h in "${horizons[@]}"; do
+                printf 'temporal\t%s\tmse\t0\t%d\t%d\tNA\tcontrole compartilhado\n' "$model" "$lb" "$h"
+            done
+        done
+    done
+    for loss in "${losses[@]}"; do
+        mask='sem mascara'
+        [[ "$loss" != *_proximity ]] || mask='cauchy .025 natural'
+        for lam in "${lambdas[@]}"; do
+            for model in "${models[@]}"; do
+                for lb in "${lookbacks[@]}"; do
+                    for h in "${horizons[@]}"; do
+                        for k in "${windows[@]}"; do
+                            (( k <= h && h % k == 0 )) || continue
+                            printf 'composto\t%s\t%s\t%s\t%d\t%d\t%d\t%s\n' "$model" "$loss" "$lam" "$lb" "$h" "$k" "$mask"
+                        done
+                    done
                 done
             done
         done
     done
-    [[ "$index" -eq 38 ]] || die 'Contagem interna da grade divergiu de 38.'
-    printf 'TOTAL: 2 controles + 36 compostos = 38 treinos unicos.\n'
-    printf 'Avaliacao: K=%s; 38 x 6 = 228 celulas de modelo, 2 LB x 6 = 12 benchmarks momentum.\n' "$K_EVAL_VALUES_FIXED"
+}
+
+grid_counts() {
+    local branch rest
+    GRID_ROWS=$(training_grid)
+    GRID_CONTROLS=0; GRID_COMPOSITES=0
+    while IFS=$'\t' read -r branch rest; do
+        if [[ "$branch" == temporal ]]; then
+            GRID_CONTROLS=$((GRID_CONTROLS+1))
+        else
+            GRID_COMPOSITES=$((GRID_COMPOSITES+1))
+        fi
+    done <<< "$GRID_ROWS"
+    GRID_TOTAL=$((GRID_CONTROLS+GRID_COMPOSITES))
+}
+
+plan() {
+    local row index=0
+    grid_counts
+    printf 'Modelos: %s | treino 80 | H: %s | batch 16 | seed 2026 | LR 1e-4 | epocas 100 | patience 10\n' "$MODEL" "$HORIZON_VALUES"
+    printf 'Previsoes: %s\nResultados: %s\nBacktests: %s\n' "$PRED_ROOT" "$RESULT_ROOT_BASE" "$BACKTEST_ROOT"
+    printf 'Concorrencia: 1 por array de treino; ate 2 jobs entre os dois ramos.\n'
+    printf 'Pre-requisito: checkout com os dois validadores Python aceitando 0 < lambda <= 1.\n'
+    printf 'id\tramo\tmodelo\tloss\tlambda\tLB\tH\tK_loss\tmascara\n'
+    while IFS= read -r row; do
+        index=$((index+1))
+        printf '%d\t%s\n' "$index" "$row"
+    done <<< "$GRID_ROWS"
+    printf 'TOTAL: %d controles + %d compostos = %d treinos unicos.\n' "$GRID_CONTROLS" "$GRID_COMPOSITES" "$GRID_TOTAL"
+    printf 'Avaliacao CPU: K_eval=%s; somente K_eval <= H por previsao, sem novos treinos.\n' "$K_EVAL_VALUES_FIXED"
     printf 'Lambda 0 e momentum sao reutilizados nas tabelas; nao duplicar treinamento por painel.\n'
 }
 
@@ -192,9 +233,10 @@ training_launcher() {
 }
 
 training_previews() {
-    printf 'Previa autoritativa do controle (2 tarefas):\n'
+    grid_counts
+    printf 'Previa autoritativa do controle (%d tarefas; modelos: %s; H: %s):\n' "$GRID_CONTROLS" "$MODEL" "$HORIZON_VALUES"
     training_launcher temporal --dry-run
-    printf 'Previa autoritativa dos compostos (36 tarefas):\n'
+    printf 'Previa autoritativa dos compostos (%d tarefas; modelos: %s; H: %s):\n' "$GRID_COMPOSITES" "$MODEL" "$HORIZON_VALUES"
     training_launcher composto --dry-run
 }
 
@@ -261,7 +303,7 @@ main() {
             submission_mark treino
             training_launcher temporal submit
             training_launcher composto submit
-            printf 'Submissoes solicitadas: 2 controles + 36 compostos; ate 2 tarefas simultaneas.\n'
+            printf 'Submissoes solicitadas: %d controles + %d compostos = %d treinos; modelos: %s; H: %s; ate 2 tarefas simultaneas.\n' "$GRID_CONTROLS" "$GRID_COMPOSITES" "$GRID_TOTAL" "$MODEL" "$HORIZON_VALUES"
             ;;
         --backtest)
             [[ $# -le 2 ]] || die 'Argumentos excedentes.'
@@ -286,3 +328,4 @@ main() {
 }
 
 main "$@"
+
