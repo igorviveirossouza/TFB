@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 from contextlib import contextmanager
 import csv
+from datetime import datetime, timezone
 import fcntl
 import hashlib
 import io
@@ -20,6 +21,7 @@ from pathlib import Path
 import re
 import shlex
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -395,6 +397,26 @@ def record_completed(directory, row):
         atomic_text(path, csv_text(rows))
 
 
+def record_execution_metadata(paths, parquet_hash, signature):
+    """Record the successful worker's host, never the submission/requested node.
+
+    Sidecars travel with forecasts copied locally, without changing Parquet or
+    completed_tasks.csv schemas. The hash binds each record to its prediction.
+    Call only after export succeeds; already-completed tasks keep their origin.
+    """
+    hashes = json.loads(parquet_hash) if isinstance(parquet_hash, str) and parquet_hash.startswith('{') else None
+    execution = dict(schema_version=1, hostname=socket.gethostname(),
+                     completed_at_utc=datetime.now(timezone.utc).isoformat(),
+                     design_sha256=signature)
+    for variable in ('SLURM_NODENAME', 'SLURM_JOB_ID', 'SLURM_ARRAY_JOB_ID',
+                     'SLURM_ARRAY_TASK_ID', 'SLURM_JOB_PARTITION', 'SLURM_JOB_NODELIST'):
+        key = 'slurm_node_name' if variable == 'SLURM_NODENAME' else variable.lower()
+        execution[key] = os.environ.get(variable, '')
+    for horizon, path in paths.items():
+        row = dict(execution, parquet_sha256=hashes[horizon] if hashes is not None else parquet_hash)
+        atomic_text(path / 'execution_metadata.json', json.dumps(row, indent=2) + '\n')
+
+
 def var_forecasts(config, panel, cut):
     """Fit once before the test and forecast all origins with fixed coefficients."""
     import numpy as np
@@ -481,6 +503,7 @@ def worker(config, tasks, out_root, index):
             parquet_hash = file_hash(parquet)
         row = audit_row(config, task, metadata, out_root, signature)
         row.update(slurm_job_id=os.environ.get('SLURM_JOB_ID',''), parquet_sha256=parquet_hash)
+        record_execution_metadata(paths, parquet_hash, signature)
         record_completed(directory, row)
         print(f'OK: {len(paths)} arquivo(s) Parquet em {directory}', flush=True)
 
