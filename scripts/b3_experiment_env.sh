@@ -101,9 +101,13 @@ for key, raw in zip(sys.argv[1::2], sys.argv[2::2]):
         node = node.setdefault(part, {})
     node[parts[-1]] = value
 if mask_items is not None:
-    if len(mask_items) not in (2, 3):
-        raise ValueError('CROSS_MASK deve conter (tipo a) ou (tipo a modo)')
-    config['loss']['loss_cross_mask'] = [mask_items[0], float(mask_items[1]), *mask_items[2:]]
+    if len(mask_items) not in (2, 3, 4, 5):
+        raise ValueError('CROSS_MASK deve conter tipo a [modo [forma...]]; maximo dois parametros de forma')
+    mask = [mask_items[0], float(mask_items[1])]
+    if len(mask_items) >= 3:
+        mask.append(mask_items[2])
+        mask.extend(float(item) for item in mask_items[3:])
+    config['loss']['loss_cross_mask'] = mask
 print(json.dumps(config, allow_nan=False))
 PY
 )

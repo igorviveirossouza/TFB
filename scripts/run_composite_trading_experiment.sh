@@ -50,7 +50,9 @@ read -r -a DELTAS <<< "${DELTAS[*]:-0}"
 # Novas losses opcionais: hinge_proximity, ranknet_proximity, pairwise_mse_proximity.
 # Para executar apenas as novas, substitua CROSS_LOSSES acima por:
 # CROSS_LOSSES=(hinge_proximity ranknet_proximity pairwise_mse_proximity)
-# Vetor: máscara, a (escala do score realizado), modo natural/complementary.
+# Vetor: mascara, a, modo natural/complementary, parametros opcionais de forma.
+# Ex.: student 0.25 natural 10; generalized_gaussian 0.25 natural 4; compact 0.25 natural 2 3.
+# Aliases anteriores uniform/gaussian/cauchy preservam nomes, caminhos e parametros.
 # uniform: |R_i-R_j| <= a (a >= 0); gaussian: exp(-gap²/(2a²)) (a > 0).
 # cauchy: 1/(1+(gap/a)²) (a > 0); complementary usa 1-peso e zera empates.
 # Dois elementos continuam válidos: modo natural. DELTAS não filtra essas losses.
@@ -95,7 +97,12 @@ MASK_MODE_TAG=""
 if [[ "${CROSS_MASK[2]:-natural}" != natural ]]; then
   MASK_MODE_TAG="_${CROSS_MASK[2]}"
 fi
-export RUN_TAG="${RUN_TAG:-composto_${CROSS_MASK[0]}_a${CROSS_MASK[1]}${MASK_MODE_TAG}_k1_t80_v1}"
+MASK_SHAPE_TAG=""
+if (( ${#CROSS_MASK[@]} > 3 )); then
+  for mask_shape in "${CROSS_MASK[@]:3}"; do MASK_SHAPE_TAG+="_${mask_shape}"; done
+  MASK_SHAPE_TAG="_shape${MASK_SHAPE_TAG}"
+fi
+export RUN_TAG="${RUN_TAG:-composto_${CROSS_MASK[0]}_a${CROSS_MASK[1]}${MASK_MODE_TAG}${MASK_SHAPE_TAG}_k1_t80_v1}"
 
 
 VENV_PATH="${VENV_PATH:-/sonic_home/igor.viveiros/py310/bin/activate}"

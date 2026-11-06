@@ -32,7 +32,142 @@ from ts_benchmark.baselines.composite_trading_loss_v2 import (
 from ts_benchmark.baselines.proximity_losses import (
     PROXIMITY_LOSSES,
     validate_cross_mask,
+    kernel_parameters,
 )
+
+
+def _scaled_log_weights(log_weights, dtype):
+    """Rescaling cancels in a weighted mean, including extremely small weights."""
+    maximum = log_weights.amax(dim=1, keepdim=True)
+    shift = torch.where(torch.isfinite(maximum), maximum, torch.zeros_like(maximum))
+    return torch.exp(log_weights - shift).to(dtype)
+
+
+def _log_complement(log_energy):
+    """log(1-exp(-E)) from log(E), retaining complements below float64 range."""
+    return torch.where(
+        log_energy < -36.0,
+        log_energy,
+        (-torch.expm1(-torch.exp(log_energy))).log(),
+    )
+
+
+def proximity_weights(gap, mask, dtype):
+    """Pair weights, rescaled per cross-section, with exact legacy special cases.
+
+    Natural finite-support kernels and the intermediate band may have no active
+    pair. Such rows remain zero. Complements use the original kernel, not its
+    rescaled weights. As in the existing complement contract, ties stay zero.
+    """
+    mask_name, bandwidth = mask[:2]
+    mode = mask[2] if len(mask) >= 3 else "natural"
+    family, shape = kernel_parameters(mask)
+    # Route equivalent family specifications through the original arithmetic.
+    if family == "student" and shape[0] == 1:
+        mask_name = "cauchy"
+    elif family == "generalized_gaussian" and shape[0] == 2:
+        mask_name = "gaussian"
+    elif family == "compact" and shape[1] == 0:
+        mask_name = "uniform"
+    if mask_name == "uniform":
+        eligible = gap <= bandwidth if mode == "natural" else gap > bandwidth
+        return eligible.to(dtype)
+    if mask_name == "gaussian" and mode == "natural":
+        min_gap = gap.amin(dim=1, keepdim=True)
+        distance_from_min = gap - min_gap
+        relative_energy = ((distance_from_min / bandwidth)
+                           * ((gap + min_gap) / bandwidth) * 0.5)
+        relative_energy = torch.where(distance_from_min == 0,
+                                      torch.zeros_like(relative_energy), relative_energy)
+        return torch.exp(-relative_energy).to(dtype)
+    log_u = gap.log() - math.log(bandwidth)
+    if mask_name in {"cauchy", "gaussian"}:
+        # Original Cauchy / complementary-Gaussian path, deliberately unchanged.
+        log_ratio_squared = 2.0 * log_u
+        if mask_name == "cauchy":
+            log_weights = -F.softplus(log_ratio_squared if mode == "natural" else -log_ratio_squared)
+        else:
+            log_weights = _log_complement(log_ratio_squared - math.log(2.0))
+        return _scaled_log_weights(log_weights, dtype)
+    if family == "student":
+        nu = shape[0]
+        coefficient = (nu + 1.0) / 2.0
+        log_ratio = 2.0 * log_u - math.log(nu)
+        soft = F.softplus(log_ratio)
+        if mode == "natural":
+            difference = soft - soft.amin(dim=1, keepdim=True)
+            return torch.exp(-coefficient * difference).to(dtype)
+        log_soft = torch.where(log_ratio < -36.0, log_ratio, soft.log())
+        log_weights = _log_complement(math.log(coefficient) + log_soft)
+    elif family == "generalized_gaussian":
+        p = shape[0]
+        log_energy = p * log_u - math.log(p)
+        if mode == "natural":
+            minimum = log_u.amin(dim=1, keepdim=True)
+            log_difference = p * log_u + torch.log(-torch.expm1(p * (minimum - log_u))) - math.log(p)
+            relative = torch.where(log_u == minimum, torch.zeros_like(log_u), torch.exp(log_difference))
+            return torch.exp(-relative).to(dtype)
+        log_weights = _log_complement(log_energy)
+    elif family == "compact":
+        p, q = shape
+        inside = gap < bandwidth  # q>0: boundary has exactly zero natural weight.
+        log_power = p * log_u
+        log_one_minus = torch.log(-torch.expm1(log_power.clamp_max(0.0)))
+        if mode == "natural":
+            valid_log = torch.where(inside, log_one_minus, torch.full_like(log_u, -torch.inf))
+            maximum = valid_log.amax(dim=1, keepdim=True)
+            shift = torch.where(torch.isfinite(maximum), maximum, torch.zeros_like(maximum))
+            log_weights = torch.where(inside, q * (log_one_minus - shift),
+                                      torch.full_like(log_u, -torch.inf))
+        else:
+            # E=-q*log(1-u^p); log(E)~log(q)+p*log(u) near the centre.
+            log_e = torch.where(log_power < -36.0, math.log(q) + log_power,
+                                math.log(q) + (-log_one_minus).log())
+            log_weights = torch.where(inside, _log_complement(log_e), torch.zeros_like(log_u))
+    elif family == "cosine":
+        inside = gap < bandwidth
+        u = torch.exp(log_u.clamp_max(0.0))
+        if mode == "natural":
+            log_weights = torch.where(inside, torch.cos(math.pi * u / 2.0).log(),
+                                      torch.full_like(log_u, -torch.inf))
+        else:
+            # 1-cos(pi*u/2)=2*sin(pi*u/4)^2; use its logarithmic limit near zero.
+            log_sin = torch.where(log_u < -18.0, log_u + math.log(math.pi / 4.0),
+                                  torch.sin(math.pi * u / 4.0).log())
+            log_weights = torch.where(inside, math.log(2.0) + 2.0 * log_sin,
+                                      torch.zeros_like(log_u))
+    elif family == "intermediate_band":
+        p = shape[0]
+        # phi(u)=u-1-log(u), nonnegative; use a series around u=1 to avoid
+        # cancellation and retain a complementary zero exactly at the peak.
+        x = log_u
+        series = x.square() * (0.5 + x / 6.0 + x.square() / 24.0 + x.pow(3) / 120.0)
+        phi = torch.where(x.abs() < 1e-3, series, torch.expm1(x) - x).clamp_min(0.0)
+        phi = torch.where(gap > 0, phi, torch.full_like(phi, torch.inf))
+        if mode == "natural":
+            reference = phi.argmin(dim=1, keepdim=True)
+            # If every u overflows, monotonic right tail selects the smallest u.
+            finite = torch.isfinite(phi).any(dim=1, keepdim=True)
+            positive_log_u = torch.where(gap > 0, x, torch.full_like(x, torch.inf))
+            reference = torch.where(finite, reference, positive_log_u.argmin(dim=1, keepdim=True))
+            ref_x = x.gather(1, reference)
+            ref_phi = phi.gather(1, reference)
+            delta = phi - ref_phi
+            # Stable right-tail difference when both exponentials overflow.
+            dx = x - ref_x
+            du = torch.exp(torch.maximum(x, ref_x) + torch.log(-torch.expm1(-dx.abs()))) * dx.sign()
+            tail_delta = torch.where(dx == 0, torch.zeros_like(dx), du - dx)
+            delta = torch.where(torch.isfinite(ref_phi), delta, tail_delta).clamp_min(0.0)
+            relative = p * delta
+            log_weights = torch.where(gap > 0, -relative, torch.full_like(x, -torch.inf))
+        else:
+            log_weights = _log_complement(math.log(p) + phi.log())
+    else:
+        raise ValueError("Familia de kernel desconhecida: " + family)
+    if mode == "complementary":
+        log_weights = torch.where(gap > 0, log_weights, torch.full_like(log_weights, -torch.inf))
+    return _scaled_log_weights(log_weights, dtype)
+
 
 
 def build_loss(config, normalizer_mean=None, normalizer_scale=None):
@@ -233,7 +368,8 @@ class CompositeTradingLossV3(CompositeTradingLossV2):
         Normalize weights independently within each [N]-asset cross-section,
         then average its loss over batch elements and trading blocks. A mask
         with no eligible pair contributes a differentiable zero. Natural masks
-        include ties; complementary masks give ties exactly zero weight. This
+        retain their value at ties (zero for the intermediate band); complements
+        give ties exactly zero weight. This
         intentionally does not use V2's tie-excluding pair validity helper.
 
         As in the original V3, optional z-scoring couples all asset scores:
@@ -253,53 +389,7 @@ class CompositeTradingLossV3(CompositeTradingLossV2):
         realized = target_raw.to(torch.float64)
         realized_diff = realized[:, rows] - realized[:, cols]
         gap = realized_diff.abs()
-        mask_name, bandwidth = self.cross_mask[:2]
-        mode = self.cross_mask[2] if len(self.cross_mask) == 3 else "natural"
-        if mask_name == "uniform":
-            eligible = gap <= bandwidth if mode == "natural" else gap > bandwidth
-            weights = eligible.to(pred_raw.dtype)
-        elif mask_name == "gaussian" and mode == "natural":
-            # exp(log(w) - max(log(w))) cancels in the weighted mean. Compute
-            # differences of squares in factored form so every closest pair
-            # has weight 1 even when ALL original Gaussian weights underflow.
-            min_gap = gap.amin(dim=1, keepdim=True)
-            distance_from_min = gap - min_gap
-            relative_energy = (
-                (distance_from_min / bandwidth)
-                * ((gap + min_gap) / bandwidth)
-                * 0.5
-            )
-            relative_energy = torch.where(
-                distance_from_min == 0,
-                torch.zeros_like(relative_energy),
-                relative_energy,
-            )
-            weights = torch.exp(-relative_energy).to(pred_raw.dtype)
-        else:
-            log_ratio_squared = 2.0 * (gap.log() - math.log(bandwidth))
-            if mask_name == "cauchy":
-                # Natural: 1/(1+r²). Complementary: r²/(1+r²).
-                # Log-space sigmoid identities avoid overflow and preserve
-                # relative weights even when all absolute weights underflow.
-                log_weights = -F.softplus(
-                    log_ratio_squared if mode == "natural" else -log_ratio_squared
-                )
-            else:
-                # Complement the ORIGINAL Gaussian, never its row-rescaled
-                # natural weights: w=1-exp(-x), x=r²/2. expm1 preserves small
-                # positive weights; log(w)~log(x) below machine precision also
-                # handles x too small to be represented even in float64.
-                log_energy = log_ratio_squared - math.log(2.0)
-                log_weights = torch.where(
-                    log_energy < -36.0,
-                    log_energy,
-                    (-torch.expm1(-torch.exp(log_energy))).log(),
-                )
-            maximum = log_weights.amax(dim=1, keepdim=True)
-            # All exact ties in complementary mode: log weights are -inf.
-            # A finite shift preserves their zeros without an inf-inf NaN.
-            shift = torch.where(torch.isfinite(maximum), maximum, torch.zeros_like(maximum))
-            weights = torch.exp(log_weights - shift).to(pred_raw.dtype)
+        weights = proximity_weights(gap, self.cross_mask, pred_raw.dtype)
 
         pred, target = self._normalize_cross_scores(pred_raw, target_raw)
         pred_diff = pred[:, rows] - pred[:, cols]

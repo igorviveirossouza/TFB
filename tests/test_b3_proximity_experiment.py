@@ -97,7 +97,7 @@ def test_original_grid_counts_remain_unchanged(shell_config):
 
 @pytest.mark.parametrize("mask", [
     None, [], ["uniform"], ["uniform", .1, .2], "uniform 0.1",
-    {"type": "uniform", "a": .1}, ["triangular", .1], ["uniform", -.1],
+    {"type": "uniform", "a": .1}, ["unsupported_kernel", .1], ["uniform", -.1],
     ["gaussian", 0], ["gaussian", -.1], ["uniform", float("nan")],
     ["uniform", float("inf")], ["gaussian", float("-inf")],
     ["uniform", True], ["uniform", "abc"],

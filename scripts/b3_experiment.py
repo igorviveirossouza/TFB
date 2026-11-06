@@ -120,8 +120,10 @@ def make_tasks(config, mode):
                                 modelo=model, lookback=lb, pred_len=horizon, k=k)
                     if mask is not None:
                         task.update(mask_type=mask[0], mask_a=mask[1])
-                        if len(mask) == 3:
+                        if len(mask) >= 3 and mask[2] != 'natural':
                             task['mask_mode'] = mask[2]
+                        if len(mask) > 3:
+                            task['mask_shape'] = list(mask[3:])
                     tasks.append(task)
     return tasks
 
@@ -140,6 +142,8 @@ def output_path(task):
             path = path / f"mask={task['mask_type']}" / f"a={float(task['mask_a'])!r}"
             if task.get('mask_mode', 'natural') != 'natural':
                 path /= f"mask_mode={task['mask_mode']}"
+            if task.get('mask_shape'):
+                path /= 'shape=' + '_'.join(repr(float(x)) for x in task['mask_shape'])
     path = path / f"modelo={task['modelo']}" / f"lookback={task['lookback']}" / f"pred_len={task['pred_len']}"
     if task['k'] is not None:
         path /= f"k_dir={task['k']}"
@@ -164,7 +168,8 @@ def model_spec(config, task):
     hyper.pop('loss_cross_mask', None)
     if task['loss'] in PROXIMITY_LOSSES:
         hyper['loss_cross_mask'] = list(validate_cross_mask(
-            [task['mask_type'], task['mask_a'], task.get('mask_mode', 'natural')]))
+            [task['mask_type'], task['mask_a'], task.get('mask_mode', 'natural'),
+             *task.get('mask_shape', [])]))
     hyper.update(loss='composite_trading' if task['experimento'] == 'composto' else config['loss']['loss_temporal'], loss_cross=task['loss'],
                  loss_trade_window=task['k'] or 1,
                  loss_cross_lambda=task['cross_lambda'], loss_cross_delta=task['cross_delta'])
@@ -240,6 +245,7 @@ def audit_row(config, task, metadata, out_root, signature):
                 mask_type=task.get('mask_type', ''), mask_a=task.get('mask_a', ''),
                 mask_mode=task.get('mask_mode', 'natural') if task['loss'] in PROXIMITY_LOSSES else '',
                 mask_effective=task['loss'] in PROXIMITY_LOSSES,
+                mask_shape=json.dumps(task['mask_shape'], separators=(',', ':')) if task.get('mask_shape') else '',
                 cross_blocks=cross_blocks,
                 cross_steps=cross_blocks * task['k'] if task['k'] is not None else '',
                 cross_tail_steps=task['pred_len'] % task['k'] if task['k'] is not None else '',
@@ -532,8 +538,13 @@ def sbatch_command(mode, offset, count, previous=None):
     gres = os.environ.get('GRES', '' if mode == 'var' else 'gpu:1')
     if gres:
         command.append(f'--gres={gres}')
-    if previous:
-        command += [f'--dependency=afterany:{previous}']
+    # Optional dependency chains independent wrapper branches without changing
+    # the existing within-branch array chaining or legacy submissions.
+    dependency = previous if previous is not None else os.environ.get('B3_AFTER_JOB', '')
+    if dependency:
+        if not isinstance(dependency, str) or not re.fullmatch(r'[0-9]+', dependency):
+            raise ValueError('B3_AFTER_JOB/dependencia deve ser um ID Slurm numerico.')
+        command += [f'--dependency=afterany:{dependency}']
     launcher = os.environ.get('B3_WORKER_LAUNCHER')
     if launcher:
         command += [launcher, '--on-node', mode, 'worker', '--offset', str(offset)]
@@ -615,9 +626,10 @@ def main():
         if any(loss in PROXIMITY_LOSSES for loss in config['cross_losses']):
             mask = validate_cross_mask(config['loss']['loss_cross_mask'])
             mask_type, mask_a = mask[:2]
-            mask_mode = mask[2] if len(mask) == 3 else 'natural'
-            ties = 'empates com peso zero' if mask_mode == 'complementary' else 'inclui empates'
-            print(f'Proximity: máscara={mask_type}, a={mask_a!r}, modo={mask_mode}; {ties}; '
+            mask_mode = mask[2] if len(mask) >= 3 else 'natural'
+            ties = 'empates com peso zero' if mask_mode == 'complementary' or mask_type == 'intermediate_band' else 'inclui empates'
+            shape_note = f', formato={list(mask[3:])}' if len(mask) > 3 else ''
+            print(f'Proximity: máscara={mask_type}, a={mask_a!r}, modo={mask_mode}{shape_note}; {ties}; '
                   'delta não se aplica, sem repetir DELTAS.', flush=True)
     if args.dry_run:
         chunks = array_chunks(len(tasks), int(os.environ.get('ARRAY_CHUNK_SIZE','1000')))

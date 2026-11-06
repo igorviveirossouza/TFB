@@ -27,26 +27,57 @@ _PROXIMITY = {"hinge_proximity", "ranknet_proximity", "pairwise_mse_proximity"}
 _LOSSES = {"ranknet", "hinge", "listnet", "pairwise_mse"} | _PROXIMITY
 
 
-def _cross_mask(cfg):
-    """Mirror the producer's mask contract in the self-contained CPU snapshot."""
-    value = cfg["loss"].get("loss_cross_mask")
-    if not isinstance(value, (list, tuple)) or len(value) not in (2, 3):
-        raise ValueError("loss_cross_mask deve ser [tipo, a] ou [tipo, a, modo].")
-    name, bandwidth = value[:2]
-    mode = value[2] if len(value) == 3 else "natural"
-    if not isinstance(name, str) or name.strip().lower() not in {"uniform", "gaussian", "cauchy"}:
+# Mirror kept self-contained because CPU snapshots do not import training code.
+def _validate_cross_mask(value) -> tuple:
+    """Validate aliases or [family, A, mode, *shape] without torch/numpy.
+
+    Legacy natural aliases retain two fields, preserving old hyperparameters,
+    paths and cache keys. Parameterized families always retain explicit mode.
+    A is measured in original realized financial-score units, before z-scoring.
+    """
+    aliases = {"uniform", "gaussian", "cauchy", "cosine", "laplace",
+               "triangular", "epanechnikov", "biweight", "triweight"}
+    arity = {"student": 1, "generalized_gaussian": 1,
+             "compact": 2, "intermediate_band": 1}
+    if not isinstance(value, (list, tuple)) or len(value) < 2:
+        raise ValueError("loss_cross_mask exige [tipo, a, modo opcional, parametros de forma].")
+    name = value[0]
+    if not isinstance(name, str) or name.strip().lower() not in aliases | set(arity):
         raise ValueError("Tipo de loss_cross_mask invalido.")
     name = name.strip().lower()
+    required = 3 + arity[name] if name in arity else None
+    if (required is not None and len(value) != required) or (required is None and len(value) not in (2, 3)):
+        raise ValueError("Numero de parametros de loss_cross_mask invalido para " + name)
+    mode = value[2] if len(value) >= 3 else "natural"
     if not isinstance(mode, str) or mode.strip().lower() not in {"natural", "complementary"}:
-        raise ValueError("Modo de loss_cross_mask invalido.")
+        raise ValueError("O modo de loss_cross_mask deve ser 'natural' ou 'complementary'.")
     mode = mode.strip().lower()
-    if isinstance(bandwidth, bool) or not isinstance(bandwidth, Real):
-        raise ValueError("a da mascara deve ser numerico e finito.")
-    bandwidth = _number(bandwidth, "mask_a")
-    if bandwidth < 0 or (name in {"gaussian", "cauchy"} and bandwidth == 0):
-        raise ValueError("Mascara exige a >= 0 (uniform) ou a > 0 (gaussian/cauchy).")
-    # Natural remains the original two-item identity, including explicit natural.
+
+    def number(raw, label):
+        if isinstance(raw, bool) or not isinstance(raw, Real):
+            raise ValueError(label + " de loss_cross_mask deve ser numerico e finito.")
+        try:
+            result = float(raw)
+        except (ValueError, OverflowError) as exc:
+            raise ValueError(label + " de loss_cross_mask deve ser finito.") from exc
+        if not math.isfinite(result):
+            raise ValueError(label + " de loss_cross_mask deve ser finito.")
+        return result
+
+    bandwidth = number(value[1], "Parametro a")
+    shape = tuple(number(raw, "Parametro de forma") for raw in value[3:])
+    if shape:
+        if shape[0] <= 0 or (name == "compact" and shape[1] < 0):
+            raise ValueError("Parametros de forma de loss_cross_mask exigem nu/p > 0 e q >= 0.")
+    zero_ok = name == "uniform" or (name == "compact" and shape[1] == 0)
+    if bandwidth < 0 or (bandwidth == 0 and not zero_ok):
+        raise ValueError("loss_cross_mask exige a > 0, salvo uniforme (a >= 0).")
+    if name in arity:
+        return (name, bandwidth, mode, *shape)
     return (name, bandwidth) if mode == "natural" else (name, bandwidth, mode)
+
+def _cross_mask(cfg):
+    return _validate_cross_mask(cfg["loss"].get("loss_cross_mask"))
 
 
 def _sha(data):
@@ -173,8 +204,10 @@ def _expected_tasks(cfg, pct):
                                         "k_dir": k_dir, "delta_effective": loss != "listnet" and mask is None})
                     if mask is not None:
                         definitions[-1].update(mask_type=mask[0], mask_a=mask[1])
-                        if len(mask) == 3:
+                        if len(mask) >= 3 and mask[2] != "natural":
                             definitions[-1]["mask_mode"] = mask[2]
+                        if len(mask) > 3:
+                            definitions[-1]["mask_shape"] = list(mask[3:])
     if not definitions:
         raise ValueError("Grade composta sem pares H/K de treino elegiveis.")
     offset = cfg["train_percentages"].index(pct)*len(definitions)
@@ -186,6 +219,8 @@ def _expected_tasks(cfg, pct):
             path = path/f"mask={task['mask_type']}"/f"a={task['mask_a']!r}"
             if "mask_mode" in task:
                 path = path/f"mask_mode={task['mask_mode']}"
+            if task.get("mask_shape"):
+                path = path/("shape=" + "_".join(repr(float(x)) for x in task["mask_shape"]))
         task["relpath"] = str(path/f"modelo={task['modelo']}"/f"lookback={task['lookback']}"
                               /f"pred_len={task['pred_len']}"/f"k_dir={task['k_dir']}")
     if len({t["relpath"] for t in definitions}) != len(definitions):
@@ -230,9 +265,10 @@ def _validate_row(row, task, cfg, meta, plan, market, cut):
         if (row.get("mask_type") != task["mask_type"]
                 or _number(row.get("mask_a"), "mask_a") != task["mask_a"]
                 or row.get("mask_mode", "natural") != task.get("mask_mode", "natural")
+                or row.get("mask_shape", "") != (json.dumps(task["mask_shape"], separators=(",", ":")) if task.get("mask_shape") else "")
                 or row.get("mask_effective", "").lower() != "true"):
             raise ValueError(f"Mascara divergente na auditoria: {identity}")
-    elif (row.get("mask_type", "") or row.get("mask_a", "") or row.get("mask_mode", "")
+    elif (row.get("mask_type", "") or row.get("mask_a", "") or row.get("mask_mode", "") or row.get("mask_shape", "")
           or row.get("mask_effective", "false").lower() != "false"):
         raise ValueError(f"Mascara ativa para loss original: {identity}")
     horizon = task["pred_len"]
@@ -252,8 +288,9 @@ def _validate_row(row, task, cfg, meta, plan, market, cut):
     hyper.pop("loss_cross_mask", None)
     if task["loss"] in _PROXIMITY:
         hyper["loss_cross_mask"] = [task["mask_type"], task["mask_a"]]
-        if "mask_mode" in task:
-            hyper["loss_cross_mask"].append(task["mask_mode"])
+        if "mask_mode" in task or task.get("mask_shape"):
+            hyper["loss_cross_mask"].append(task.get("mask_mode", "natural"))
+        hyper["loss_cross_mask"].extend(task.get("mask_shape", []))
     hyper.update(loss="composite_trading", loss_cross=task["loss"], loss_trade_window=task["k_dir"],
                  loss_cross_lambda=task["cross_lambda"], loss_cross_delta=task["cross_delta"])
     strategy = dict(cfg["strategy"])
