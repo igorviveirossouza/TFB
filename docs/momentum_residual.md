@@ -43,6 +43,21 @@ na origem e permanece o mesmo nos diferentes blocos futuros dessa origem.
 
 ## Terminal
 
+O experimento dedicado usa `scripts/run_ns_momentum_kernels_isolado.sh`:
+
+```bash
+bash scripts/run_ns_momentum_kernels_isolado.sh --plan
+bash scripts/run_ns_momentum_kernels_isolado.sh --dry-run
+bash scripts/run_ns_momentum_kernels_isolado.sh --train
+```
+
+Defaults: Nonstationary, treino80, LB256/512, H1/25, K_loss1, lambdas0/.5/.8/1,
+RankNet/RankNet proximity, 12 kernels naturais com A0.25, momentum ativo com L=LB
+da rede e eta0.01. São 160 treinos: 4 controles temporais, 12 RankNet sem kernel
+e 144 proximity. Eta0.01 é um ponto inicial editável, sem ajuste empírico.
+O script delega ao launcher de kernels existente e respeita seus exports; os
+defaults do launcher antigo permanecem iguais. `--help` lista as opções.
+
 As opções valem para `run_ns_kloss_isolado.sh`, `run_ns_kernels_isolado.sh` e para
 o launcher composto. Use uma nova tag para manter os exercícios separados:
 
