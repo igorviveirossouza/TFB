@@ -23,6 +23,8 @@ export MOMENTUM_LOOKBACK="${MOMENTUM_LOOKBACK:-}"
 # Valor inicial de regularizacao, nao resultado de ajuste empirico.
 # Zero desliga somente a penalizacao; MOMENTUM_MODE=off desliga o modulo.
 export MOMENTUM_ETA="${MOMENTUM_ETA:-0.01}"
+export MOMENTUM_GAIN_INIT="${MOMENTUM_GAIN_INIT:-0}"
+export MOMENTUM_DIAGNOSTICS="${MOMENTUM_DIAGNOSTICS:-0}"
 export NS_MASK_A="${NS_MASK_A:-0.25}"
 export NS_MASK_MODE="${NS_MASK_MODE:-natural}"
 export KERNEL_SPECS="${KERNEL_SPECS:-cauchy;student 10;generalized_gaussian 1;generalized_gaussian 2;generalized_gaussian 4;compact 2 0;compact 1 1;compact 2 1;compact 2 2;compact 2 3;cosine;intermediate_band 2}"
@@ -31,6 +33,7 @@ export NS_BATCH_SIZE="${NS_BATCH_SIZE:-16}"
 export NS_NUM_EPOCHS="${NS_NUM_EPOCHS:-100}"
 export NS_PATIENCE="${NS_PATIENCE:-10}"
 export NS_LEARNING_RATE="${NS_LEARNING_RATE:-0.0001}"
+export NS_LRADJ="${NS_LRADJ:-}" # Vazio conserva a regra nativa de cada modelo.
 export NS_TEMPORAL_LOSS="${NS_TEMPORAL_LOSS:-mse}"
 export NS_TRAIN_RATIO_IN_TV="${NS_TRAIN_RATIO_IN_TV:-0.875}"
 export NS_SEED="${NS_SEED:-2026}"
@@ -64,12 +67,15 @@ Grade default: 4 controles + 12 RankNet + 12 kernels x 12 proximity = 160 treino
 
 Pool: cauchy; student nu10; generalized_gaussian p1/2/4;
 compact (p,q)=(2,0)/(1,1)/(2,1)/(2,2)/(2,3); cosine; intermediate_band p2.
-Ganho residual inicial zero; eta=0 remove a penalizacao; modo off desliga o modulo.
+Ganho residual inicial zero (MOMENTUM_GAIN_INIT); eta=0 remove a penalizacao.
+MOMENTUM_DIAGNOSTICS=1 registra a evolucao do treino; modo off desliga o modulo.
+NS_LRADJ vazio preserva o modelo; type1 decai; constant mantem a taxa de aprendizado.
 
 Todos os defaults deste arquivo aceitam export. Principais parametros:
 EXPERIMENT_TAG, MODEL, TRAIN_VALUES, LOOKBACKS_VALUES, HORIZON_VALUES,
 K_LOSS_VALUES, POSITIVE_LAMBDAS, CROSS_LOSSES_VALUES, DELTAS_VALUES, K_EVAL_VALUES,
-MOMENTUM_MODE, MOMENTUM_LOOKBACK, MOMENTUM_ETA, NS_MASK_A, NS_MASK_MODE, KERNEL_SPECS.
+MOMENTUM_MODE, MOMENTUM_LOOKBACK, MOMENTUM_ETA, MOMENTUM_GAIN_INIT,
+MOMENTUM_DIAGNOSTICS, NS_LRADJ, NS_MASK_A, NS_MASK_MODE, KERNEL_SPECS.
 Ex.: export CROSS_LOSSES_VALUES="hinge hinge_proximity"
 Ex.: export KERNEL_SPECS="cauchy;student 10;cosine"
 Cada proximity exige sua loss sem kernel. POSITIVE_LAMBDAS nao deve incluir zero.

@@ -34,7 +34,9 @@ from ts_benchmark.baselines.proximity_losses import PROXIMITY_LOSSES, validate_c
 LAUNCHERS = {'temporal': 'run_temporal_experiment.sh',
              'composto': 'run_composite_trading_experiment.sh',
              'var': 'run_var_experiment.sh'}
-MOMENTUM_KEYS = ('momentum_mode', 'momentum_lookback', 'momentum_eta')
+MOMENTUM_KEYS = ('momentum_mode', 'momentum_lookback', 'momentum_eta',
+                 'momentum_gain_init', 'momentum_diagnostics')
+LR_SCHEDULES = {'type1', 'type2', 'type3', 'constant'}
 MOMENTUM_MODELS = {'Nonstationary_Transformer', 'DUET', 'TimesNet', 'FEDformer'}
 
 
@@ -53,6 +55,11 @@ def momentum_options(config):
     eta = loss.get('momentum_eta', 0.0)
     if type(eta) not in (int, float) or not math.isfinite(eta) or eta < 0:
         raise ValueError('MOMENTUM_ETA deve ser finito e não negativo')
+    gain_init = loss.get('momentum_gain_init', 0.0)
+    if type(gain_init) not in (int, float) or not math.isfinite(gain_init):
+        raise ValueError('MOMENTUM_GAIN_INIT deve ser um numero finito')
+    if type(loss.get('momentum_diagnostics', False)) is not bool:
+        raise ValueError('MOMENTUM_DIAGNOSTICS deve ser booleano')
     return mode, lookback, float(eta)
 
 
@@ -124,11 +131,20 @@ def load_config():
     for key in ('num_epochs', 'patience', 'lr'):
         if not math.isfinite(config['training'][key]) or config['training'][key] <= 0:
             raise ValueError(f'{key} deve ser positivo e finito')
+    if 'lradj' in config['training'] and (not isinstance(config['training']['lradj'], str)
+                                           or config['training']['lradj'] not in LR_SCHEDULES):
+        raise ValueError('LRADJ deve ser type1, type2, type3 ou constant')
     mode, _, _ = momentum_options(config)
     if mode == 'off':
         # The opt-out keeps historical config identities and cache keys intact.
         for key in MOMENTUM_KEYS:
             config['loss'].pop(key, None)
+    else:
+        # Neutral new options must not change old frozen design identities.
+        if config['loss'].get('momentum_gain_init', 0.0) == 0.0:
+            config['loss'].pop('momentum_gain_init', None)
+        if not config['loss'].get('momentum_diagnostics', False):
+            config['loss'].pop('momentum_diagnostics', None)
     validate_momentum_experiment(config)
     return path, config
 
@@ -168,6 +184,10 @@ def make_tasks(config, mode):
                         task.update(momentum_mode=momentum_mode,
                                     momentum_lookback=momentum_lb or lb,
                                     momentum_eta=momentum_eta)
+                        if config['loss'].get('momentum_gain_init', 0.0) != 0.0:
+                            task['momentum_gain_init'] = float(config['loss']['momentum_gain_init'])
+                        if config['loss'].get('momentum_diagnostics', False):
+                            task['momentum_diagnostics'] = True
                     if mask is not None:
                         task.update(mask_type=mask[0], mask_a=mask[1])
                         if len(mask) >= 3 and mask[2] != 'natural':
@@ -198,6 +218,8 @@ def output_path(task):
             path = (path / 'momentum=residual_output' /
                     f"momentum_lb={task['momentum_lookback']}" /
                     f"momentum_eta={float(task['momentum_eta'])!r}")
+            if task.get('momentum_gain_init', 0.0) != 0.0:
+                path /= f"momentum_gain_init={float(task['momentum_gain_init'])!r}"
     path = path / f"modelo={task['modelo']}" / f"lookback={task['lookback']}" / f"pred_len={task['pred_len']}"
     if task['k'] is not None:
         path /= f"k_dir={task['k']}"
@@ -222,7 +244,7 @@ def model_spec(config, task):
     for key in MOMENTUM_KEYS:
         hyper.pop(key, None)
     if task.get('momentum_mode') == 'residual_output':
-        hyper.update({key: task[key] for key in MOMENTUM_KEYS})
+        hyper.update({key: task[key] for key in MOMENTUM_KEYS if key in task})
     # Inactive masks must not change the original models' hyperparameters/cache keys.
     hyper.pop('loss_cross_mask', None)
     if task['loss'] in PROXIMITY_LOSSES:
@@ -690,7 +712,11 @@ def main():
         if momentum_options(config)[0] != 'off':
             _, lookback, eta = momentum_options(config)
             print(f'Momentum residual: LB={lookback or "LB do modelo"}; eta={eta:g}; '
+                  f"ganho inicial={config['loss'].get('momentum_gain_init', 0.0):g}; "
+                  f"diagnostico={config['loss'].get('momentum_diagnostics', False)}; "
                   'controle temporal inalterado; scores em ranking_scores.parquet.', flush=True)
+            print(f"Taxa de aprendizado: LR={config['training']['lr']:g}; "
+                  f"regra={config['training'].get('lradj', 'default do modelo')}.", flush=True)
         pairs = sum(k <= h and h % k == 0 for h in config['horizons'] for k in config['trade_windows'])
         factors = [len(config[key]) for key in ('train_percentages', 'models', 'lookbacks')]
         variants = sum(len(cross_deltas(config, loss)) for loss in config['cross_losses'])

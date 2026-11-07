@@ -46,7 +46,7 @@ B3_INLINE_CONFIG=$("$PYTHON_BIN" - \
   lambdas "${LAMBDAS[*]}" deltas "${DELTAS[*]}" \
   model_defaults "$MODEL_DEFAULTS_JSON" var_lags "${VAR_LAGS:-32}" \
   training.num_epochs "${NUM_EPOCHS:-100}" training.patience "${PATIENCE:-10}" \
-  training.lr "${LEARNING_RATE:-0.0001}" \
+  training.lr "${LEARNING_RATE:-0.0001}" training.lradj "${LRADJ:-}" \
   loss.loss_temporal "${TEMPORAL_LOSS:-mse}" loss.loss_data_kind log_return \
   loss.loss_score_kind "${SCORE_KIND:-simple_return}" \
   loss.loss_cross_score_normalization "${CROSS_SCORE_NORMALIZATION:-zscore}" \
@@ -56,6 +56,7 @@ B3_INLINE_CONFIG=$("$PYTHON_BIN" - \
   loss.loss_track_components "${LOSS_TRACK_COMPONENTS:-true}" \
   loss.momentum_mode "${MOMENTUM_MODE:-off}" \
   loss.momentum_lookback "${MOMENTUM_LOOKBACK:-}" loss.momentum_eta "${MOMENTUM_ETA:-0}" \
+  loss.momentum_gain_init "${MOMENTUM_GAIN_INIT:-0}" loss.momentum_diagnostics "${MOMENTUM_DIAGNOSTICS:-0}" \
   momentum_experiment "$EXPERIMENT" \
   strategy.train_ratio_in_tv "${TRAIN_RATIO_IN_TV:-0.875}" \
   strategy.stride "$STRIDE" strategy.num_rollings "$NUM_ROLLINGS" strategy.seed "$SEED" \
@@ -76,6 +77,8 @@ config = {}
 mask_items = None
 momentum_experiment = None
 for key, raw in zip(sys.argv[1::2], sys.argv[2::2]):
+    if key == 'training.lradj' and not raw:
+        continue  # Omit the override: retain each adapter's historical schedule.
     if key == 'momentum_experiment':
         momentum_experiment = raw
         continue
@@ -87,8 +90,12 @@ for key, raw in zip(sys.argv[1::2], sys.argv[2::2]):
         continue
     if key == 'loss.momentum_lookback':
         value = int(raw) if raw else None
-    elif key == 'loss.momentum_eta':
+    elif key in {'loss.momentum_eta', 'loss.momentum_gain_init'}:
         value = float(raw)
+    elif key == 'loss.momentum_diagnostics':
+        if raw.lower() not in {'true', 'false', '0', '1'}:
+            raise ValueError('MOMENTUM_DIAGNOSTICS deve ser 0, 1, true ou false')
+        value = raw.lower() in {'true', '1'}
     elif key in integer_lists:
         value = [int(x) for x in raw.split()]
     elif key in float_lists:
@@ -127,9 +134,19 @@ if loss['momentum_lookback'] is not None and loss['momentum_lookback'] < 1:
     raise ValueError('MOMENTUM_LOOKBACK deve ser um inteiro positivo ou ficar vazio')
 if not math.isfinite(loss['momentum_eta']) or loss['momentum_eta'] < 0:
     raise ValueError('MOMENTUM_ETA deve ser finito e nao negativo')
+if not math.isfinite(loss['momentum_gain_init']):
+    raise ValueError('MOMENTUM_GAIN_INIT deve ser finito')
+if 'lradj' in config['training'] and config['training']['lradj'] not in {'type1', 'type2', 'type3', 'constant'}:
+    raise ValueError('LRADJ deve ser type1, type2, type3 ou constant')
 if momentum_experiment != 'composto' or loss['momentum_mode'] == 'off':
-    for key in ('momentum_mode', 'momentum_lookback', 'momentum_eta'):
+    for key in ('momentum_mode', 'momentum_lookback', 'momentum_eta',
+                'momentum_gain_init', 'momentum_diagnostics'):
         loss.pop(key)
+else:
+    if loss['momentum_gain_init'] == 0.0:
+        loss.pop('momentum_gain_init')
+    if not loss['momentum_diagnostics']:
+        loss.pop('momentum_diagnostics')
 print(json.dumps(config, allow_nan=False))
 PY
 )

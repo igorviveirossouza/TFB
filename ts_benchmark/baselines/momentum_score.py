@@ -49,6 +49,30 @@ def _nonnegative_finite(value, name):
     return number
 
 
+def _finite_scalar(value, name):
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"{name} deve ser finito.") from exc
+    if isinstance(value, bool) or not math.isfinite(number):
+        raise ValueError(f"{name} deve ser finito.")
+    return number
+
+
+def _diagnostics_enabled(value):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        value = value.strip().lower()
+        if value in {"true", "1", "yes", "sim"}:
+            return True
+        if value in {"false", "0", "no", "nao", "não"}:
+            return False
+    elif value in (0, 1):
+        return bool(value)
+    raise ValueError("momentum_diagnostics deve ser booleano.")
+
+
 def validate_momentum_config(config):
     """Validate the opt-in contract; inactive settings do not affect old runs."""
     def get(name, default=None):
@@ -74,6 +98,8 @@ def validate_momentum_config(config):
         lookback = get("seq_len")
     lookback = _positive_integer(lookback, "momentum_lookback")
     eta = _nonnegative_finite(get("momentum_eta", 0.0), "momentum_eta")
+    gain_init = _finite_scalar(get("momentum_gain_init", 0.0), "momentum_gain_init")
+    diagnostics = _diagnostics_enabled(get("momentum_diagnostics", False))
     if str(get("loss", "mse")).lower() != "composite_trading":
         raise ValueError("momentum_mode=residual_output exige loss=composite_trading.")
     cross_lambda = _nonnegative_finite(get("loss_cross_lambda", 0.5), "loss_cross_lambda")
@@ -90,11 +116,12 @@ def validate_momentum_config(config):
         raise ValueError("Momentum com norm=True exige loss_inverse_norm=True.")
     if str(get("target_mode", "path")).lower() == "cumulative":
         raise ValueError("Momentum exige previsao da trajetoria, nao target_mode=cumulative.")
-    return {"mode": mode, "lookback": lookback, "eta": eta}
+    return {"mode": mode, "lookback": lookback, "eta": eta,
+            "gain_init": gain_init, "diagnostics": diagnostics}
 
 
 class MomentumScore(nn.Module):
-    """s = z(momentum) + gain * z(predicted block return), gain starts at zero.
+    """s = z(momentum) + gain * z(predicted block return), gain defaults to zero.
 
     ``history_raw`` contains only log returns observed at the forecast origin.
     ``pred_scores_raw`` contains each forecast block's log or simple return.
@@ -103,15 +130,16 @@ class MomentumScore(nn.Module):
     learned gain, making eta * mean(correction**2) an amplitude penalty.
     """
 
-    def __init__(self, lookback, eta=0.0, eps=1e-8):
+    def __init__(self, lookback, eta=0.0, eps=1e-8, *, gain_init=0.0):
         super().__init__()
         self.lookback = _positive_integer(lookback, "momentum_lookback")
         self.eta = _nonnegative_finite(eta, "momentum_eta")
         self.eps = _nonnegative_finite(eps, "momentum_eps")
         if self.eps == 0:
             raise ValueError("momentum_eps deve ser > 0.")
+        self.gain_init = _finite_scalar(gain_init, "momentum_gain_init")
         # No random initialization: enabling the adapter consumes no RNG state.
-        self.gain = nn.Parameter(torch.zeros(()))
+        self.gain = nn.Parameter(torch.full((), self.gain_init))
 
     def _zscore(self, values):
         centered = values - values.mean(dim=-1, keepdim=True)
@@ -147,10 +175,15 @@ class MomentumScore(nn.Module):
         gain = float(self.gain.detach().cpu())
         if not math.isfinite(gain):
             raise ValueError("Momentum gain nao finito; nao e possivel exportar scores.")
-        return {
+        state = {
             "version": "momentum_residual_v1", "mode": "residual_output",
             "lookback": self.lookback, "eta": self.eta, "gain": gain,
             "score_kind": canonical_score_kind(score_kind),
             "normalization": "cross_sectional_zscore_ddof0", "eps": self.eps,
             "asset_names": names,
         }
+        # Keep historical zero-initialized exports byte-compatible. New readers
+        # accept this optional metadata; inference still uses the learned gain.
+        if self.gain_init != 0.0:
+            state["gain_init"] = self.gain_init
+        return state

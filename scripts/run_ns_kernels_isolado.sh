@@ -44,6 +44,9 @@ NS_LOSS_TRACK_COMPONENTS="${NS_LOSS_TRACK_COMPONENTS:-true}"
 MOMENTUM_MODE="${MOMENTUM_MODE:-off}"
 MOMENTUM_LOOKBACK="${MOMENTUM_LOOKBACK:-}"
 MOMENTUM_ETA="${MOMENTUM_ETA:-0}"
+MOMENTUM_GAIN_INIT="${MOMENTUM_GAIN_INIT:-0}"
+MOMENTUM_DIAGNOSTICS="${MOMENTUM_DIAGNOSTICS:-0}"
+NS_LRADJ="${NS_LRADJ:-}" # Vazio conserva a regra nativa de cada modelo.
 NS_PARTITION="${NS_PARTITION:-medusas_dev}"
 NS_GRES="${NS_GRES-gpu:1}" # export NS_GRES="" preserva CPU sem solicitar GPU.
 NS_NODELIST="${NS_NODELIST:-}"
@@ -85,6 +88,8 @@ NS_PATIENCE, NS_LEARNING_RATE, NS_PARTITION, NS_GRES, NS_NODELIST,
 NS_MAX_CONCURRENT_JOBS, NS_TIME_LIMIT, NS_CPUS_PER_TASK, NS_MEMORY.
 MOMENTUM_MODE=off|residual_output, MOMENTUM_LOOKBACK (vazio = LB do modelo),
 MOMENTUM_ETA (finito >= 0). Apenas compostos recebem a correcao; controle temporal off.
+MOMENTUM_GAIN_INIT (padrao 0), MOMENTUM_DIAGNOSTICS=0|1 e NS_LRADJ tambem aceitam export.
+NS_LRADJ vazio preserva o modelo; type1 decai; constant mantem a taxa de aprendizado.
 O score final e exportado separadamente em ranking_scores.parquet.
 
 KERNEL_SPECS usa 'kernel parametros;kernel parametros', sem A nem modo.
@@ -118,6 +123,9 @@ grid() {
     [[ "$MOMENTUM_MODE" == off || "$MOMENTUM_MODE" == residual_output ]] || die 'MOMENTUM_MODE deve ser off ou residual_output.'
     [[ -z "$MOMENTUM_LOOKBACK" || "$MOMENTUM_LOOKBACK" =~ ^[1-9][0-9]*$ ]] || die 'MOMENTUM_LOOKBACK deve ser inteiro positivo ou vazio.'
     [[ "$MOMENTUM_ETA" =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)([eE][+-]?[0-9]+)?$ ]] || die 'MOMENTUM_ETA deve ser finito e nao negativo.'
+    [[ "$MOMENTUM_GAIN_INIT" =~ ^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)([eE][+-]?[0-9]+)?$ ]] || die 'MOMENTUM_GAIN_INIT deve ser numero finito.'
+    case "${MOMENTUM_DIAGNOSTICS,,}" in 0|1|true|false) ;; *) die 'MOMENTUM_DIAGNOSTICS deve ser 0, 1, true ou false.';; esac
+    case "$NS_LRADJ" in ''|type1|type2|type3|constant) ;; *) die 'NS_LRADJ deve ser vazio, type1, type2, type3 ou constant.';; esac
     [[ "$EXPERIMENT_TAG" =~ ^[A-Za-z0-9][A-Za-z0-9_./=-]*$ && "$EXPERIMENT_TAG" != *..* && "$EXPERIMENT_TAG" != *//* && "$EXPERIMENT_TAG" != */ ]] || die 'EXPERIMENT_TAG invalida.'
     [[ "$NS_MASK_MODE" == natural || "$NS_MASK_MODE" == complementary ]] || die 'NS_MASK_MODE deve ser natural ou complementary.'
     [[ "$NS_PARALLEL_BRANCHES" == 0 || "$NS_PARALLEL_BRANCHES" == 1 ]] || die 'NS_PARALLEL_BRANCHES deve ser 0 ou 1.'
@@ -182,6 +190,7 @@ plan() {
     printf 'Modelos: %s; treinos: %s; LB: %s; H: %s; K_loss: %s; lambdas compostos: %s\n' "$MODEL" "$TRAIN_VALUES" "$LOOKBACKS_VALUES" "$HORIZON_VALUES" "$K_LOSS_VALUES" "$POSITIVE_LAMBDAS"
     if [[ "$MOMENTUM_MODE" != off ]]; then
         printf 'Momentum residual nos compostos: LB=%s; eta=%s; controle temporal off.\n' "${MOMENTUM_LOOKBACK:-LB do modelo}" "$MOMENTUM_ETA"
+        printf 'Ganho inicial: %s; diagnostico: %s; regra LR: %s.\n' "$MOMENTUM_GAIN_INIT" "$MOMENTUM_DIAGNOSTICS" "${NS_LRADJ:-default do modelo}"
     fi
     for index in "${!BRANCHES[@]}"; do selected "${BRANCHES[index]}" || continue; printf '%-30s %5d treinos  %s\n' "${BRANCHES[index]}" "${COUNTS[index]}" "${MASKS[index]}"; done
     printf 'TOTAL: %d treinos unicos; %d ramos selecionados.\n' "$TOTAL" "$ACTIVE_BRANCHES"
@@ -212,6 +221,7 @@ train_launcher() {
       CROSS_SCALE="$NS_CROSS_SCALE" RANKNET_ALPHA="$NS_RANKNET_ALPHA" LISTNET_TAU="$NS_LISTNET_TAU" HINGE_MARGIN="$NS_HINGE_MARGIN" \
       SCORE_KIND="$NS_SCORE_KIND" CROSS_SCORE_NORMALIZATION="$NS_CROSS_SCORE_NORMALIZATION" LOSS_INVERSE_NORM="$NS_LOSS_INVERSE_NORM" LOSS_TRACK_COMPONENTS="$NS_LOSS_TRACK_COMPONENTS" \
       MOMENTUM_MODE="$momentum_mode" MOMENTUM_LOOKBACK="$MOMENTUM_LOOKBACK" MOMENTUM_ETA="$MOMENTUM_ETA" \
+      MOMENTUM_GAIN_INIT="$MOMENTUM_GAIN_INIT" MOMENTUM_DIAGNOSTICS="$MOMENTUM_DIAGNOSTICS" LRADJ="$NS_LRADJ" \
       RUN_TAG="$tag" OUT_ROOT="$root" RESULT_ROOT="/snfs2/igor.viveiros/result/$tag" LOG_ROOT="$TFB_ROOT/logs/$tag" \
       PARTITION="$NS_PARTITION" GRES="$NS_GRES" TIME_LIMIT="$NS_TIME_LIMIT" NODELIST="$NS_NODELIST" CPUS_PER_TASK="$NS_CPUS_PER_TASK" MEMORY="$NS_MEMORY" \
       MAX_CONCURRENT_JOBS="$NS_MAX_CONCURRENT_JOBS" ARRAY_CHUNK_SIZE="$NS_ARRAY_CHUNK_SIZE" MANTER_CSV="$NS_MANTER_CSV" B3_AFTER_JOB="$dependency" \
@@ -225,7 +235,13 @@ branch_fingerprint() {
       "$NS_CROSS_SCALE" "$NS_RANKNET_ALPHA" "$NS_LISTNET_TAU" "$NS_HINGE_MARGIN" "$NS_SCORE_KIND" "$NS_CROSS_SCORE_NORMALIZATION" "$NS_LOSS_INVERSE_NORM" "$NS_LOSS_TRACK_COMPONENTS"
     if [[ "${BRANCHES[$1]}" != temporal && "$MOMENTUM_MODE" != off ]]; then
         printf '%s\n' "$MOMENTUM_MODE" "$MOMENTUM_LOOKBACK" "$MOMENTUM_ETA"
+        # Preserve historical fingerprints for the neutral new defaults.
+        if [[ ! "$MOMENTUM_GAIN_INIT" =~ ^[+-]?(0+([.]0*)?|[.]0+)([eE][+-]?[0-9]+)?$ ]]; then
+            printf 'momentum_gain_init=%s\n' "$MOMENTUM_GAIN_INIT"
+        fi
+        case "${MOMENTUM_DIAGNOSTICS,,}" in 1|true) printf 'momentum_diagnostics=true\n';; esac
     fi
+    [[ -z "$NS_LRADJ" ]] || printf 'lradj=%s\n' "$NS_LRADJ"
     } | sha256sum | cut -d' ' -f1
 }
 train_all() {

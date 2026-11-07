@@ -50,6 +50,7 @@ def test_exports_override_defaults_and_empty_gpu_is_preserved(tmp_path):
         POSITIVE_LAMBDAS='0.5 1', CROSS_LOSSES_VALUES='hinge hinge_proximity',
         KERNEL_SPECS='student 5;cosine', NS_MASK_A='0.10', NS_MASK_MODE='complementary',
         MOMENTUM_MODE='residual_output', MOMENTUM_LOOKBACK='128', MOMENTUM_ETA='0',
+        MOMENTUM_GAIN_INIT='0.1', MOMENTUM_DIAGNOSTICS='1', NS_LRADJ='constant',
         NS_PARTITION='gorgonas_dev', NS_GRES='', NS_NODELIST='gorgona6',
         NS_MAX_CONCURRENT_JOBS='3', NS_PARALLEL_BRANCHES='1', NS_AFTER_JOB='123',
         NS_BATCH_SIZE='8', NS_NUM_EPOCHS='20', NS_PATIENCE='4', NS_LEARNING_RATE='0.0002',
@@ -95,3 +96,24 @@ def test_smaller_grid_and_disabled_momentum_are_editable():
     assert 'TOTAL: 14 treinos unicos; 4 ramos selecionados.' in result.stdout
     assert 'Momentum residual nos compostos' not in result.stdout
     assert 'Ramos paralelos: ate 8 tarefas simultaneas.' in result.stdout
+
+
+def test_actual_diagnostic_overrides_reach_selected_proximity_only(tmp_path):
+    helper = fixtures.KernelLauncherTests()
+    root, _, env = helper.fixture(tmp_path, real_launchers=True)
+    env.update(NS_ONLY_BRANCHES='cauchy', KERNEL_SPECS='cauchy',
+               LOOKBACKS_VALUES='256', HORIZON_VALUES='25', K_LOSS_VALUES='1',
+               POSITIVE_LAMBDAS='1', MOMENTUM_LOOKBACK='512', MOMENTUM_ETA='.01',
+               MOMENTUM_GAIN_INIT='.1', MOMENTUM_DIAGNOSTICS='1', NS_LRADJ='constant')
+    result = run('--dry-run', env=env)
+    assert result.returncode == 0, result.stderr
+    configs = [json.loads(line) for line in result.stdout.splitlines() if line.startswith('{')]
+    assert len(configs) == 1
+    config = configs[0]
+    assert config['loss']['momentum_gain_init'] == .1
+    assert config['loss']['momentum_diagnostics'] is True
+    assert config['training']['lradj'] == 'constant'
+    assert config['cross_losses'] == ['ranknet_proximity']
+    assert config['lambdas'] == [1.]
+    assert 'TOTAL: 1 treinos unicos; 1 ramos selecionados.' in result.stdout
+    assert not (root / 'store').exists()

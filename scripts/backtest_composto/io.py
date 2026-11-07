@@ -26,7 +26,8 @@ _HASH = re.compile(r"[0-9a-fA-F]{64}")
 _NAME = re.compile(r"[A-Za-z0-9_]+")
 _PROXIMITY = {"hinge_proximity", "ranknet_proximity", "pairwise_mse_proximity"}
 _LOSSES = {"ranknet", "hinge", "listnet", "pairwise_mse"} | _PROXIMITY
-_MOMENTUM_KEYS = ("momentum_mode", "momentum_lookback", "momentum_eta")
+_MOMENTUM_KEYS = ("momentum_mode", "momentum_lookback", "momentum_eta",
+                  "momentum_gain_init", "momentum_diagnostics")
 
 
 def _momentum_options(cfg):
@@ -41,6 +42,11 @@ def _momentum_options(cfg):
         raise ValueError("momentum_lookback deve ser inteiro positivo.")
     if type(eta) not in (int, float) or not math.isfinite(eta) or eta < 0:
         raise ValueError("momentum_eta deve ser finito e nao negativo.")
+    gain_init = loss.get("momentum_gain_init", 0.0)
+    if type(gain_init) not in (int, float) or not math.isfinite(gain_init):
+        raise ValueError("momentum_gain_init deve ser numero finito.")
+    if type(loss.get("momentum_diagnostics", False)) is not bool:
+        raise ValueError("momentum_diagnostics deve ser booleano.")
     return mode, lb, float(eta)
 
 
@@ -225,6 +231,10 @@ def _expected_tasks(cfg, pct):
                         definitions[-1].update(momentum_mode=momentum_mode,
                                                momentum_lookback=momentum_lb or lookback,
                                                momentum_eta=momentum_eta)
+                        if cfg["loss"].get("momentum_gain_init", 0.0) != 0.0:
+                            definitions[-1]["momentum_gain_init"] = float(cfg["loss"]["momentum_gain_init"])
+                        if cfg["loss"].get("momentum_diagnostics", False):
+                            definitions[-1]["momentum_diagnostics"] = True
                     if mask is not None:
                         definitions[-1].update(mask_type=mask[0], mask_a=mask[1])
                         if len(mask) >= 3 and mask[2] != "natural":
@@ -247,6 +257,8 @@ def _expected_tasks(cfg, pct):
         if task.get("momentum_mode") == "residual_output":
             path = (path/"momentum=residual_output"/f"momentum_lb={task['momentum_lookback']}"
                     /f"momentum_eta={float(task['momentum_eta'])!r}")
+            if task.get("momentum_gain_init", 0.0) != 0.0:
+                path /= f"momentum_gain_init={float(task['momentum_gain_init'])!r}"
         task["relpath"] = str(path/f"modelo={task['modelo']}"/f"lookback={task['lookback']}"
                               /f"pred_len={task['pred_len']}"/f"k_dir={task['k_dir']}")
     if len({t["relpath"] for t in definitions}) != len(definitions):
@@ -290,6 +302,11 @@ def _validate_row(row, task, cfg, meta, plan, market, cut):
                 or _int(row.get("momentum_lookback"), "momentum_lookback") != task["momentum_lookback"]
                 or _number(row.get("momentum_eta"), "momentum_eta") != task["momentum_eta"]):
             raise ValueError(f"Momentum divergente na auditoria: {identity}")
+        if (_number(row.get("momentum_gain_init") or 0.0, "momentum_gain_init")
+                != task.get("momentum_gain_init", 0.0)
+                or (row.get("momentum_diagnostics") or "false").lower()
+                != str(task.get("momentum_diagnostics", False)).lower()):
+            raise ValueError(f"Inicializacao/diagnostico momentum divergente na auditoria: {identity}")
     elif any(row.get(key, "") for key in _MOMENTUM_KEYS):
         raise ValueError(f"Momentum ativo fora do desenho: {identity}")
     if row["delta_effective"].lower() != str(task["delta_effective"]).lower():
@@ -321,7 +338,7 @@ def _validate_row(row, task, cfg, meta, plan, market, cut):
     for key in _MOMENTUM_KEYS:
         hyper.pop(key, None)
     if task.get("momentum_mode") == "residual_output":
-        hyper.update({key: task[key] for key in _MOMENTUM_KEYS})
+        hyper.update({key: task[key] for key in _MOMENTUM_KEYS if key in task})
     hyper.pop("loss_cross_mask", None)
     if task["loss"] in _PROXIMITY:
         hyper["loss_cross_mask"] = [task["mask_type"], task["mask_a"]]
@@ -491,6 +508,7 @@ def momentum_snapshot(task, market, verify_files=False):
             or type(state.get("lookback")) is not int or state["lookback"] != task["momentum_lookback"]
             or not 1 <= state["lookback"] <= cut
             or _number(state.get("eta"), "momentum eta") != task["momentum_eta"]
+            or _number(state.get("gain_init", 0.0), "momentum gain_init") != task.get("momentum_gain_init", 0.0)
             or state.get("score_kind") not in {"log_return", "simple_return"}
             or _number(state.get("eps"), "momentum eps") <= 0
             or not isinstance(state.get("asset_names"), list)

@@ -97,6 +97,23 @@ def test_gain_learns_first_and_backbone_receives_gradient_after_gain_moves():
     assert torch.count_nonzero(pred.grad) > 0
 
 
+@pytest.mark.parametrize("gain_init", [0., .1, -.1])
+def test_editable_gain_initialization_rng_and_first_ranking_gradient(gain_init):
+    history, prediction, target = inputs()
+    state = torch.random.get_rng_state()
+    module = MomentumScore(3, gain_init=gain_init).double()
+    assert torch.equal(state, torch.random.get_rng_state())
+    assert module.gain.item() == pytest.approx(gain_init)
+    pred = prediction.clone().requires_grad_()
+    loss(cross_lambda=1.)(pred, target, momentum_history=history, momentum_module=module).backward()
+    assert torch.isfinite(pred.grad).all()
+    assert (torch.count_nonzero(pred.grad) > 0).item() == (gain_init != 0.)
+    payload = module.state_payload("simple_return", ["A", "B", "C", "D"])
+    assert payload.get("gain_init", 0.) == gain_init
+    if gain_init == 0.:
+        assert "gain_init" not in payload  # Historical default JSON stays unchanged.
+
+
 @pytest.mark.parametrize("assets", [1, 4])
 def test_constant_cross_sections_and_ties_have_finite_gradients(assets):
     history = torch.ones(2, 4, assets, dtype=torch.float64)
@@ -177,6 +194,9 @@ def test_disabled_mode_is_exactly_original_loss_and_gradients(cross_loss, normal
     {"momentum_mode": "input"}, {"momentum_lookback": 0}, {"momentum_lookback": 2.5},
     {"momentum_lookback": float("inf")}, {"momentum_eta": -1}, {"momentum_eta": float("nan")},
     {"momentum_eta": float("inf")}, {"loss": "mse"}, {"loss_cross_lambda": 0},
+    {"momentum_gain_init": float("nan")}, {"momentum_gain_init": float("inf")},
+    {"momentum_gain_init": True}, {"momentum_gain_init": "abc"},
+    {"momentum_diagnostics": "maybe"}, {"momentum_diagnostics": 3},
     {"loss_cross_lambda": 1.1}, {"loss_data_kind": "price"}, {"loss_score_kind": "price"},
     {"norm": True, "loss_inverse_norm": False}, {"target_mode": "cumulative"},
 ])
@@ -186,10 +206,14 @@ def test_incompatible_configs_rejected_before_build(changes):
 
 
 def test_valid_configuration_and_inactive_backward_compatibility():
-    assert validate_momentum_config(config()) == {"mode": "residual_output", "lookback": 4, "eta": .2}
+    assert validate_momentum_config(config()) == {
+        "mode": "residual_output", "lookback": 4, "eta": .2, "gain_init": 0., "diagnostics": False}
+    active = validate_momentum_config(config(momentum_gain_init="-0.1", momentum_diagnostics="TRUE"))
+    assert active["gain_init"] == -.1 and active["diagnostics"] is True
     assert validate_momentum_config(config(momentum_lookback="6"))["lookback"] == 6
     assert build_loss(config(loss_cross_lambda=1.)).momentum_mode == "residual_output"
-    disabled = config(momentum_mode="off", momentum_lookback=-1, momentum_eta=float("nan"), loss="mse")
+    disabled = config(momentum_mode="off", momentum_lookback=-1, momentum_eta=float("nan"), loss="mse",
+                      momentum_gain_init="unused", momentum_diagnostics="unused")
     assert validate_momentum_config(disabled) == {"mode": "off", "lookback": None, "eta": 0.}
     assert isinstance(build_loss(disabled), torch.nn.MSELoss)
 

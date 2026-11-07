@@ -21,9 +21,15 @@ from test_backtest_composto_io import make_composite_fixture, publish_composite_
 from test_backtest_composto_pipeline import cli, prepare_args, read_parquet
 
 
-def momentum_fixture(tmp_path):
+def momentum_fixture(tmp_path, *, gain_init=0.0, diagnostics=False, lradj=None):
     f = make_composite_fixture(tmp_path, losses=("ranknet",), deltas=(0,), available_indices=())
     f.config["loss"].update(momentum_mode="residual_output", momentum_lookback=3, momentum_eta=.1)
+    if gain_init != 0.0:
+        f.config["loss"]["momentum_gain_init"] = gain_init
+    if diagnostics:
+        f.config["loss"]["momentum_diagnostics"] = True
+    if lradj is not None:
+        f.config["training"]["lradj"] = lradj
     f.producer_tasks = producer.make_tasks(f.config, "composto")
     f.design_sha256 = producer.digest(producer.provenance(f.config, f.metadata))
     group = f.root/"treino=50"/"experimento=composto"
@@ -35,11 +41,43 @@ def momentum_fixture(tmp_path):
     state = {"version": "momentum_residual_v1", "mode": "residual_output", "lookback": 3,
              "eta": .1, "gain": 0., "score_kind": "simple_return", "eps": 1e-8,
              "normalization": "cross_sectional_zscore_ddof0", "asset_names": f.market.tickers.tolist()}
+    if gain_init != 0.0:
+        state["gain_init"] = gain_init
     (output/"momentum_state.json").write_text(json.dumps(state))
     panel = producer_io.load_panel(Path(f.metadata["dataset"]))
     producer_io.export_momentum_scores(panel, len(panel)//2, 3, output)
     producer.record_completed(group, row)
     return f, output
+
+
+@pytest.mark.parametrize("gain_init,lradj", [(0.0, "type1"), (.1, "type1"), (.1, "constant")])
+def test_diagnostic_conditions_keep_producer_reader_paths_and_hyperparameters(tmp_path, gain_init, lradj):
+    f, output = momentum_fixture(tmp_path, gain_init=gain_init, diagnostics=True, lradj=lradj)
+    tasks, _ = discover_composite_tasks(f.root, [50], f.market, f.identity["retornos_sha256"])
+    task = tasks[0]
+    original = f.producer_tasks[task["training_array_index"]]
+    assert task["relpath"] == str(producer.output_path(original))
+    assert Path(task["path"]).parent == output
+    assert task["momentum_diagnostics"] is True
+    assert task.get("momentum_gain_init", 0.0) == gain_init
+    assert task["momentum_state"].get("gain_init", 0.0) == gain_init
+    # Learned gain remains distinct from its initialization.
+    assert task["momentum_state"]["gain"] == 0.0
+
+
+@pytest.mark.parametrize("state_gain_init", [None, .2])
+def test_state_initialization_must_match_design_even_with_valid_sidecar_hashes(tmp_path, state_gain_init):
+    f, output = momentum_fixture(tmp_path, gain_init=.1, diagnostics=True)
+    state = read_json(output/"momentum_state.json")
+    if state_gain_init is None:
+        state.pop("gain_init")
+    else:
+        state["gain_init"] = state_gain_init
+    (output/"momentum_state.json").write_text(json.dumps(state))
+    panel = producer_io.load_panel(Path(f.metadata["dataset"]))
+    producer_io.export_momentum_scores(panel, len(panel)//2, 3, output)
+    with pytest.raises(ValueError, match="Estado momentum incompativel"):
+        discover_composite_tasks(f.root, [50], f.market, f.identity["retornos_sha256"])
 
 
 def test_discovery_binds_resolved_momentum_and_exact_export(tmp_path):
@@ -102,8 +140,9 @@ def test_unsorted_producer_assets_align_to_market_universe(tmp_path):
     np.testing.assert_allclose(scores[:, 0], expected, atol=1e-12)
 
 
-def test_frozen_cpu_pipeline_uses_final_ic_and_refuses_changed_sidecar(tmp_path):
-    f, output = momentum_fixture(tmp_path)
+@pytest.mark.parametrize("gain_init,diagnostics,lradj", [(0.0, False, None), (.1, True, "constant")])
+def test_frozen_cpu_pipeline_uses_final_ic_and_refuses_changed_sidecar(tmp_path, gain_init, diagnostics, lradj):
+    f, output = momentum_fixture(tmp_path, gain_init=gain_init, diagnostics=diagnostics, lradj=lradj)
     run = tmp_path/"run"
     cli(*prepare_args(f, run))
     plan = read_json(run/"plano.json")

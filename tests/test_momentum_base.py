@@ -138,6 +138,72 @@ def test_off_mode_keeps_native_windows_parameters_and_predictions(monkeypatch):
         torch.testing.assert_close(results[0][0].model.state_dict()[key], results[1][0].model.state_dict()[key], rtol=0, atol=0)
 
 
+@pytest.mark.parametrize("gain_init,schedule", [(0., "type1"), (.1, "type1"), (.1, "constant")])
+def test_diagnostic_experiment_records_initial_gradient_lr_and_selected_gain(tmp_path, gain_init, schedule):
+    torch.manual_seed(6)
+    model = TinyAdapter(momentum_gain_init=gain_init, momentum_diagnostics=True,
+                        loss_cross_lambda=1., lradj=schedule, num_epochs=3,
+                        momentum_state_path=str(tmp_path / "momentum_state.json"))
+    model.forecast_fit(market(), train_ratio_in_tv=.75)
+    record = json.loads((tmp_path / "momentum_training_diagnostics.json").read_text())
+    assert record["completed"] is True
+    assert record["checkpoint_selection"] == "validation_loss"
+    assert record["gain_init"] == gain_init
+    assert record["gradient_objective"].startswith("total_loss")
+    assert len(record["epochs"]) == 3
+    assert [e["learning_rates_start"][0] for e in record["epochs"]] == pytest.approx(
+        [.01, .01, .005] if schedule == "type1" else [.01] * 3)
+    first = record["epochs"][0]
+    assert first["gain_start"] == pytest.approx(gain_init)
+    assert first["first_batch_gradient_norms"]["gain"] > 0
+    assert (first["first_batch_gradient_norms"]["backbone"] > 0) == (gain_init != 0.)
+    for row in record["epochs"]:
+        assert np.isfinite(row["train_loss"]) and np.isfinite(row["validation_loss"])
+        for sample in ("train_components", "validation_components"):
+            assert {"temporal", "cross", "total", "momentum_penalty"} <= set(row[sample])
+            # Lambda1 and no auxiliary loss: cross + eta*correction^2.
+            assert row[sample]["total"] == pytest.approx(
+                row[sample]["cross_scaled"] + row[sample]["momentum_penalty"], rel=1e-6)
+    selected = record["epochs"][record["best_epoch"] - 1]
+    assert selected["checkpoint_selected"] is True
+    assert record["best_gain"] == selected["gain_end"]
+    assert record["best_gain"] == float(model.check_point["momentum_score.gain"])
+    model.forecast(2, market())
+    state = json.loads((tmp_path / "momentum_state.json").read_text())
+    assert state["gain"] == record["best_gain"]
+    assert state.get("gain_init", 0.) == gain_init
+
+
+def test_diagnostics_do_not_change_training_rng_checkpoint_or_forecast(tmp_path):
+    results = []
+    for enabled in (False, True):
+        torch.manual_seed(71)
+        model = TinyAdapter(momentum_gain_init=.1, momentum_diagnostics=enabled,
+                            momentum_state_path=str(tmp_path / str(enabled) / "momentum_state.json"))
+        model.forecast_fit(market(), train_ratio_in_tv=.75)
+        results.append((model, model.forecast(2, market()), torch.random.get_rng_state()))
+    assert not (tmp_path / "False" / "momentum_training_diagnostics.json").exists()
+    np.testing.assert_array_equal(results[0][1], results[1][1])
+    assert torch.equal(results[0][2], results[1][2])
+    for key in results[0][0].check_point:
+        torch.testing.assert_close(results[0][0].check_point[key], results[1][0].check_point[key], rtol=0, atol=0)
+
+
+def test_diagnostics_record_early_stop_epoch_and_keep_best_checkpoint(tmp_path, monkeypatch):
+    torch.manual_seed(6)
+    model = TinyAdapter(momentum_diagnostics=True, num_epochs=5, patience=1,
+                        momentum_state_path=str(tmp_path / "momentum_state.json"))
+    validation_losses = iter([1., 2.])
+    monkeypatch.setattr(model, "validate", lambda *args: next(validation_losses))
+    model.forecast_fit(market(), train_ratio_in_tv=.75)
+    record = json.loads((tmp_path / "momentum_training_diagnostics.json").read_text())
+    assert len(record["epochs"]) == 2
+    assert record["best_epoch"] == 1
+    assert record["epochs"][-1]["checkpoint_selected"] is False
+    assert record["epochs"][-1]["gain_end"] != record["best_gain"]
+    assert record["best_gain"] == float(model.check_point["momentum_score.gain"])
+
+
 @pytest.mark.parametrize("architecture", ["Nonstationary_Transformer", "DUET", "TimesNet", "FEDformer"])
 def test_native_architecture_cpu_training_validation_and_forecast(architecture, tmp_path):
     torch.manual_seed(25)

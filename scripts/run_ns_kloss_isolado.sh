@@ -46,6 +46,9 @@ readonly NS_MASK_MODE="${NS_MASK_MODE:-natural}"
 readonly MOMENTUM_MODE="${MOMENTUM_MODE:-off}"
 readonly MOMENTUM_LOOKBACK="${MOMENTUM_LOOKBACK:-}"
 readonly MOMENTUM_ETA="${MOMENTUM_ETA:-0}"
+readonly MOMENTUM_GAIN_INIT="${MOMENTUM_GAIN_INIT:-0}"
+readonly MOMENTUM_DIAGNOSTICS="${MOMENTUM_DIAGNOSTICS:-0}"
+readonly NS_LRADJ="${NS_LRADJ:-}" # Vazio conserva a regra nativa de cada modelo.
 readonly K_EVAL_VALUES_FIXED='1 5 10 15 20 25'
 
 usage() {
@@ -82,6 +85,8 @@ MODEL e CROSS_LOSSES_VALUES: nomes separados por espacos.
 MOMENTUM_MODE=off|residual_output, MOMENTUM_LOOKBACK (vazio = LB do modelo),
 MOMENTUM_ETA (finito >= 0) aceitam export. Apenas compostos usam a correcao;
 o controle temporal permanece desligado. Scores separados em ranking_scores.parquet.
+MOMENTUM_GAIN_INIT (padrao 0), MOMENTUM_DIAGNOSTICS=0|1 e NS_LRADJ aceitam export;
+NS_LRADJ vazio preserva o modelo; constant mantem a taxa de aprendizado.
 NS_MASK_TYPE: uniform, gaussian ou cauchy (padrao cauchy).
 NS_MASK_MODE: natural ou complementary (padrao natural).
 NS_MASK_A: padrao 0.025, com ponto decimal; >= 0 para uniform e > 0 para gaussian/cauchy.
@@ -107,6 +112,9 @@ training_grid() {
     [[ "$MOMENTUM_MODE" == off || "$MOMENTUM_MODE" == residual_output ]] || die 'MOMENTUM_MODE deve ser off ou residual_output.'
     [[ -z "$MOMENTUM_LOOKBACK" || "$MOMENTUM_LOOKBACK" =~ ^[1-9][0-9]*$ ]] || die 'MOMENTUM_LOOKBACK deve ser inteiro positivo ou vazio.'
     [[ "$MOMENTUM_ETA" =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)([eE][+-]?[0-9]+)?$ ]] || die 'MOMENTUM_ETA deve ser finito e nao negativo.'
+    [[ "$MOMENTUM_GAIN_INIT" =~ ^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)([eE][+-]?[0-9]+)?$ ]] || die 'MOMENTUM_GAIN_INIT deve ser numero finito.'
+    case "${MOMENTUM_DIAGNOSTICS,,}" in 0|1|true|false) ;; *) die 'MOMENTUM_DIAGNOSTICS deve ser 0, 1, true ou false.';; esac
+    case "$NS_LRADJ" in ''|type1|type2|type3|constant) ;; *) die 'NS_LRADJ deve ser vazio, type1, type2, type3 ou constant.';; esac
     read -r -a models <<< "$MODEL"
     read -r -a lookbacks <<< "$LOOKBACKS_VALUES"
     read -r -a horizons <<< "$HORIZON_VALUES"
@@ -248,6 +256,7 @@ training_launcher() {
         SCORE_KIND=simple_return CROSS_SCORE_NORMALIZATION=zscore \
         LOSS_INVERSE_NORM=true LOSS_TRACK_COMPONENTS=true \
         MOMENTUM_MODE="$momentum_mode" MOMENTUM_LOOKBACK="$MOMENTUM_LOOKBACK" MOMENTUM_ETA="$MOMENTUM_ETA" \
+      MOMENTUM_GAIN_INIT="$MOMENTUM_GAIN_INIT" MOMENTUM_DIAGNOSTICS="$MOMENTUM_DIAGNOSTICS" LRADJ="$NS_LRADJ" \
         RUN_TAG="$tag" OUT_ROOT="$pred" RESULT_ROOT="$result" LOG_ROOT="$log" \
         PARTITION="$NS_PARTITION" GRES="$NS_GRES" TIME_LIMIT="$NS_TIME_LIMIT" \
         CPUS_PER_TASK="$NS_CPUS_PER_TASK" MEMORY="$NS_MEMORY" NODELIST="$NS_NODELIST" \

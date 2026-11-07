@@ -17,7 +17,7 @@ import b3_experiment as experiment
 
 def shell_config(**overrides):
     env = {k: v for k, v in os.environ.items()
-           if not k.startswith(('MOMENTUM_', 'B3_'))}
+           if not k.startswith(('MOMENTUM_', 'B3_')) and k != 'LRADJ'}
     env.update(TFB_ROOT=str(ROOT), PYTHON_BIN=sys.executable,
                VENV_PATH='/nonexistent/venv', MODELS='Nonstationary_Transformer',
                LOOKBACKS='32 64', HORIZONS='1 5', TRADE_WINDOWS='1',
@@ -44,7 +44,8 @@ def load_inline(config, monkeypatch):
 @pytest.mark.parametrize('mode', ['composto', 'temporal', 'var'])
 def test_off_preserves_config_tasks_paths_and_hyperparameters(config, monkeypatch, mode):
     changed = copy.deepcopy(config)
-    changed['loss'].update(momentum_mode='off', momentum_lookback=512, momentum_eta=.25)
+    changed['loss'].update(momentum_mode='off', momentum_lookback=512, momentum_eta=.25,
+                           momentum_gain_init=.1, momentum_diagnostics=True)
     changed = load_inline(changed, monkeypatch)
     assert changed == config
     before = experiment.make_tasks(config, mode)
@@ -93,6 +94,10 @@ def test_default_momentum_lookback_tracks_model_and_paths_distinguish_eta(config
     {'MOMENTUM_LOOKBACK': '1.5'}, {'MOMENTUM_LOOKBACK': '-1'},
     {'MOMENTUM_ETA': '-.01'}, {'MOMENTUM_ETA': 'nan'},
     {'MOMENTUM_ETA': 'inf'}, {'MOMENTUM_ETA': '1e999'},
+    {'MOMENTUM_GAIN_INIT': 'nan'}, {'MOMENTUM_GAIN_INIT': 'inf'},
+    {'MOMENTUM_GAIN_INIT': '1e999'}, {'MOMENTUM_GAIN_INIT': 'true'},
+    {'MOMENTUM_DIAGNOSTICS': 'yes'}, {'MOMENTUM_DIAGNOSTICS': '2'},
+    {'LRADJ': 'typo'}, {'LRADJ': 'TST'},
 ])
 def test_invalid_shell_settings_fail_before_training(overrides):
     result = shell_config(**overrides)
@@ -104,6 +109,9 @@ def test_invalid_shell_settings_fail_before_training(overrides):
     ('momentum_lookback', 0), ('momentum_lookback', 1.5),
     ('momentum_eta', True), ('momentum_eta', -.5),
     ('momentum_eta', float('nan')), ('momentum_etas', .1),
+    ('momentum_gain_init', True), ('momentum_gain_init', float('nan')),
+    ('momentum_gain_init', float('inf')), ('momentum_gain_init', '.1'),
+    ('momentum_diagnostics', 'true'), ('momentum_diagnostics', 1),
 ])
 def test_invalid_inline_settings_fail(config, monkeypatch, key, value):
     config['loss'][key] = value
@@ -178,7 +186,7 @@ def test_wrappers_force_temporal_off_and_forward_composite(tmp_path, wrapper, fu
     assert result.returncode == 0, result.stderr
     control, compound = [json.loads(line) for line in result.stdout.splitlines() if line.startswith('{')]
     assert not any(key.startswith('momentum_') for key in control['loss'])
-    assert {key: compound['loss'][key] for key in experiment.MOMENTUM_KEYS} == dict(
+    assert {key: compound['loss'][key] for key in experiment.MOMENTUM_KEYS if key in compound['loss']} == dict(
         momentum_mode='residual_output', momentum_lookback=128, momentum_eta=.2)
 
 
@@ -245,3 +253,79 @@ def test_worker_exports_score_before_completion_and_validates_on_resume(config, 
     monkeypatch.setattr(io, 'validate_momentum_export', corrupt)
     with pytest.raises(ValueError, match='sidecar altered'):
         experiment.worker(config, [task], out, 0)
+
+
+@pytest.mark.parametrize('gain', ['0.1', '-0.1'])
+@pytest.mark.parametrize('lradj', ['type1', 'constant'])
+def test_gain_diagnostics_and_schedule_reach_actual_runtime(config, gain, lradj):
+    result = shell_config(MOMENTUM_MODE='residual_output', MOMENTUM_LOOKBACK='512',
+                          MOMENTUM_ETA='.01', MOMENTUM_GAIN_INIT=gain,
+                          MOMENTUM_DIAGNOSTICS='1', LRADJ=lradj)
+    assert result.returncode == 0, result.stderr
+    enabled = json.loads(result.stdout)
+    task = experiment.make_tasks(enabled, 'composto')[0]
+    assert task['momentum_gain_init'] == float(gain)
+    assert task['momentum_diagnostics'] is True
+    assert f"momentum_gain_init={float(gain)!r}" in str(experiment.output_path(task))
+    old = dict(task)
+    old.pop('momentum_gain_init')
+    assert experiment.output_path(task) != experiment.output_path(old)
+    command = experiment.benchmark_command(enabled, task, 'data.csv', 4000, Path('tmp'), Path('out'))
+    runtime = json.loads(command[command.index('--model-hyper-params') + 1])
+    assert runtime['momentum_gain_init'] == float(gain)
+    assert runtime['momentum_diagnostics'] is True
+    assert runtime['lradj'] == lradj
+    control = experiment.make_tasks(enabled, 'temporal')[0]
+    hyper = experiment.model_spec(enabled, control)[1]
+    assert not any(k.startswith('momentum_') for k in hyper)
+    assert hyper['lradj'] == lradj
+
+
+def test_neutral_options_preserve_old_enabled_config_identity(monkeypatch):
+    result = shell_config(MOMENTUM_MODE='residual_output', MOMENTUM_LOOKBACK='512', MOMENTUM_ETA='.01')
+    assert result.returncode == 0, result.stderr
+    default = json.loads(result.stdout)
+    assert 'momentum_gain_init' not in default['loss']
+    assert 'momentum_diagnostics' not in default['loss']
+    assert 'lradj' not in default['training']
+    explicit = shell_config(MOMENTUM_MODE='residual_output', MOMENTUM_LOOKBACK='512',
+                            MOMENTUM_ETA='.01', MOMENTUM_GAIN_INIT='0.0',
+                            MOMENTUM_DIAGNOSTICS='false', LRADJ='')
+    assert explicit.returncode == 0, explicit.stderr
+    assert json.loads(explicit.stdout) == default
+    inline = copy.deepcopy(default)
+    inline['loss'].update(momentum_gain_init=0.0, momentum_diagnostics=False)
+    assert load_inline(inline, monkeypatch) == default
+
+
+@pytest.mark.parametrize('value', ['typo', [], None, True])
+def test_invalid_inline_learning_rate_schedule(config, monkeypatch, value):
+    config['training']['lradj'] = value
+    with pytest.raises(ValueError, match='LRADJ'):
+        load_inline(config, monkeypatch)
+
+
+def test_retry_fingerprint_tracks_only_effective_new_options(tmp_path):
+    script = tmp_path / 'wrapper.sh'
+    script.write_text((ROOT / 'scripts/run_ns_kernels_isolado.sh').read_text().replace('main "$@"', ''))
+    body = '''source "$1"; grid
+branch_fingerprint 0; branch_fingerprint 1
+MOMENTUM_GAIN_INIT=0.0; MOMENTUM_DIAGNOSTICS=false
+branch_fingerprint 0; branch_fingerprint 1
+MOMENTUM_GAIN_INIT=.1
+branch_fingerprint 0; branch_fingerprint 1
+MOMENTUM_DIAGNOSTICS=1
+branch_fingerprint 0; branch_fingerprint 1
+NS_LRADJ=constant
+branch_fingerprint 0; branch_fingerprint 1
+'''
+    env = {k: v for k, v in os.environ.items() if not k.startswith(('MOMENTUM_', 'NS_'))}
+    env.update(MOMENTUM_MODE='residual_output')
+    result = subprocess.run(['bash', '-c', body, 'wrapper', str(script)],
+                            env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    control, comp, control0, comp0, control1, comp1, control2, comp2, control3, comp3 = result.stdout.splitlines()
+    assert control == control0 == control1 == control2
+    assert comp == comp0
+    assert len({comp, comp1, comp2, comp3}) == 4
+    assert control3 != control

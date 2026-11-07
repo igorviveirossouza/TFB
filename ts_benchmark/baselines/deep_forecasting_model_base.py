@@ -121,6 +121,60 @@ class DeepForecastingModelBase(ModelBase):
         model = self.model.module if isinstance(self.model, nn.DataParallel) else self.model
         return model.momentum_score
 
+    def _momentum_diagnostics_enabled(self):
+        return self._momentum_enabled() and self._momentum_config.get("diagnostics", False)
+
+    @staticmethod
+    def _diagnostic_components(criterion):
+        keys = ("temporal", "cross", "cross_scaled", "total", "momentum_penalty",
+                "momentum_correction_energy")
+        components = getattr(criterion, "last_components", {})
+        return {key: float(components[key]) for key in keys if key in components}
+
+    @staticmethod
+    def _diagnostic_means(rows):
+        if not rows:
+            return {}
+        return {key: (None if any(row[key] is None for row in rows)
+                      else float(np.mean([row[key] for row in rows]))) for key in rows[0]}
+
+    def _momentum_gradient_norms(self, scale=1.0):
+        # Inspect gradients of the TOTAL objective before the optimizer step.
+        # AMP gradients are divided by its scale without modifying .grad/scaler.
+        gain = self._momentum_module().gain
+        backbone = [p.grad.detach().norm()
+                    for p in self.model.parameters() if p is not gain and p.grad is not None]
+        return {"gain": None if gain.grad is None else float(gain.grad.detach().abs()) / scale,
+                "backbone": float(torch.stack(backbone).norm()) / scale if backbone else 0.0}
+
+    def _export_momentum_diagnostics(self):
+        path = getattr(self.config, "momentum_state_path", None)
+        if not self._momentum_diagnostics_enabled() or not path:
+            return
+        # Nonfinite metrics are explicit nulls, not invalid JSON. This is only
+        # instrumentation: it must not alter optimization or checkpoint choice.
+        def clean(value):
+            if isinstance(value, dict):
+                return {key: clean(item) for key, item in value.items()}
+            if isinstance(value, list):
+                return [clean(item) for item in value]
+            if isinstance(value, float) and not math.isfinite(value):
+                return None
+            return value
+        parent = os.path.dirname(os.path.abspath(path))
+        os.makedirs(parent, exist_ok=True)
+        target = os.path.join(parent, "momentum_training_diagnostics.json")
+        fd, temporary = tempfile.mkstemp(prefix=".momentum_diagnostics_", dir=parent, text=True)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump(clean(self._momentum_training_diagnostics), stream,
+                          sort_keys=True, indent=2, allow_nan=False)
+                stream.write("\n")
+            os.replace(temporary, target)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+
     def _export_momentum_state(self):
         if not self._momentum_enabled():
             return
@@ -174,6 +228,8 @@ class DeepForecastingModelBase(ModelBase):
             normalizer_mean=normalizer_mean,
             normalizer_scale=normalizer_scale,
         )
+        if self._momentum_diagnostics_enabled():
+            criterion.track_components = True
 
         weight_decay = float(getattr(self.config, "weight_decay", 0.0))
         if str(getattr(self.config, "loss", "")).lower() == "fingat":
@@ -317,6 +373,7 @@ class DeepForecastingModelBase(ModelBase):
     ) -> float:
         config = self.config
         total_loss = []
+        diagnostic_components = [] if self._momentum_diagnostics_enabled() else None
         self.model.eval()
         device = get_device()
         with torch.no_grad():
@@ -345,8 +402,12 @@ class DeepForecastingModelBase(ModelBase):
                 )
                 loss = all_loss.detach().cpu().numpy()
                 total_loss.append(loss)
+                if diagnostic_components is not None:
+                    diagnostic_components.append(self._diagnostic_components(criterion))
 
         total_loss = np.mean(total_loss)
+        if diagnostic_components is not None:
+            self._momentum_validation_components = self._diagnostic_means(diagnostic_components)
         self.model.train()
         return total_loss
 
@@ -382,7 +443,8 @@ class DeepForecastingModelBase(ModelBase):
         if self._momentum_enabled():
             from ts_benchmark.baselines.momentum_score import MomentumScore
             self.model.add_module("momentum_score", MomentumScore(
-                self._momentum_config["lookback"], self._momentum_config["eta"]
+                self._momentum_config["lookback"], self._momentum_config["eta"],
+                gain_init=self._momentum_config["gain_init"],
             ))
 
         device_ids = np.arange(torch.cuda.device_count()).tolist()
@@ -462,8 +524,28 @@ class DeepForecastingModelBase(ModelBase):
 
         print(f"Total trainable parameters: {total_params}")
 
+        diagnostics = self._momentum_diagnostics_enabled()
+        if diagnostics:
+            self._momentum_training_diagnostics = {
+                "version": "momentum_training_diagnostics_v1",
+                "gain_init": self._momentum_config["gain_init"],
+                "momentum_lookback": self._momentum_config["lookback"],
+                "eta": self._momentum_config["eta"],
+                "learning_rate": float(config.lr), "lradj": str(config.lradj),
+                "gradient_objective": "total_loss_including_penalty_and_additional_loss",
+                "aggregation": "arithmetic_mean_over_batches",
+                "checkpoint_selection": "validation_loss" if train_ratio_in_tv != 1 else "last_epoch",
+                "best_epoch": None, "best_gain": None, "epochs": [], "completed": False,
+            }
         for epoch in range(config.num_epochs):
             self.model.train()
+            if diagnostics:
+                epoch_diagnostic = {
+                    "epoch": epoch + 1,
+                    "learning_rates_start": [float(group["lr"]) for group in optimizer.param_groups],
+                    "gain_start": float(self._momentum_module().gain.detach()),
+                }
+                train_losses, train_components, gradient_norms = [], [], []
             # for input, target, input_mark, target_mark in train_data_loader:
             for i, (input, target, input_mark, target_mark) in enumerate(
                 self.train_data_loader
@@ -490,28 +572,61 @@ class DeepForecastingModelBase(ModelBase):
                                             history=input[:, :, :series_dim])
 
                 total_loss = loss + additional_loss
+                if diagnostics:
+                    train_losses.append(float(total_loss.detach()))
+                    train_components.append(self._diagnostic_components(criterion))
 
                 if config.use_amp == 1:
                     scaler.scale(total_loss).backward()
+                    if diagnostics:
+                        gradient_norms.append(self._momentum_gradient_norms(float(scaler.get_scale())))
                     scaler.step(optimizer)
                     scaler.update()
                 else:
                     total_loss.backward()
+                    if diagnostics:
+                        gradient_norms.append(self._momentum_gradient_norms())
                     optimizer.step()
 
                 if self.config.lradj == "TST":
                     self._adjust_lr(optimizer, epoch + 1, config)
 
+            valid_loss, improved = None, False
             if train_ratio_in_tv != 1:
                 valid_loss = self.validate(valid_data_loader, series_dim, criterion)
                 improved = self.early_stopping(valid_loss, self.model)
                 if improved:
                     self.check_point = self.save_checkpoint(self.model)
-                if self.early_stopping.early_stop:
-                    break
+
+            if diagnostics:
+                gain_end = float(self._momentum_module().gain.detach())
+                if improved or train_ratio_in_tv == 1:
+                    self._momentum_training_diagnostics.update(best_epoch=epoch + 1, best_gain=gain_end)
+                epoch_diagnostic.update(
+                    learning_rates_end=[float(group["lr"]) for group in optimizer.param_groups],
+                    gain_end=gain_end, train_loss=float(np.mean(train_losses)),
+                    validation_loss=None if valid_loss is None else float(valid_loss),
+                    train_components=self._diagnostic_means(train_components),
+                    validation_components=(getattr(self, "_momentum_validation_components", {})
+                                           if train_ratio_in_tv != 1 else {}),
+                    first_batch_gradient_norms=gradient_norms[0] if gradient_norms else {},
+                    mean_gradient_norms=self._diagnostic_means(gradient_norms),
+                    checkpoint_selected=bool(improved or train_ratio_in_tv == 1),
+                )
+                self._momentum_training_diagnostics["epochs"].append(epoch_diagnostic)
+                self._export_momentum_diagnostics()
+                print(f"Momentum diagnostic: epoch={epoch + 1}, gain={gain_end:.6g}, "
+                      f"best_epoch={self._momentum_training_diagnostics['best_epoch']}", flush=True)
+
+            if train_ratio_in_tv != 1 and self.early_stopping.early_stop:
+                break
 
             if self.config.lradj != "TST":
                 self._adjust_lr(optimizer, epoch + 1, config)
+
+        if diagnostics:
+            self._momentum_training_diagnostics["completed"] = True
+            self._export_momentum_diagnostics()
 
     def forecast(
         self,

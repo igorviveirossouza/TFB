@@ -25,12 +25,14 @@ A normalização cross-sectional já configurada na loss é aplicada depois dest
 composição; os kernels continuam usando diferenças dos retornos realizados em
 suas unidades financeiras.
 
-`gain` é **um escalar treinável compartilhado**, inicializado em zero e salvo
+`gain` é **um escalar treinável compartilhado**, inicializado em zero por padrão e salvo
 no checkpoint da rede. Não é uma nova cabeça que produz N correções independentes.
-A própria previsão da rede fornece a direção da correção. Portanto, inicialmente
-o ranking final é exatamente o momentum. No primeiro passo, a componente de
+A própria previsão da rede fornece a direção da correção. Com inicialização zero,
+o ranking final começa exatamente no momentum. No primeiro passo, a componente de
 ranking treina o ganho; o gradiente dessa componente chega ao backbone quando o
 ganho se afasta de zero. A componente temporal continua treinando conforme lambda.
+`MOMENTUM_GAIN_INIT` permite escolher outro valor inicial finito (inclusive negativo).
+Ele continua sendo aprendido durante o treino; não é um peso fixo.
 
 A penalização age na correção antes de qualquer normalização posterior. Para
 cross-sections não constantes, ela equivale aproximadamente a `eta*gain**2`.
@@ -58,6 +60,12 @@ e 144 proximity. Eta0.01 é um ponto inicial editável, sem ajuste empírico.
 O script delega ao launcher de kernels existente e respeita seus exports; os
 defaults do launcher antigo permanecem iguais. `--help` lista as opções.
 
+Para investigar a inicialização do ganho e o decaimento da taxa de aprendizado,
+use o experimento de três condições em
+[`ns_momentum_diagnostic.md`](tutorials/ns_momentum_diagnostic.md). Ele treina
+somente a configuração proximity selecionada, sem repetir os controles temporais
+ou a grade de kernels.
+
 As opções valem para `run_ns_kloss_isolado.sh`, `run_ns_kernels_isolado.sh` e para
 o launcher composto. Use uma nova tag para manter os exercícios separados:
 
@@ -73,6 +81,10 @@ bash scripts/run_ns_kloss_isolado.sh --train
 ```
 
 `0.01` é somente exemplo de parametrização, sem alegação de valor ótimo.
+`MOMENTUM_GAIN_INIT=0` e `MOMENTUM_DIAGNOSTICS=0` preservam os defaults anteriores.
+Nos wrappers isolados, `NS_LRADJ` permite escolher `type1`, `type2`, `type3` ou
+`constant`; vazio mantém a regra nativa do modelo. No launcher composto direto,
+a variável correspondente é `LRADJ`.
 Se `MOMENTUM_LOOKBACK` estiver vazio, cada tarefa usa o próprio lookback da rede.
 Ele também pode ser maior: o loader preserva o passado adicional para o momentum,
 mas entrega ao backbone apenas sua janela configurada. Isso elimina exemplos
@@ -93,12 +105,19 @@ normalização cross-sectional `zscore` neste modo, para compatibilizar escalas.
 
 Cada tarefa ativa recebe segmentos de caminho `momentum=residual_output`,
 `momentum_lb=...` e `momentum_eta=...`, além da identificação usual do experimento.
+Ganho inicial não zero acrescenta `momentum_gain_init=...`. A regra de LR fica
+no `run_config.json`; use tags distintas para comparar regras diferentes.
 
 * `part.parquet`: previsões diárias originais de retorno; sem alteração semântica.
 * `momentum_state.json`: ganho do melhor checkpoint, L, eta, normalização e ativos.
 * `ranking_scores.parquet`: score final adimensional, para todas as origens e
   todos os K de 1 até H, nas colunas `origin_step`, `k_eval` e ativos.
 * `momentum_scores.json`: contrato e hashes dos três arquivos anteriores.
+* `momentum_training_diagnostics.json`: quando `MOMENTUM_DIAGNOSTICS=1`, registra
+  por época o ganho, as taxas de aprendizado, as perdas e seus componentes,
+  as normas dos gradientes do objetivo total e o melhor checkpoint de validação.
+  As médias de perda são médias entre batches, como na validação nativa.
+  O ganho do melhor checkpoint é separado do ganho ao final de cada época.
 
 Não use o score final como retorno esperado, nem o acumule novamente. A exportação
 recompõe o mesmo score do treino usando o estado salvo, as previsões e o histórico
