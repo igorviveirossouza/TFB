@@ -34,6 +34,41 @@ from ts_benchmark.baselines.proximity_losses import PROXIMITY_LOSSES, validate_c
 LAUNCHERS = {'temporal': 'run_temporal_experiment.sh',
              'composto': 'run_composite_trading_experiment.sh',
              'var': 'run_var_experiment.sh'}
+MOMENTUM_KEYS = ('momentum_mode', 'momentum_lookback', 'momentum_eta')
+MOMENTUM_MODELS = {'Nonstationary_Transformer', 'DUET', 'TimesNet', 'FEDformer'}
+
+
+def momentum_options(config):
+    """Validate optional scientific parameters without importing Torch."""
+    loss = config['loss']
+    unknown = {key for key in loss if key.startswith('momentum_')} - set(MOMENTUM_KEYS)
+    if unknown:
+        raise ValueError(f'Parâmetro momentum desconhecido: {sorted(unknown)}')
+    mode = loss.get('momentum_mode', 'off')
+    if not isinstance(mode, str) or mode not in {'off', 'residual_output'}:
+        raise ValueError('MOMENTUM_MODE deve ser off ou residual_output')
+    lookback = loss.get('momentum_lookback')
+    if lookback is not None and (type(lookback) is not int or lookback < 1):
+        raise ValueError('MOMENTUM_LOOKBACK deve ser um inteiro positivo ou ficar vazio (= LB do modelo)')
+    eta = loss.get('momentum_eta', 0.0)
+    if type(eta) not in (int, float) or not math.isfinite(eta) or eta < 0:
+        raise ValueError('MOMENTUM_ETA deve ser finito e não negativo')
+    return mode, lookback, float(eta)
+
+
+def validate_momentum_experiment(config):
+    if momentum_options(config)[0] != 'off':
+        unsupported = set(config['models']) - MOMENTUM_MODELS
+        if unsupported:
+            raise ValueError(f'Momentum residual ainda não validado para: {sorted(unsupported)}')
+        if config.get('source_data_kind', 'log_return') != 'log_return':
+            raise ValueError('Momentum residual requer SOURCE_DATA_KIND=log_return (step_offset=1)')
+        loss = config['loss']
+        normalization = loss.get('loss_cross_score_normalization',
+                                 loss.get('loss_rank_score_normalization', 'zscore'))
+        value_losses = {'mse', 'pairwise_mse', 'pairwise_mse_proximity'}
+        if str(normalization).lower() == 'none' and value_losses.intersection(config['cross_losses']):
+            raise ValueError('Momentum residual exige zscore para mse e pairwise_mse (inclusive proximity)')
 
 
 def digest(value):
@@ -89,6 +124,12 @@ def load_config():
     for key in ('num_epochs', 'patience', 'lr'):
         if not math.isfinite(config['training'][key]) or config['training'][key] <= 0:
             raise ValueError(f'{key} deve ser positivo e finito')
+    mode, _, _ = momentum_options(config)
+    if mode == 'off':
+        # The opt-out keeps historical config identities and cache keys intact.
+        for key in MOMENTUM_KEYS:
+            config['loss'].pop(key, None)
+    validate_momentum_experiment(config)
     return path, config
 
 
@@ -99,6 +140,9 @@ def cross_deltas(config, loss):
 
 
 def make_tasks(config, mode):
+    momentum_mode, momentum_lb, momentum_eta = momentum_options(config)
+    if mode == 'composto':
+        validate_momentum_experiment(config)
     tasks = []
     for pct in config['train_percentages']:
         losses = (config['cross_losses'] if mode == 'composto' else
@@ -118,6 +162,12 @@ def make_tasks(config, mode):
                     task = dict(array_index=len(tasks), treino=pct, experimento=mode,
                                 loss=loss, cross_lambda=lam, cross_delta=delta,
                                 modelo=model, lookback=lb, pred_len=horizon, k=k)
+                    if mode == 'composto' and momentum_mode != 'off':
+                        if not 0 < lam <= 1:
+                            raise ValueError('Momentum residual exige lambda composto em (0,1]')
+                        task.update(momentum_mode=momentum_mode,
+                                    momentum_lookback=momentum_lb or lb,
+                                    momentum_eta=momentum_eta)
                     if mask is not None:
                         task.update(mask_type=mask[0], mask_a=mask[1])
                         if len(mask) >= 3 and mask[2] != 'natural':
@@ -144,6 +194,10 @@ def output_path(task):
                 path /= f"mask_mode={task['mask_mode']}"
             if task.get('mask_shape'):
                 path /= 'shape=' + '_'.join(repr(float(x)) for x in task['mask_shape'])
+        if task.get('momentum_mode') == 'residual_output':
+            path = (path / 'momentum=residual_output' /
+                    f"momentum_lb={task['momentum_lookback']}" /
+                    f"momentum_eta={float(task['momentum_eta'])!r}")
     path = path / f"modelo={task['modelo']}" / f"lookback={task['lookback']}" / f"pred_len={task['pred_len']}"
     if task['k'] is not None:
         path /= f"k_dir={task['k']}"
@@ -164,6 +218,11 @@ def model_spec(config, task):
     # Ordinary MSE is exactly the composite's temporal term. Do not evaluate
     # unused cross scores at lambda=0 (0 * NaN would still contaminate the loss).
     hyper.update(config['loss'])
+    # Controls always stay purely temporal, even in a momentum-enabled design.
+    for key in MOMENTUM_KEYS:
+        hyper.pop(key, None)
+    if task.get('momentum_mode') == 'residual_output':
+        hyper.update({key: task[key] for key in MOMENTUM_KEYS})
     # Inactive masks must not change the original models' hyperparameters/cache keys.
     hyper.pop('loss_cross_mask', None)
     if task['loss'] in PROXIMITY_LOSSES:
@@ -265,7 +324,8 @@ def validate_lengths(config, tasks, metadata):
         if split['n_windows'] < 1 or max_windows > config['strategy']['num_rollings']:
             raise ValueError('Teste sem janelas ou NUM_ROLLINGS insuficiente para cobrir todo o teste')
         # MASTER keeps partial batches (a sample contains the whole universe).
-        minimum = task['lookback'] + task['pred_len'] + (0 if task['modelo'] == 'MASTER' else 31)
+        history = max(task['lookback'], task.get('momentum_lookback', task['lookback']))
+        minimum = history + task['pred_len'] + (0 if task['modelo'] == 'MASTER' else 31)
         if split['n_train'] < minimum:
             raise ValueError('Treino insuficiente para contexto, horizonte e batch do modelo')
         if task['modelo'] != 'VAR' and split['n_validation'] < task['pred_len']:
@@ -304,6 +364,9 @@ def provenance(config, metadata):
                   'ts_benchmark/baselines/proximity_losses.py',
                   'ts_benchmark/baselines/self_impl/VAR/VAR.py',
                   'ts_benchmark/baselines/deep_forecasting_model_base.py']
+    if momentum_options(config)[0] != 'off':
+        code_files += ['ts_benchmark/baselines/momentum_score.py',
+                       'ts_benchmark/baselines/momentum_score_io.py']
     master_data = None
     if 'MASTER' in config['models']:
         hyper = config['model_defaults']['MASTER']
@@ -377,6 +440,10 @@ def prepare(config_path, config, tasks, out_root):
 
 def benchmark_command(config, task, dataset, n_rows, result_dir, model_artifact_dir=None):
     model, hyper, adapter, deterministic = model_spec(config, task)
+    if task.get('momentum_mode') == 'residual_output':
+        if model_artifact_dir is None:
+            raise ValueError('Momentum residual requer diretório para momentum_state.json')
+        hyper['momentum_state_path'] = str(model_artifact_dir / 'momentum_state.json')
     if task['modelo'] == 'MASTER' and model_artifact_dir is not None:
         hyper.update(master_audit_path=str(model_artifact_dir / 'master_training.json'),
                      master_checkpoint_path=str(model_artifact_dir / 'master_checkpoint.pt'))
@@ -479,6 +546,9 @@ def worker(config, tasks, out_root, index):
         else:
             finished = bool(prior) and parquet.exists() and file_hash(parquet) == prior['parquet_sha256']
         if finished:
+            if task.get('momentum_mode') == 'residual_output':
+                from b3_experiment_io import validate_momentum_export
+                validate_momentum_export(output)
             print(f'Já concluído: {output}', flush=True)
             return
         panel = load_panel(Path(metadata['dataset']))
@@ -506,6 +576,10 @@ def worker(config, tasks, out_root, index):
                 export_predictions(Path(temporary), panel, split['n_pretest'], task['pred_len'], output,
                                    keep_csv=os.environ.get('MANTER_CSV','FALSE').upper() == 'TRUE',
                                    step_offset=metadata['step_offset'])
+                if task.get('momentum_mode') == 'residual_output':
+                    from b3_experiment_io import export_momentum_scores
+                    export_momentum_scores(panel, split['n_pretest'], task['pred_len'], output,
+                                           step_offset=metadata['step_offset'])
             parquet_hash = file_hash(parquet)
         row = audit_row(config, task, metadata, out_root, signature)
         row.update(slurm_job_id=os.environ.get('SLURM_JOB_ID',''), parquet_sha256=parquet_hash)
@@ -613,6 +687,10 @@ def main():
     if args.mode == 'var':
         print(f'Um ajuste por corte; os horizontes saem do mesmo VAR: {config["horizons"]}.', flush=True)
     if args.mode == 'composto':
+        if momentum_options(config)[0] != 'off':
+            _, lookback, eta = momentum_options(config)
+            print(f'Momentum residual: LB={lookback or "LB do modelo"}; eta={eta:g}; '
+                  'controle temporal inalterado; scores em ranking_scores.parquet.', flush=True)
         pairs = sum(k <= h and h % k == 0 for h in config['horizons'] for k in config['trade_windows'])
         factors = [len(config[key]) for key in ('train_percentages', 'models', 'lookbacks')]
         variants = sum(len(cross_deltas(config, loss)) for loss in config['cross_losses'])

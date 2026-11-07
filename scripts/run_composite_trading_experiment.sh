@@ -68,6 +68,11 @@ SCORE_KIND="${SCORE_KIND:-simple_return}"
 CROSS_SCORE_NORMALIZATION="${CROSS_SCORE_NORMALIZATION:-zscore}"
 LOSS_INVERSE_NORM="${LOSS_INVERSE_NORM:-true}"
 LOSS_TRACK_COMPONENTS="${LOSS_TRACK_COMPONENTS:-true}"
+# Opcional: score final = momentum + correcao aprendida; off preserva os experimentos antigos.
+# LOOKBACK vazio acompanha cada LB da grade; ETA penaliza o quadrado da correcao.
+MOMENTUM_MODE="${MOMENTUM_MODE:-off}" # off | residual_output
+MOMENTUM_LOOKBACK="${MOMENTUM_LOOKBACK:-}"
+MOMENTUM_ETA="${MOMENTUM_ETA:-0}"
 # Todos os H passos ficam cobertos por blocos completos de K.
 # ListNet não usa delta: pasta/auditoria usam delta=0 e delta_effective=False.
 # Grade padrão: 33.696 tarefas (10.368 por loss de pares; 2.592 para ListNet).

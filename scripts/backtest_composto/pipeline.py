@@ -20,9 +20,10 @@ import pyarrow.parquet as pq
 from backtest_cpu.core import Strategy, backtest, ic_daily_frame, ic_frame, ic_summary
 from backtest_cpu.io import digest, json_digest, load_bundle, load_strategies, read_json, read_table
 from backtest_cpu.pipeline import atomic_json, locked, runtime_versions, setup_runtime, storage_path, valid_result
-from .io import discover_composite_tasks, load_composite_predictions
+from .io import (discover_composite_tasks, load_composite_predictions,
+                 load_composite_ranking_scores, momentum_snapshot)
 
-VERSION = "2026-11-06-composto-kernel-families-v4"
+VERSION = "2026-11-07-composto-momentum-residual-v5"
 _PLAN = None
 _MARKET = None
 SUMMARY_NAMES = ("metricas", "ic_resumo", "ic_acumulado_resumo", "falhas")
@@ -255,6 +256,17 @@ def with_meta(frame, task, plan):
                    "slippage_bps": (plan["slippage_bps"], pa.float64()),
                    "cost_bps": (plan["cost_bps"], pa.float64()),
                    "task_signature": (task["task_signature"], pa.string())})
+    if task.get("momentum_mode") == "residual_output":
+        state = task["momentum_state"]
+        values.update({"momentum_mode": (task["momentum_mode"], pa.string()),
+                       "momentum_lookback": (task["momentum_lookback"], pa.int64()),
+                       "momentum_eta": (task["momentum_eta"], pa.float64()),
+                       "momentum_gain": (state["gain"], pa.float64()),
+                       "momentum_score_kind": (state["score_kind"], pa.string()),
+                       "ranking_score_kind": ("momentum_plus_residual_zscore", pa.string()),
+                       "eligibility_signal_kind": ("raw_cumulative_log_return", pa.string()),
+                       "daily_ic_score_kind": ("raw_daily_log_return", pa.string()),
+                       "momentum_manifest_sha256": (task["momentum_files"]["manifest"]["sha256"], pa.string())})
     for key, (value, dtype) in values.items():
         array = pa.array([value]*len(frame), type=dtype)
         if key in table.column_names:
@@ -275,24 +287,28 @@ def execute_task(task):
         try:
             if digest(task["path"]) != task["sha256"]:
                 raise ValueError(f"Previsao alterada: {task['path']}")
+            momentum_snapshot(task, market, verify_files=True)
             if valid_result(directory, task["task_signature"]):
                 state = read_json(directory/"conclusao.json")
                 atomic_json(status_path, state)
                 return dict(state, status="REUTILIZADA")
             origins, predictions, cumulative = load_composite_predictions(task, market, verify_hash=False)
+            ranking = load_composite_ranking_scores(task, market, origins, verify_hash=False)
             daily = ic_daily_frame(predictions, origins, market, task["common_last_origin"])
             ics, outputs, failures = [], {}, []
             for k in plan["k"]:
                 if k > task["pred_len"]:
                     continue
-                scores = cumulative[:, k-1, :]
+                scores = (cumulative if ranking is None else ranking)[:, k-1, :]
                 ics.append(ic_frame(scores, origins, k, market, task["common_last_origin"]))
                 chosen = np.arange(task["corte"], task["common_last_origin"]+1, k)
                 signal = scores[chosen-task["corte"]]
                 for definition in plan["strategies"]:
                     try:
                         result = backtest(signal, chosen, k, market, Strategy(**definition),
-                                          plan["slippage_bps"], plan["cost_bps"])
+                                          plan["slippage_bps"], plan["cost_bps"],
+                                          eligibility_signal=None if ranking is None else
+                                          cumulative[chosen-task["corte"], k-1, :])
                         for name, frame in result.items():
                             outputs.setdefault(name, []).append(frame)
                     except ValueError as error:
@@ -318,6 +334,8 @@ def execute_task(task):
                      "finished_utc": datetime.now(timezone.utc).isoformat(),
                      "slurm_job_id": os.getenv("SLURM_JOB_ID"),
                      "files": {p.name: digest(p) for p in stage.glob("*.parquet")}}
+            if task.get("momentum_mode") == "residual_output":
+                state.update(momentum_state=task["momentum_state"], momentum_files=task["momentum_files"])
             atomic_json(stage/"conclusao.json", state)
             directory.parent.mkdir(parents=True, exist_ok=True)
             if directory.exists():
@@ -396,12 +414,18 @@ def consolidate(run):
                                          "mask_effective": "mask_type" in task,
                                          "mask_shape": json.dumps(task["mask_shape"], separators=(",", ":")) if task.get("mask_shape") else None,
                                          "seconds": result.get("seconds"), "erro": result.get("erro", "")})
+                        if task.get("momentum_mode") == "residual_output":
+                            statuses[-1].update({key: task[key] for key in
+                                                ("momentum_mode", "momentum_lookback", "momentum_eta")})
             for name, parts in frames.items():
                 populated = [p for p in parts if len(p)]
                 if parts:
                     table = pd.concat(populated, ignore_index=True) if populated else parts[0].iloc[:0]
                     table.to_parquet(stage/f"{name}.parquet", index=False, compression="snappy")
-            pd.DataFrame(statuses, columns=["task_id", "status", "treino", "modelo", "lookback", "pred_len", "loss", "lambda", "delta", "k_dir", "mask_type", "mask_a", "mask_mode", "mask_effective", "mask_shape", "seconds", "erro"]).to_csv(stage/"status_tarefas.csv", index=False)
+            status_columns = ["task_id", "status", "treino", "modelo", "lookback", "pred_len", "loss", "lambda", "delta", "k_dir", "mask_type", "mask_a", "mask_mode", "mask_effective", "mask_shape", "seconds", "erro"]
+            if any(t.get("momentum_mode") == "residual_output" for t in plan["tasks"]):
+                status_columns.extend(["momentum_mode", "momentum_lookback", "momentum_eta"])
+            pd.DataFrame(statuses, columns=status_columns).to_csv(stage/"status_tarefas.csv", index=False)
             counts = {s: sum(x["status"] == s for x in statuses) for s in ("COMPLETA", "PARCIAL", "ERRO", "PENDENTE")}
             state = {"signature": plan["signature"], "contract_signature": plan["contract_signature"],
                      "total": len(statuses), **counts,

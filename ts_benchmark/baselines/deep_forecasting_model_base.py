@@ -1,5 +1,8 @@
 import copy
+import json
 import math
+import os
+import tempfile
 from typing import Optional, Tuple
 
 import numpy as np
@@ -82,6 +85,73 @@ class DeepForecastingModelBase(ModelBase):
         self.seq_len = self.config.seq_len
         self.win_size = self.config.seq_len
         self.check_point = None
+        # Opt-in: importing/initializing this adapter must not consume RNG or
+        # change the model, loss or data windows of existing experiments.
+        self._momentum_config = {"mode": "off", "lookback": None, "eta": 0.0}
+        if str(getattr(self.config, "momentum_mode", "off")).lower() != "off":
+            from ts_benchmark.baselines.momentum_score import validate_momentum_config
+            self._momentum_config = validate_momentum_config(self.config)
+            self.win_size = self._history_length()
+
+    def _momentum_enabled(self):
+        return self._momentum_config["mode"] == "residual_output"
+
+    def _history_length(self):
+        if self._momentum_enabled():
+            return max(self.config.seq_len, self._momentum_config["lookback"])
+        return self.config.seq_len
+
+    def _data_config(self):
+        if self._history_length() == self.config.seq_len:
+            return self.config
+        config = copy.copy(self.config)
+        config.seq_len = self._history_length()
+        return config
+
+    def _process_with_history(self, input, target, input_mark, target_mark):
+        # The extra past belongs to the momentum baseline, not to the backbone.
+        if self._momentum_enabled():
+            if input.shape[1] < self._history_length():
+                raise ValueError("Historico insuficiente para a rede e o momentum.")
+            input = input[:, -self.config.seq_len:, :]
+            input_mark = input_mark[:, -self.config.seq_len:, :]
+        return self._process(input, target, input_mark, target_mark)
+
+    def _momentum_module(self):
+        model = self.model.module if isinstance(self.model, nn.DataParallel) else self.model
+        return model.momentum_score
+
+    def _export_momentum_state(self):
+        if not self._momentum_enabled():
+            return
+        path = getattr(self.config, "momentum_state_path", None)
+        if not path:
+            return
+        state = self._momentum_module().state_payload(
+            self.config.loss_score_kind, self._momentum_assets
+        )
+        payload = json.dumps(state, sort_keys=True, indent=2, allow_nan=False) + "\n"
+        if getattr(self, "_exported_momentum_state", None) == (str(path), payload) and os.path.isfile(path):
+            return
+        parent = os.path.dirname(os.path.abspath(path))
+        os.makedirs(parent, exist_ok=True)
+        fd, temporary = tempfile.mkstemp(prefix=".momentum_state_", dir=parent, text=True)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                stream.write(payload)
+            os.replace(temporary, path)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+        self._exported_momentum_state = (str(path), payload)
+
+    def _check_momentum_inference(self, horizon, exog_data=None):
+        if not self._momentum_enabled():
+            return
+        if horizon != self.config.horizon:
+            raise ValueError("Momentum exige horizon igual ao horizonte treinado; nao usa historico sintetico.")
+        if exog_data is not None:
+            raise ValueError("O modulo momentum ainda nao aceita covariaveis exogenas.")
 
     def _init_model(self):
         raise NotImplementedError("model must be implemented.")
@@ -96,7 +166,10 @@ class DeepForecastingModelBase(ModelBase):
         normalizer_mean = getattr(self.scaler, "mean_", None)
         normalizer_scale = getattr(self.scaler, "scale_", None)
 
-        criterion = build_loss(
+        loss_builder = build_loss
+        if self._momentum_enabled():
+            from ts_benchmark.baselines.composite_trading_loss_v3 import build_loss as loss_builder
+        criterion = loss_builder(
             self.config,
             normalizer_mean=normalizer_mean,
             normalizer_scale=normalizer_scale,
@@ -229,7 +302,12 @@ class DeepForecastingModelBase(ModelBase):
             return target[:, -self.config.horizon - 1, :series_dim]
         return input[:, -1, :series_dim]
 
-    def _criterion_loss(self, criterion, output, target, base_value=None):
+    def _criterion_loss(self, criterion, output, target, base_value=None, history=None):
+        if self._momentum_enabled():
+            return criterion(
+                output, target, base_value=base_value,
+                momentum_history=history, momentum_module=self._momentum_module(),
+            )
         if loss_accepts_base_value(criterion):
             return criterion(output, target, base_value=base_value)
         return criterion(output, target)
@@ -250,7 +328,7 @@ class DeepForecastingModelBase(ModelBase):
                     target_mark.to(device),
                 )
 
-                out_loss = self._process(input, target, input_mark, target_mark)
+                out_loss = self._process_with_history(input, target, input_mark, target_mark)
                 additional_loss = 0
                 output = out_loss["output"]
                 if "additional_loss" in out_loss:
@@ -261,7 +339,8 @@ class DeepForecastingModelBase(ModelBase):
                 output = output[:, -config.horizon :, :series_dim]
                 output, target = self._post_process(output, target)
                 all_loss = (
-                    self._criterion_loss(criterion, output, target, base_value=base_value)
+                    self._criterion_loss(criterion, output, target, base_value=base_value,
+                                         history=input[:, :, :series_dim])
                     + additional_loss
                 )
                 loss = all_loss.detach().cpu().numpy()
@@ -283,6 +362,12 @@ class DeepForecastingModelBase(ModelBase):
             covariates = {}
         series_dim = train_valid_data.shape[-1]
         exog_data = covariates.get("exog", None)
+        if self._momentum_enabled():
+            if exog_data is not None:
+                raise ValueError("O modulo momentum ainda nao aceita covariaveis exogenas.")
+            if series_dim < 2 or not np.isfinite(train_valid_data.to_numpy()).all():
+                raise ValueError("Momentum exige pelo menos dois ativos e log-retornos finitos.")
+            self._momentum_assets = [str(c) for c in train_valid_data.columns]
         if exog_data is not None:
             train_valid_data = pd.concat([train_valid_data, exog_data], axis=1)
 
@@ -294,6 +379,11 @@ class DeepForecastingModelBase(ModelBase):
             self.multi_forecasting_hyper_param_tune(train_valid_data)
 
         self.model = self._init_model()
+        if self._momentum_enabled():
+            from ts_benchmark.baselines.momentum_score import MomentumScore
+            self.model.add_module("momentum_score", MomentumScore(
+                self._momentum_config["lookback"], self._momentum_config["eta"]
+            ))
 
         device_ids = np.arange(torch.cuda.device_count()).tolist()
         if len(device_ids) > 1 and self.config.parallel_strategy == "DP":
@@ -304,8 +394,14 @@ class DeepForecastingModelBase(ModelBase):
         )
         config = self.config
         train_data, valid_data = train_val_split(
-            train_valid_data, train_ratio_in_tv, config.seq_len
+            train_valid_data, train_ratio_in_tv, self._history_length()
         )
+        data_config = self._data_config()
+        if self._momentum_enabled():
+            if len(train_data) < self._history_length() + config.horizon:
+                raise ValueError("Bloco de treino insuficiente para lookback e horizonte.")
+            if train_ratio_in_tv != 1 and len(valid_data) < self._history_length() + config.horizon:
+                raise ValueError("Bloco de validacao insuficiente para lookback e horizonte.")
 
         self.scaler.fit(train_data.values)
 
@@ -325,7 +421,7 @@ class DeepForecastingModelBase(ModelBase):
                 )
             valid_dataset, valid_data_loader = forecasting_data_provider(
                 valid_data,
-                config,
+                data_config,
                 timeenc=1,
                 batch_size=config.batch_size,
                 shuffle=True,
@@ -334,12 +430,14 @@ class DeepForecastingModelBase(ModelBase):
 
         train_dataset, self.train_data_loader = forecasting_data_provider(
             train_data,
-            config,
+            data_config,
             timeenc=1,
             batch_size=config.batch_size,
             shuffle=True,
             drop_last=train_drop_last,
         )
+        if self._momentum_enabled() and len(self.train_data_loader) == 0:
+            raise ValueError("Nenhum batch de treino; reduza batch_size ou momentum_lookback.")
 
         # Define the loss function and optimizer
         print("torch.cuda.is_available():", torch.cuda.is_available(), flush=True)
@@ -378,7 +476,7 @@ class DeepForecastingModelBase(ModelBase):
                     target_mark.to(device),
                 )
                 # decoder input
-                out_loss = self._process(input, target, input_mark, target_mark)
+                out_loss = self._process_with_history(input, target, input_mark, target_mark)
                 additional_loss = 0
                 output = out_loss["output"]
                 if "additional_loss" in out_loss:
@@ -388,7 +486,8 @@ class DeepForecastingModelBase(ModelBase):
                 target = target[:, -config.horizon :, :series_dim]
                 output = output[:, -config.horizon :, :series_dim]
                 output, target = self._post_process(output, target)
-                loss = self._criterion_loss(criterion, output, target, base_value=base_value)
+                loss = self._criterion_loss(criterion, output, target, base_value=base_value,
+                                            history=input[:, :, :series_dim])
 
                 total_loss = loss + additional_loss
 
@@ -425,6 +524,10 @@ class DeepForecastingModelBase(ModelBase):
             covariates = {}
         series_dim = series.shape[-1]
         exog_data = covariates.get("exog", None)
+        self._check_momentum_inference(horizon, exog_data)
+        if self._momentum_enabled():
+            if len(series) < self._history_length() or [str(c) for c in series.columns] != self._momentum_assets:
+                raise ValueError("Historico ou universo de ativos incompativel com o momentum treinado.")
         if exog_data is not None:
             series = pd.concat([series, exog_data], axis=1)
             if (
@@ -437,6 +540,7 @@ class DeepForecastingModelBase(ModelBase):
 
         if self.check_point is not None:
             self.model.load_state_dict(self.check_point)
+        self._export_momentum_state()
 
         if self.config.norm:
             series = pd.DataFrame(
@@ -449,11 +553,11 @@ class DeepForecastingModelBase(ModelBase):
             raise ValueError("Model not trained. Call the fit() function first.")
 
         config = self.config
-        series, test = split_time(series, len(series) - config.seq_len)
+        series, test = split_time(series, len(series) - self._history_length())
         test = self.padding_data_for_forecast(test)
 
         test_data_set, test_data_loader = forecasting_data_provider(
-            test, config, timeenc=1, batch_size=1, shuffle=False, drop_last=False
+            test, self._data_config(), timeenc=1, batch_size=1, shuffle=False, drop_last=False
         )
 
         device = get_device()
@@ -471,7 +575,7 @@ class DeepForecastingModelBase(ModelBase):
                         target_mark.to(device),
                     )
 
-                    out_loss = self._process(input, target, input_mark, target_mark)
+                    out_loss = self._process_with_history(input, target, input_mark, target_mark)
                     output = out_loss["output"]
 
                 column_num = output.shape[-1]
@@ -508,8 +612,10 @@ class DeepForecastingModelBase(ModelBase):
     def batch_forecast(
         self, horizon: int, batch_maker: BatchMaker, **kwargs
     ) -> np.ndarray:
+        self._check_momentum_inference(horizon)
         if self.check_point is not None:
             self.model.load_state_dict(self.check_point)
+        self._export_momentum_state()
 
         if self.model is None:
             raise ValueError("Model not trained. Call the fit() function first.")
@@ -517,7 +623,7 @@ class DeepForecastingModelBase(ModelBase):
         self.model.to(device)
         self.model.eval()
 
-        input_data = batch_maker.make_batch(self.config.batch_size, self.config.seq_len)
+        input_data = batch_maker.make_batch(self.config.batch_size, self._history_length())
         input_np = input_data["input"]
 
         series_dim = input_np.shape[-1]
@@ -527,6 +633,7 @@ class DeepForecastingModelBase(ModelBase):
         else:
             covariates = input_data["covariates"]
         exog_data = covariates.get("exog")
+        self._check_momentum_inference(horizon, exog_data)
         if exog_data is not None:
             input_np = np.concatenate((input_np, exog_data), axis=2)
             if (
@@ -578,7 +685,7 @@ class DeepForecastingModelBase(ModelBase):
                     torch.tensor(target_mark_np, dtype=torch.float32).to(device),
                 )
 
-                out_loss = self._process(input, dec_input, input_mark, target_mark)
+                out_loss = self._process_with_history(input, dec_input, input_mark, target_mark)
                 output = out_loss["output"]
                 column_num = output.shape[-1]
                 real_batch_size = output.shape[0]
@@ -613,7 +720,7 @@ class DeepForecastingModelBase(ModelBase):
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         if rolling_time > 0:
             input_np = np.concatenate((input_np, output), axis=1)
-            input_np = input_np[:, -self.config.seq_len :, :]
+            input_np = input_np[:, -self._history_length() :, :]
         target_np = np.zeros(
             (
                 input_np.shape[0],
@@ -625,9 +732,9 @@ class DeepForecastingModelBase(ModelBase):
             :, -self.config.label_len :, :
         ]
         advance_len = rolling_time * self.config.horizon
-        input_mark_np = all_mark[:, advance_len : self.config.seq_len + advance_len, :]
-        start = self.config.seq_len - self.config.label_len + advance_len
-        end = self.config.seq_len + self.config.horizon + advance_len
+        input_mark_np = all_mark[:, advance_len : self._history_length() + advance_len, :]
+        start = self._history_length() - self.config.label_len + advance_len
+        end = self._history_length() + self.config.horizon + advance_len
         target_mark_np = all_mark[
             :,
             start:end,

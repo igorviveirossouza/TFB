@@ -43,6 +43,9 @@ readonly CROSS_LOSSES_VALUES="${CROSS_LOSSES_VALUES:-ranknet ranknet_proximity}"
 readonly NS_MASK_TYPE="${NS_MASK_TYPE:-cauchy}"
 readonly NS_MASK_A="${NS_MASK_A:-0.025}"
 readonly NS_MASK_MODE="${NS_MASK_MODE:-natural}"
+readonly MOMENTUM_MODE="${MOMENTUM_MODE:-off}"
+readonly MOMENTUM_LOOKBACK="${MOMENTUM_LOOKBACK:-}"
+readonly MOMENTUM_ETA="${MOMENTUM_ETA:-0}"
 readonly K_EVAL_VALUES_FIXED='1 5 10 15 20 25'
 
 usage() {
@@ -76,6 +79,9 @@ NS_MEMORY, NS_NODELIST, NS_CPU_WORKERS. Caminhos opcionais: NS_PYTHON_BIN,
 NS_VENV_PATH, NS_RETURNS_FILE, NS_MARKET_DIR, NS_STRATEGIES_FILE.
 EXPERIMENT_TAG, MODEL e CROSS_LOSSES_VALUES podem ser informados pelo ambiente.
 MODEL e CROSS_LOSSES_VALUES: nomes separados por espacos.
+MOMENTUM_MODE=off|residual_output, MOMENTUM_LOOKBACK (vazio = LB do modelo),
+MOMENTUM_ETA (finito >= 0) aceitam export. Apenas compostos usam a correcao;
+o controle temporal permanece desligado. Scores separados em ranking_scores.parquet.
 NS_MASK_TYPE: uniform, gaussian ou cauchy (padrao cauchy).
 NS_MASK_MODE: natural ou complementary (padrao natural).
 NS_MASK_A: padrao 0.025, com ponto decimal; >= 0 para uniform e > 0 para gaussian/cauchy.
@@ -98,6 +104,9 @@ die() { printf 'ERRO: %s\n' "$*" >&2; exit 2; }
 training_grid() {
     local model lb h loss lam k mask value
     local -a models lookbacks horizons windows losses lambdas
+    [[ "$MOMENTUM_MODE" == off || "$MOMENTUM_MODE" == residual_output ]] || die 'MOMENTUM_MODE deve ser off ou residual_output.'
+    [[ -z "$MOMENTUM_LOOKBACK" || "$MOMENTUM_LOOKBACK" =~ ^[1-9][0-9]*$ ]] || die 'MOMENTUM_LOOKBACK deve ser inteiro positivo ou vazio.'
+    [[ "$MOMENTUM_ETA" =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)([eE][+-]?[0-9]+)?$ ]] || die 'MOMENTUM_ETA deve ser finito e nao negativo.'
     read -r -a models <<< "$MODEL"
     read -r -a lookbacks <<< "$LOOKBACKS_VALUES"
     read -r -a horizons <<< "$HORIZON_VALUES"
@@ -152,6 +161,9 @@ plan() {
     local row index=0
     grid_counts
     printf 'Modelos: %s | treino 80 | H: %s | batch 16 | seed 2026 | LR 1e-4 | epocas 100 | patience 10\n' "$MODEL" "$HORIZON_VALUES"
+    if [[ "$MOMENTUM_MODE" != off ]]; then
+        printf 'Momentum residual nos compostos: LB=%s; eta=%s; controle temporal off.\n' "${MOMENTUM_LOOKBACK:-LB do modelo}" "$MOMENTUM_ETA"
+    fi
     printf 'Previsoes: %s\nResultados: %s\nBacktests: %s\n' "$PRED_ROOT" "$RESULT_ROOT_BASE" "$BACKTEST_ROOT"
     printf 'Concorrencia: 1 por array de treino; ate 2 jobs entre os dois ramos.\n'
     printf 'Pre-requisito: checkout com os dois validadores Python aceitando 0 < lambda <= 1.\n'
@@ -216,8 +228,9 @@ common_preflight() {
 
 training_launcher() {
     local branch=$1; shift
-    local tag launcher pred result log
+    local tag launcher pred result log momentum_mode=$MOMENTUM_MODE
     if [[ "$branch" == temporal ]]; then
+        momentum_mode=off
         tag=$CONTROL_TAG; launcher=run_temporal_experiment.sh; pred=$CONTROL_PRED_ROOT
     else
         tag=$COMPOSITE_TAG; launcher=run_composite_trading_experiment.sh; pred=$COMPOSITE_PRED_ROOT
@@ -234,6 +247,7 @@ training_launcher() {
         CROSS_SCALE=1 RANKNET_ALPHA=1 LISTNET_TAU=1 HINGE_MARGIN=0.1 \
         SCORE_KIND=simple_return CROSS_SCORE_NORMALIZATION=zscore \
         LOSS_INVERSE_NORM=true LOSS_TRACK_COMPONENTS=true \
+        MOMENTUM_MODE="$momentum_mode" MOMENTUM_LOOKBACK="$MOMENTUM_LOOKBACK" MOMENTUM_ETA="$MOMENTUM_ETA" \
         RUN_TAG="$tag" OUT_ROOT="$pred" RESULT_ROOT="$result" LOG_ROOT="$log" \
         PARTITION="$NS_PARTITION" GRES="$NS_GRES" TIME_LIMIT="$NS_TIME_LIMIT" \
         CPUS_PER_TASK="$NS_CPUS_PER_TASK" MEMORY="$NS_MEMORY" NODELIST="$NS_NODELIST" \

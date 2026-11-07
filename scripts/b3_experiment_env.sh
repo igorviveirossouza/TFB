@@ -54,10 +54,14 @@ B3_INLINE_CONFIG=$("$PYTHON_BIN" - \
   loss.loss_listnet_tau "${LISTNET_TAU:-1}" loss.loss_hinge_margin "${HINGE_MARGIN:-0.1}" \
   loss.loss_inverse_norm "${LOSS_INVERSE_NORM:-true}" \
   loss.loss_track_components "${LOSS_TRACK_COMPONENTS:-true}" \
+  loss.momentum_mode "${MOMENTUM_MODE:-off}" \
+  loss.momentum_lookback "${MOMENTUM_LOOKBACK:-}" loss.momentum_eta "${MOMENTUM_ETA:-0}" \
+  momentum_experiment "$EXPERIMENT" \
   strategy.train_ratio_in_tv "${TRAIN_RATIO_IN_TV:-0.875}" \
   strategy.stride "$STRIDE" strategy.num_rollings "$NUM_ROLLINGS" strategy.seed "$SEED" \
   "${mask_arguments[@]}" <<'PY'
 import json
+import math
 import sys
 
 integer_lists = {'train_percentages', 'lookbacks', 'horizons', 'trade_windows'}
@@ -70,14 +74,22 @@ floats = {'training.lr', 'strategy.train_ratio_in_tv', 'loss.loss_cross_scale',
 booleans = {'loss.loss_inverse_norm', 'loss.loss_track_components'}
 config = {}
 mask_items = None
+momentum_experiment = None
 for key, raw in zip(sys.argv[1::2], sys.argv[2::2]):
+    if key == 'momentum_experiment':
+        momentum_experiment = raw
+        continue
     if key == 'loss.loss_cross_mask':
         mask_items = []
         continue
     if key == 'loss.loss_cross_mask_item':
         mask_items.append(raw)
         continue
-    if key in integer_lists:
+    if key == 'loss.momentum_lookback':
+        value = int(raw) if raw else None
+    elif key == 'loss.momentum_eta':
+        value = float(raw)
+    elif key in integer_lists:
         value = [int(x) for x in raw.split()]
     elif key in float_lists:
         value = [float(x) for x in raw.split()]
@@ -108,6 +120,16 @@ if mask_items is not None:
         mask.append(mask_items[2])
         mask.extend(float(item) for item in mask_items[3:])
     config['loss']['loss_cross_mask'] = mask
+loss = config['loss']
+if loss['momentum_mode'] not in {'off', 'residual_output'}:
+    raise ValueError('MOMENTUM_MODE deve ser off ou residual_output')
+if loss['momentum_lookback'] is not None and loss['momentum_lookback'] < 1:
+    raise ValueError('MOMENTUM_LOOKBACK deve ser um inteiro positivo ou ficar vazio')
+if not math.isfinite(loss['momentum_eta']) or loss['momentum_eta'] < 0:
+    raise ValueError('MOMENTUM_ETA deve ser finito e nao negativo')
+if momentum_experiment != 'composto' or loss['momentum_mode'] == 'off':
+    for key in ('momentum_mode', 'momentum_lookback', 'momentum_eta'):
+        loss.pop(key)
 print(json.dumps(config, allow_nan=False))
 PY
 )

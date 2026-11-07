@@ -290,12 +290,15 @@ def metrics(daily, periods):
     }])
 
 
-def backtest(scores, origins, k, market, strategy, slippage_bps=0., cost_bps=0.):
+def backtest(scores, origins, k, market, strategy, slippage_bps=0., cost_bps=0., *,
+             eligibility_signal=None):
     """Todos os blocos de uma estrategia de uma vez; quantidades fixas no bloco.
 
     Entrada em O[t+1], saida em C[t+K]. Dividendo de quem ja estava posicionado
     entra como direito economico sem reinvestimento intrabloco. Ativos recebidos
     sao marcados diariamente e liquidados junto da origem, com custos/slippage.
+    eligibility_signal, quando fornecido, e o retorno log previsto acumulado:
+    determina o filtro de sinal, enquanto scores determina somente a ordenacao.
     """
     for value in (slippage_bps, cost_bps):
         if not np.isfinite(value) or not 0 <= value < 10000:
@@ -310,7 +313,12 @@ def backtest(scores, origins, k, market, strategy, slippage_bps=0., cost_bps=0.)
     if np.any(~finite.any(axis=1)):
         raise ValueError(f"Nenhuma previsao finita na origem {origins[~finite.any(axis=1)][0]}.")
     sign = 1 if strategy.lado == "compra" else -1
-    eligible = finite & ((sign*scores > 0) if strategy.filtrar_sinal else True)
+    if eligibility_signal is not None:
+        eligibility_signal = np.asarray(eligibility_signal, dtype=float)
+        if eligibility_signal.shape != scores.shape or not np.isfinite(eligibility_signal).all():
+            raise ValueError("Sinal de elegibilidade deve conter retornos finitos alinhados aos scores.")
+    filter_scores = scores if eligibility_signal is None else eligibility_signal
+    eligible = finite & ((sign*filter_scores > 0) if strategy.filtrar_sinal else True)
     # Universo alfabetico + sort estavel = empate deterministico sem usar precos futuros.
     ordered = np.argsort(np.where(eligible, -sign*scores, np.inf), axis=1, kind="stable")
     chosen = ordered[:, :min(strategy.n_ativos, scores.shape[1])]
@@ -418,13 +426,15 @@ def backtest(scores, origins, k, market, strategy, slippage_bps=0., cost_bps=0.)
     b, j = np.where(active)
     positions = pd.DataFrame({"origin_step": origins[b], "entry_step": origins[b]+1,
         "target_step": origins[b]+k, "ticker": market.tickers[chosen[b, j]],
-        "rank": j+1, "score_log_acumulado": scores[b, chosen[b, j]], "peso_entrada": weights[b, j],
+        "rank": j+1, "score_log_acumulado": filter_scores[b, chosen[b, j]], "peso_entrada": weights[b, j],
         "quantidade_entrada_por_capital": sign*quantity[b, j],
         "quantidade_saida_por_capital": sign*quantity[b, j]*scale[b, -1, j],
         "preco_entrada": entry_price[b, j], "preco_saida": exit_price[b, j],
         "direitos_por_capital": sign*quantity[b, j]*div[b, -1, j],
         "tipo_posicao": "SINAL", "ticker_origem": market.tickers[chosen[b, j]],
         "id_distribuicao": ""})
+    if eligibility_signal is not None:
+        positions["ranking_score"] = scores[b, chosen[b, j]]
     if received_positions:
         positions = pd.concat([positions, pd.DataFrame(received_positions)], ignore_index=True)
     result = {"carteira_diaria": daily, "carteira_periodos": periods,

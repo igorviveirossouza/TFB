@@ -358,3 +358,173 @@ def export_prediction_windows(
         "last_origin_step": first_origin + count - 1,
         "first_target_step": first_origin + 1,
     }
+
+
+def _momentum_frame_values(frame, assets, first_origin, n_windows, horizon, *, scores=False):
+    """Reject gaps, duplicates and reordering instead of repairing an export."""
+    expected_columns = list(assets) + ["origin_step", "k_eval"] if scores else (
+        ["arquivo"] + list(assets) + ["h", "origin_step", "step"])
+    if frame.columns.tolist() != expected_columns:
+        raise ValueError("Momentum export columns/asset order differ from the contract.")
+    if len(frame) != n_windows * horizon:
+        raise ValueError("Momentum export does not contain every native origin and horizon.")
+    expected_origin = np.repeat(np.arange(first_origin, first_origin + n_windows), horizon)
+    expected_k = np.tile(np.arange(1, horizon + 1), n_windows)
+    expected = {"origin_step": expected_origin, "k_eval" if scores else "h": expected_k}
+    if not scores:
+        expected["step"] = expected_origin + expected_k
+        expected_names = np.repeat([f"janela_{i:06d}.csv" for i in range(n_windows)], horizon)
+        if not np.array_equal(frame["arquivo"].to_numpy(), expected_names):
+            raise ValueError("Momentum raw forecast windows are reordered or incomplete.")
+    for name, values in expected.items():
+        actual = frame[name]
+        if (not pd.api.types.is_integer_dtype(actual.dtype)
+                or pd.api.types.is_bool_dtype(actual.dtype)
+                or not np.array_equal(actual.to_numpy(), values)):
+            raise ValueError(f"Momentum export has invalid {name} ordering/coverage.")
+    if any(not pd.api.types.is_numeric_dtype(frame[name].dtype)
+           or pd.api.types.is_bool_dtype(frame[name].dtype) for name in assets):
+        raise ValueError("Momentum export asset values must be numeric.")
+    values = frame.loc[:, assets].to_numpy(dtype=np.float64)
+    if not np.isfinite(values).all():
+        raise ValueError("Momentum export contains missing/nonfinite values.")
+    return values.reshape(n_windows, horizon, len(assets))
+
+
+def _momentum_panel_hash(panel):
+    """Audit hash of ordered labels, assets and original float64 log returns."""
+    digest = hashlib.sha256()
+    labels = {"assets": panel.columns.tolist(), "index": [str(x) for x in panel.index]}
+    digest.update(json.dumps(labels, ensure_ascii=False, sort_keys=True,
+                             separators=(",", ":")).encode("utf-8"))
+    digest.update(np.asarray(panel.to_numpy(), dtype="<f8", order="C").tobytes(order="C"))
+    return digest.hexdigest()
+
+
+def export_momentum_scores(panel, cut, horizon, output_dir, *, step_offset=1):
+    """Export residual ranking scores separately from daily return forecasts.
+
+    ``panel`` must be the frozen original log-return input. Origin ``cut`` uses
+    positions ``cut-lookback:cut`` only; its K-day target starts at ``cut``.
+    The selected checkpoint state must already be saved by the fitted model.
+    No model checkpoint is opened here, and the raw Parquet is never rewritten.
+    """
+    from ts_benchmark.baselines.momentum_score_io import (
+        accumulated_prediction_scores, compose_momentum_scores, validate_momentum_state,
+    )
+
+    if type(step_offset) is not int or step_offset != 1:
+        raise ValueError("Momentum scores support only raw log-return input (step_offset=1).")
+    if (not isinstance(panel, pd.DataFrame) or not panel.columns.is_unique
+            or not panel.index.is_unique or not panel.index.is_monotonic_increasing
+            or panel.index.hasnans):
+        raise ValueError("Momentum panel must have distinct assets and a unique chronological index.")
+    if (type(cut) is not int or type(horizon) is not int or cut <= 0
+            or horizon <= 0 or cut + horizon > len(panel)):
+        raise ValueError("Invalid momentum test cutoff/horizon.")
+    if any(not pd.api.types.is_numeric_dtype(panel[name].dtype)
+           or pd.api.types.is_bool_dtype(panel[name].dtype) for name in panel.columns):
+        raise ValueError("Momentum panel must contain numeric log returns.")
+    if not np.isfinite(panel.to_numpy(dtype=np.float64)).all():
+        raise ValueError("Momentum panel contains missing/nonfinite observations.")
+    output_dir = Path(output_dir)
+    state_path, raw_path = output_dir / "momentum_state.json", output_dir / "part.parquet"
+    state_hash, raw_hash = sha256_file(state_path), sha256_file(raw_path)
+    state = validate_momentum_state(json.loads(state_path.read_text(encoding="utf-8")),
+                                    panel.columns.tolist())
+    if cut < state["lookback"]:
+        raise ValueError("The first forecast origin has insufficient momentum history.")
+    n_windows = len(panel) - cut - horizon + 1
+    prediction = _momentum_frame_values(pd.read_parquet(raw_path), state["asset_names"],
+                                        cut, n_windows, horizon)
+    panel_values = panel.to_numpy(dtype=np.float64)
+    financial = accumulated_prediction_scores(prediction, state["score_kind"])
+    # Keep long lookbacks from multiplying CPU memory by every test origin.
+    combined = np.empty_like(financial)
+    for start in range(0, n_windows, 128):
+        end = min(start + 128, n_windows)
+        history = np.stack([panel_values[i - state["lookback"]:i]
+                            for i in range(cut + start, cut + end)])
+        combined[start:end] = compose_momentum_scores(history, financial[start:end], state)["final"]
+    score_frame = pd.DataFrame(combined.reshape(n_windows * horizon, -1),
+                               columns=state["asset_names"])
+    score_frame["origin_step"] = np.repeat(np.arange(cut, cut + n_windows), horizon)
+    score_frame["k_eval"] = np.tile(np.arange(1, horizon + 1), n_windows)
+    scores_path = output_dir / "ranking_scores.parquet"
+    _atomic_write(scores_path, lambda path: score_frame.to_parquet(
+        path, index=False, engine="pyarrow", compression="snappy"))
+    if sha256_file(raw_path) != raw_hash or sha256_file(state_path) != state_hash:
+        raise ValueError("Prediction/state changed while exporting momentum scores.")
+    metadata = {
+        "schema_version": 1, "version": state["version"], "mode": state["mode"],
+        "state": state,
+        "files": {
+            "predictions": {"name": raw_path.name, "sha256": raw_hash},
+            "state": {"name": state_path.name, "sha256": state_hash},
+            "scores": {"name": scores_path.name, "sha256": sha256_file(scores_path)},
+        },
+        "n_windows": n_windows, "n_rows": len(score_frame), "n_assets": len(panel.columns),
+        "horizon": horizon, "k_values": list(range(1, horizon + 1)),
+        "first_origin_step": cut, "last_origin_step": cut + n_windows - 1,
+        "step_offset": 1, "input_panel_sha256": _momentum_panel_hash(panel),
+    }
+    _atomic_write(output_dir / "momentum_scores.json", lambda path: Path(path).write_text(
+        json.dumps(metadata, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8"))
+    return validate_momentum_export(output_dir)
+
+
+def validate_momentum_export(output_dir):
+    """Verify the completed score contract and all three bound file hashes.
+
+    This CPU-only validation does not require the training dataset or Torch.
+    The input-panel hash is an audit binding; checking it against a different
+    input requires the caller to supply that dataset's frozen provenance.
+    """
+    from ts_benchmark.baselines.momentum_score_io import validate_momentum_state
+
+    output_dir = Path(output_dir)
+    try:
+        metadata = json.loads((output_dir / "momentum_scores.json").read_text(encoding="utf-8"))
+        if (not isinstance(metadata, dict) or type(metadata.get("schema_version")) is not int
+                or metadata["schema_version"] != 1):
+            raise ValueError("Unsupported momentum export schema.")
+        state = validate_momentum_state(metadata["state"])
+        if metadata.get("version") != state["version"] or metadata.get("mode") != state["mode"]:
+            raise ValueError("Momentum export state/version mismatch.")
+        for key in ("n_windows", "n_rows", "n_assets", "horizon", "first_origin_step",
+                    "last_origin_step", "step_offset"):
+            if type(metadata.get(key)) is not int or metadata[key] < 1:
+                raise ValueError(f"Momentum export has invalid {key}.")
+        n_windows, horizon = metadata["n_windows"], metadata["horizon"]
+        first = metadata["first_origin_step"]
+        if (metadata["step_offset"] != 1 or metadata["n_rows"] != n_windows * horizon
+                or metadata["n_assets"] != len(state["asset_names"])
+                or metadata["last_origin_step"] != first + n_windows - 1
+                or first < state["lookback"]
+                or metadata.get("k_values") != list(range(1, horizon + 1))
+                or any(type(k) is not int for k in metadata["k_values"])):
+            raise ValueError("Momentum export has inconsistent origin/horizon dimensions.")
+        panel_hash = metadata.get("input_panel_sha256")
+        if (not isinstance(panel_hash, str) or len(panel_hash) != 64
+                or any(c not in "0123456789abcdef" for c in panel_hash)):
+            raise ValueError("Momentum export has invalid input-panel hash.")
+        names = {"predictions": "part.parquet", "state": "momentum_state.json",
+                 "scores": "ranking_scores.parquet"}
+        if not isinstance(metadata.get("files"), dict) or set(metadata["files"]) != set(names):
+            raise ValueError("Momentum export has invalid file bindings.")
+        for key, name in names.items():
+            entry = metadata["files"][key]
+            if (not isinstance(entry, dict) or entry.get("name") != name
+                    or entry.get("sha256") != sha256_file(output_dir / name)):
+                raise ValueError(f"Momentum {key} file/hash mismatch.")
+        current_state = validate_momentum_state(json.loads(
+            (output_dir / names["state"]).read_text(encoding="utf-8")))
+        if current_state != state:
+            raise ValueError("Momentum state differs from the exported score contract.")
+        _momentum_frame_values(pd.read_parquet(output_dir / names["predictions"]),
+                               state["asset_names"], first, n_windows, horizon)
+        _momentum_frame_values(pd.read_parquet(output_dir / names["scores"]),
+                               state["asset_names"], first, n_windows, horizon, scores=True)
+    except (KeyError, TypeError, OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Incomplete or invalid momentum export in {output_dir}: {exc}") from exc
+    return metadata

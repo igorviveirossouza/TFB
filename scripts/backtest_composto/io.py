@@ -15,16 +15,33 @@ from numbers import Real
 from pathlib import Path
 import re
 
+import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from backtest_cpu.io import load_predictions
+from backtest_cpu.io import digest, load_predictions
 
 
 _HASH = re.compile(r"[0-9a-fA-F]{64}")
 _NAME = re.compile(r"[A-Za-z0-9_]+")
 _PROXIMITY = {"hinge_proximity", "ranknet_proximity", "pairwise_mse_proximity"}
 _LOSSES = {"ranknet", "hinge", "listnet", "pairwise_mse"} | _PROXIMITY
+_MOMENTUM_KEYS = ("momentum_mode", "momentum_lookback", "momentum_eta")
+
+
+def _momentum_options(cfg):
+    loss = cfg["loss"]
+    if {key for key in loss if key.startswith("momentum_")} - set(_MOMENTUM_KEYS):
+        raise ValueError("Parametro momentum desconhecido no desenho.")
+    mode, lb, eta = (loss.get("momentum_mode", "off"), loss.get("momentum_lookback"),
+                     loss.get("momentum_eta", 0.0))
+    if mode not in {"off", "residual_output"}:
+        raise ValueError("momentum_mode invalido.")
+    if lb is not None and (type(lb) is not int or lb < 1):
+        raise ValueError("momentum_lookback deve ser inteiro positivo.")
+    if type(eta) not in (int, float) or not math.isfinite(eta) or eta < 0:
+        raise ValueError("momentum_eta deve ser finito e nao negativo.")
+    return mode, lb, float(eta)
 
 
 # Mirror kept self-contained because CPU snapshots do not import training code.
@@ -180,6 +197,7 @@ def _validate_config(plan, pct, market, source_sha256, path):
             raise ValueError(f"Configuracao {required} ausente.")
     if set(cfg["cross_losses"]) & _PROXIMITY:
         _cross_mask(cfg)
+    _momentum_options(cfg)
     cut = market.n*pct//100
     hmax = max(cfg["horizons"])
     if cut < 1 or cut+hmax > market.n:
@@ -190,6 +208,7 @@ def _validate_config(plan, pct, market, source_sha256, path):
 def _expected_tasks(cfg, pct):
     """Mesma ordem/identidade de b3_experiment.make_tasks; nenhuma dependencia GPU."""
     definitions = []
+    momentum_mode, momentum_lb, momentum_eta = _momentum_options(cfg)
     for loss in cfg["cross_losses"]:
         mask = _cross_mask(cfg) if loss in _PROXIMITY else None
         deltas = [0] if loss == "listnet" or mask is not None else cfg["deltas"]
@@ -202,6 +221,10 @@ def _expected_tasks(cfg, pct):
                                         "cross_lambda": float(lam), "cross_delta": float(delta),
                                         "lambda": format(lam, "g"), "delta": format(delta, "g"),
                                         "k_dir": k_dir, "delta_effective": loss != "listnet" and mask is None})
+                    if momentum_mode != "off":
+                        definitions[-1].update(momentum_mode=momentum_mode,
+                                               momentum_lookback=momentum_lb or lookback,
+                                               momentum_eta=momentum_eta)
                     if mask is not None:
                         definitions[-1].update(mask_type=mask[0], mask_a=mask[1])
                         if len(mask) >= 3 and mask[2] != "natural":
@@ -221,6 +244,9 @@ def _expected_tasks(cfg, pct):
                 path = path/f"mask_mode={task['mask_mode']}"
             if task.get("mask_shape"):
                 path = path/("shape=" + "_".join(repr(float(x)) for x in task["mask_shape"]))
+        if task.get("momentum_mode") == "residual_output":
+            path = (path/"momentum=residual_output"/f"momentum_lb={task['momentum_lookback']}"
+                    /f"momentum_eta={float(task['momentum_eta'])!r}")
         task["relpath"] = str(path/f"modelo={task['modelo']}"/f"lookback={task['lookback']}"
                               /f"pred_len={task['pred_len']}"/f"k_dir={task['k_dir']}")
     if len({t["relpath"] for t in definitions}) != len(definitions):
@@ -259,6 +285,13 @@ def _validate_row(row, task, cfg, meta, plan, market, cut):
     for key in ("cross_lambda", "cross_delta"):
         if _number(row[key], key) != task[key]:
             raise ValueError(f"Lambda/delta divergente: {identity}")
+    if task.get("momentum_mode") == "residual_output":
+        if (row.get("momentum_mode") != task["momentum_mode"]
+                or _int(row.get("momentum_lookback"), "momentum_lookback") != task["momentum_lookback"]
+                or _number(row.get("momentum_eta"), "momentum_eta") != task["momentum_eta"]):
+            raise ValueError(f"Momentum divergente na auditoria: {identity}")
+    elif any(row.get(key, "") for key in _MOMENTUM_KEYS):
+        raise ValueError(f"Momentum ativo fora do desenho: {identity}")
     if row["delta_effective"].lower() != str(task["delta_effective"]).lower():
         raise ValueError(f"delta_effective inconsistente: {identity}")
     if task["loss"] in _PROXIMITY:
@@ -285,6 +318,10 @@ def _validate_row(row, task, cfg, meta, plan, market, cut):
     hyper = dict(cfg["model_defaults"][task["modelo"]], **cfg["training"])
     hyper.update(seq_len=task["lookback"], pred_len=horizon, horizon=horizon)
     hyper.update(cfg["loss"])
+    for key in _MOMENTUM_KEYS:
+        hyper.pop(key, None)
+    if task.get("momentum_mode") == "residual_output":
+        hyper.update({key: task[key] for key in _MOMENTUM_KEYS})
     hyper.pop("loss_cross_mask", None)
     if task["loss"] in _PROXIMITY:
         hyper["loss_cross_mask"] = [task["mask_type"], task["mask_a"]]
@@ -399,6 +436,8 @@ def discover_composite_tasks(root, percentages, market, source_sha256):
                         dataset_sha256=meta["dataset_sha256"], seed=cfg["strategy"]["seed"],
                         temporal_loss=cfg["loss"]["loss_temporal"])
             _validate_footer(path, task, market)
+            if task.get("momentum_mode") == "residual_output":
+                task.update(momentum_snapshot(task, market))
             tasks.append(task)
             info["available"] += 1
         info.update(status="READY", registered=len(rows), registered_missing=len(info["missing_paths"]),
@@ -419,6 +458,95 @@ def discover_composite_tasks(root, percentages, market, source_sha256):
     discovery["expected_complete"] = discovery["expected_count_known"] and discovery["awaiting"] == 0
     tasks.sort(key=lambda t: (t["treino"], t["training_array_index"]))
     return tasks, discovery
+
+
+def momentum_snapshot(task, market, verify_files=False):
+    """Validate/bind optional sidecars without importing the training package.
+
+    Planning reads JSON and Parquet footers only. Workers verify every file hash
+    before using scores or reusing an existing result.
+    """
+    if task.get("momentum_mode", "off") == "off":
+        return {}
+    if task.get("momentum_mode") != "residual_output":
+        raise ValueError("Modo momentum desconhecido na tarefa.")
+    folder = Path(task["path"]).parent
+    try:
+        manifest, manifest_hash = _json_snapshot(folder/"momentum_scores.json")
+        state, state_hash = _json_snapshot(folder/"momentum_state.json")
+    except (OSError, ValueError) as error:
+        raise ValueError(f"Sidecars momentum ausentes/invalidos em {folder}: {error}") from error
+    h, cut = task["pred_len"], task["corte"]
+    n_windows = market.n-cut-h+1
+    fields = {"schema_version": 1, "version": "momentum_residual_v1", "mode": "residual_output",
+              "n_windows": n_windows, "n_rows": n_windows*h, "n_assets": len(market.tickers),
+              "horizon": h, "k_values": list(range(1, h+1)), "first_origin_step": cut,
+              "last_origin_step": market.n-h, "step_offset": 1, "state": state}
+    if any(manifest.get(key) != value for key, value in fields.items()):
+        raise ValueError("Manifest momentum incompativel com janelas/estado da tarefa.")
+    if not isinstance(manifest.get("input_panel_sha256"), str) or not _HASH.fullmatch(manifest["input_panel_sha256"]):
+        raise ValueError("Hash do painel momentum ausente/invalido.")
+    if (state.get("version") != "momentum_residual_v1" or state.get("mode") != "residual_output"
+            or state.get("normalization") != "cross_sectional_zscore_ddof0"
+            or type(state.get("lookback")) is not int or state["lookback"] != task["momentum_lookback"]
+            or not 1 <= state["lookback"] <= cut
+            or _number(state.get("eta"), "momentum eta") != task["momentum_eta"]
+            or state.get("score_kind") not in {"log_return", "simple_return"}
+            or _number(state.get("eps"), "momentum eps") <= 0
+            or not isinstance(state.get("asset_names"), list)
+            or sorted(state["asset_names"]) != market.tickers.tolist()):
+        raise ValueError("Estado momentum incompativel com desenho/universo.")
+    _number(state.get("gain"), "momentum gain")
+    files = manifest.get("files", {})
+    if set(files) != {"predictions", "state", "scores"}:
+        raise ValueError("Manifest momentum exige hashes de previsoes, estado e scores.")
+    expected_names = {"predictions": "part.parquet", "state": "momentum_state.json",
+                      "scores": "ranking_scores.parquet"}
+    frozen = {"manifest": {"path": str(folder/"momentum_scores.json"), "sha256": manifest_hash}}
+    for name, filename in expected_names.items():
+        item = files[name]
+        if (not isinstance(item, dict) or item.get("name") != filename
+                or not isinstance(item.get("sha256"), str) or not _HASH.fullmatch(item["sha256"])):
+            raise ValueError(f"Arquivo/hash momentum invalido: {name}.")
+        path = folder/filename
+        if not path.is_file():
+            raise ValueError(f"Arquivo momentum ausente: {path}")
+        sha = item["sha256"].lower()
+        if name == "predictions" and sha != task["sha256"]:
+            raise ValueError("Manifest momentum refere-se a outra previsao.")
+        if name == "state" and sha != state_hash:
+            raise ValueError("Estado momentum alterado.")
+        if verify_files and digest(path) != sha:
+            raise ValueError(f"Arquivo momentum alterado: {path}")
+        frozen[name] = {"path": str(path), "sha256": sha}
+    parquet = pq.ParquetFile(folder/"ranking_scores.parquet")
+    schema = parquet.schema_arrow
+    if (schema.names != state["asset_names"]+["origin_step", "k_eval"]
+            or parquet.metadata.num_rows != n_windows*h
+            or any(not pa.types.is_integer(schema.field(x).type) for x in ("origin_step", "k_eval"))
+            or any(not (pa.types.is_integer(schema.field(x).type) or pa.types.is_floating(schema.field(x).type))
+                   for x in state["asset_names"])):
+        raise ValueError("Schema/dimensoes de ranking_scores momentum invalidos.")
+    result = {"momentum_files": frozen, "momentum_state": state}
+    if "momentum_files" in task and any(task.get(key) != value for key, value in result.items()):
+        raise ValueError("Sidecars momentum mudaram apos o planejamento.")
+    return result
+
+
+def load_composite_ranking_scores(task, market, origins, verify_hash=True):
+    """Final scores [origins, K, assets], or None for the exact legacy path."""
+    if task.get("momentum_mode", "off") == "off":
+        return None
+    momentum_snapshot(task, market, verify_files=verify_hash)
+    table = pq.ParquetFile(Path(task["path"]).parent/"ranking_scores.parquet").read().to_pandas()
+    h = task["pred_len"]
+    if (not np.array_equal(table["origin_step"], np.repeat(origins, h))
+            or not np.array_equal(table["k_eval"], np.tile(np.arange(1, h+1), len(origins)))):
+        raise ValueError("Origens/K dos scores momentum desalinhados das previsoes.")
+    values = table.loc[:, market.tickers.tolist()].to_numpy(dtype=float)
+    if not np.isfinite(values).all():
+        raise ValueError("Scores momentum nao finitos.")
+    return values.reshape(len(origins), h, len(market.tickers))
 
 
 def load_composite_predictions(task, market, verify_hash=True):

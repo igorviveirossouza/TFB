@@ -34,6 +34,11 @@ from ts_benchmark.baselines.proximity_losses import (
     validate_cross_mask,
     kernel_parameters,
 )
+from ts_benchmark.baselines.momentum_score import (
+    LOG_RETURN_KINDS,
+    canonical_score_kind,
+    validate_momentum_config,
+)
 
 
 def _scaled_log_weights(log_weights, dtype):
@@ -171,6 +176,7 @@ def proximity_weights(gap, mask, dtype):
 
 
 def build_loss(config, normalizer_mean=None, normalizer_scale=None):
+    momentum = validate_momentum_config(config)
     loss_name = str(_cfg(config, "loss", "mse")).lower()
     if loss_name not in COMPOSITE_LOSSES:
         return build_loss_v1(
@@ -217,6 +223,7 @@ def build_loss(config, normalizer_mean=None, normalizer_scale=None):
         normalizer_mean=normalizer_mean,
         normalizer_scale=normalizer_scale,
         track_components=_as_bool(_cfg(config, "loss_track_components", False)),
+        momentum_mode=momentum["mode"],
     )
 
 
@@ -255,7 +262,17 @@ class CompositeTradingLossV3(CompositeTradingLossV2):
         normalizer_scale=None,
         track_components: bool = False,
         eps: float = 1e-8,
+        momentum_mode: str = "off",
     ) -> None:
+        momentum_mode = str(momentum_mode).lower()
+        if momentum_mode not in {"off", "residual_output"}:
+            raise ValueError("momentum_mode deve ser off ou residual_output.")
+        if momentum_mode == "residual_output":
+            if not 0 < float(cross_lambda) <= 1:
+                raise ValueError("Momentum exige 0 < loss_cross_lambda <= 1.")
+            if str(data_kind).lower() not in LOG_RETURN_KINDS:
+                raise ValueError("Momentum exige entrada em log-retornos.")
+            canonical_score_kind(score_kind)
         normalization = cross_score_normalization.lower()
         if normalization not in {"none", "zscore"}:
             raise ValueError(
@@ -263,6 +280,10 @@ class CompositeTradingLossV3(CompositeTradingLossV2):
             )
 
         cross_loss_name = cross_loss.lower()
+        if momentum_mode == "residual_output" and normalization == "none" and cross_loss_name in {
+            "mse", "pairwise_mse", "pairwise_mse_proximity"
+        }:
+            raise ValueError("Momentum exige zscore para losses de magnitude: mse e pairwise_mse (inclusive proximity).")
         proximity_mask = (
             validate_cross_mask(cross_mask)
             if cross_loss_name in PROXIMITY_LOSSES
@@ -296,6 +317,7 @@ class CompositeTradingLossV3(CompositeTradingLossV2):
         # Original objectives deliberately ignore this new hyperparameter.
         self.cross_mask = proximity_mask
         self.cross_score_normalization = normalization
+        self.momentum_mode = momentum_mode
 
     def _normalize_cross_scores(
         self,
@@ -422,10 +444,18 @@ class CompositeTradingLossV3(CompositeTradingLossV2):
         pred: torch.Tensor,
         target: torch.Tensor,
         base_value: Optional[torch.Tensor] = None,
+        *,
+        momentum_history: Optional[torch.Tensor] = None,
+        momentum_module=None,
     ) -> torch.Tensor:
         # Kept explicit for auditability: both losses feed the same backward pass.
         if pred.shape != target.shape:
             raise ValueError(f"Shapes diferentes: pred={pred.shape}; target={target.shape}.")
+        if self.momentum_mode == "off":
+            if momentum_history is not None or momentum_module is not None:
+                raise ValueError("Contexto momentum fornecido com momentum_mode=off.")
+        elif momentum_history is None or momentum_module is None:
+            raise ValueError("Momentum habilitado exige momentum_history e momentum_module.")
 
         temporal = self._temporal_loss(pred, target)
         pred_scores, target_scores = self.aggregator(
@@ -433,14 +463,32 @@ class CompositeTradingLossV3(CompositeTradingLossV2):
             target,
             base_value=base_value,
         )
+        momentum_result = None
+        if self.momentum_mode == "residual_output":
+            # The same training-only scaler restores both historical returns
+            # and forecast/target block scores; future targets never enter m.
+            history_raw = self.aggregator._maybe_inverse_norm(momentum_history)
+            momentum_result = momentum_module(history_raw, pred_scores)
+            pred_scores = momentum_result["final"]
         cross = self._cross_loss(pred_scores, target_scores)
         total = (
             (1.0 - self.cross_lambda) * temporal
             + self.cross_lambda * self.cross_scale * cross
         )
+        if momentum_result is not None:
+            # Penalize residual amplitude outside lambda. Normalizing this
+            # correction again would erase the amplitude being regularized.
+            total = total + momentum_result["penalty"]
         self._remember(temporal, cross, total, pred_scores)
         if self.track_components:
             self.last_components.update(H=int(pred.shape[1]),
                                         cross_steps=int(pred_scores.shape[1] * self.trade_window),
                                         cross_tail_steps=int(pred.shape[1] % self.trade_window))
+            if momentum_result is not None:
+                self.last_components.update(
+                    momentum_penalty=float(momentum_result["penalty"].detach()),
+                    momentum_correction_energy=float(momentum_result["correction"].detach().square().mean()),
+                    momentum_gain=float(momentum_module.gain.detach()),
+                    momentum_lookback=int(momentum_module.lookback),
+                )
         return total
