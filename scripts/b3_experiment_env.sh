@@ -36,6 +36,13 @@ if [[ "$EXPERIMENT" == "composto" ]] && declare -p CROSS_MASK &>/dev/null; then
   done
 fi
 
+# Optional knobs stay absent from legacy configurations and cache identities.
+extra_loss_arguments=()
+[[ -z "${LISTMLE_TAU:-}" ]] || extra_loss_arguments+=(loss.loss_listmle_tau "$LISTMLE_TAU")
+[[ -z "${APPROXNDCG_TAU:-}" ]] || extra_loss_arguments+=(loss.loss_approxndcg_tau "$APPROXNDCG_TAU")
+[[ -z "${SPEARMAN_TAU:-}" ]] || extra_loss_arguments+=(loss.loss_spearman_tau "$SPEARMAN_TAU")
+[[ -z "${HUBER_DELTA:-}" ]] || extra_loss_arguments+=(loss.loss_huber_delta "$HUBER_DELTA")
+
 # Cada valor chega ao Python como argumento separado, sem interpolação em código.
 export B3_INLINE_CONFIG
 B3_INLINE_CONFIG=$("$PYTHON_BIN" - \
@@ -62,7 +69,7 @@ B3_INLINE_CONFIG=$("$PYTHON_BIN" - \
   momentum_experiment "$EXPERIMENT" \
   strategy.train_ratio_in_tv "${TRAIN_RATIO_IN_TV:-0.875}" \
   strategy.stride "$STRIDE" strategy.num_rollings "$NUM_ROLLINGS" strategy.seed "$SEED" \
-  "${mask_arguments[@]}" <<'PY'
+  "${mask_arguments[@]}" "${extra_loss_arguments[@]}" <<'PY'
 import json
 import math
 import sys
@@ -73,7 +80,9 @@ string_lists = {'models', 'cross_losses'}
 integers = {'var_lags', 'training.num_epochs', 'training.patience',
             'strategy.stride', 'strategy.num_rollings', 'strategy.seed'}
 floats = {'training.lr', 'strategy.train_ratio_in_tv', 'loss.loss_cross_scale',
-          'loss.loss_ranknet_alpha', 'loss.loss_listnet_tau', 'loss.loss_hinge_margin'}
+          'loss.loss_ranknet_alpha', 'loss.loss_listnet_tau', 'loss.loss_hinge_margin',
+          'loss.loss_spearman_tau', 'loss.loss_huber_delta',
+          'loss.loss_listmle_tau', 'loss.loss_approxndcg_tau'}
 booleans = {'loss.loss_inverse_norm', 'loss.loss_track_components'}
 config = {}
 mask_items = None

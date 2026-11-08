@@ -39,6 +39,15 @@ from ts_benchmark.baselines.momentum_score import (
     canonical_score_kind,
     validate_momentum_config,
 )
+from ts_benchmark.baselines.global_ranking_losses import (
+    spearman_loss,
+    validate_spearman_tau,
+)
+
+from ts_benchmark.baselines.listwise_ranking_losses import (
+    validate_temperature, financial_pair_weights, listnet_proximity_loss,
+    listmle_loss, approxndcg_loss,
+)
 
 
 def _scaled_log_weights(log_weights, dtype):
@@ -215,6 +224,9 @@ def build_loss(config, normalizer_mean=None, normalizer_scale=None):
         huber_delta=float(_cfg(config, "loss_huber_delta", 0.5)),
         ranknet_alpha=float(_cfg(config, "loss_ranknet_alpha", 1.0)),
         listnet_tau=float(_cfg(config, "loss_listnet_tau", 1.0)),
+        spearman_tau=float(_cfg(config, "loss_spearman_tau", 1.0)),
+        listmle_tau=float(_cfg(config, "loss_listmle_tau", 1.0)),
+        approxndcg_tau=float(_cfg(config, "loss_approxndcg_tau", 1.0)),
         hinge_margin=float(_cfg(config, "loss_hinge_margin", 0.01)),
         cross_delta=float(_cfg(config, "loss_cross_delta", 0.0)),
         cross_mask=_cfg(config, "loss_cross_mask", None),
@@ -253,6 +265,9 @@ class CompositeTradingLossV3(CompositeTradingLossV2):
         huber_delta: float = 0.5,
         ranknet_alpha: float = 1.0,
         listnet_tau: float = 1.0,
+        spearman_tau: float = 1.0,
+        listmle_tau: float = 1.0,
+        approxndcg_tau: float = 1.0,
         hinge_margin: float = 0.01,
         cross_delta: float = 0.0,
         cross_mask=None,
@@ -280,6 +295,13 @@ class CompositeTradingLossV3(CompositeTradingLossV2):
             )
 
         cross_loss_name = cross_loss.lower()
+        # V2 supplies path aggregation and common parameter validation. New
+        # full-list objectives are implemented only in V3, without changing
+        # the accepted objectives or numerical behavior of the legacy class.
+        base_cross_loss = PROXIMITY_LOSSES.get(cross_loss_name, cross_loss_name)
+        spearman_tau = validate_spearman_tau(spearman_tau)
+        listmle_tau = validate_temperature(listmle_tau, "loss_listmle_tau")
+        approxndcg_tau = validate_temperature(approxndcg_tau, "loss_approxndcg_tau")
         if momentum_mode == "residual_output" and normalization == "none" and cross_loss_name in {
             "mse", "pairwise_mse", "pairwise_mse_proximity"
         }:
@@ -298,7 +320,7 @@ class CompositeTradingLossV3(CompositeTradingLossV2):
             data_kind=data_kind,
             score_kind=score_kind,
             temporal_loss=temporal_loss,
-            cross_loss=PROXIMITY_LOSSES.get(cross_loss_name, cross_loss_name),
+            cross_loss="ranknet" if base_cross_loss in {"spearman", "listmle", "approxndcg"} else base_cross_loss,
             cross_lambda=cross_lambda,
             cross_scale=cross_scale,
             huber_delta=huber_delta,
@@ -318,6 +340,9 @@ class CompositeTradingLossV3(CompositeTradingLossV2):
         self.cross_mask = proximity_mask
         self.cross_score_normalization = normalization
         self.momentum_mode = momentum_mode
+        self.spearman_tau = spearman_tau
+        self.listmle_tau = listmle_tau
+        self.approxndcg_tau = approxndcg_tau
 
     def _normalize_cross_scores(
         self,
@@ -346,6 +371,16 @@ class CompositeTradingLossV3(CompositeTradingLossV2):
 
         if self.cross_loss_name in PROXIMITY_LOSSES:
             return self._proximity_cross_loss(pred_raw, target_raw)
+
+        if self.cross_loss_name == "spearman":
+            pred, _ = self._normalize_cross_scores(pred_raw, target_raw)
+            return spearman_loss(pred, target_raw, tau=self.spearman_tau, eps=self.eps)
+
+        if self.cross_loss_name in {"listmle", "approxndcg"}:
+            pred, _ = self._normalize_cross_scores(pred_raw, target_raw)
+            function = listmle_loss if self.cross_loss_name == "listmle" else approxndcg_loss
+            tau = self.listmle_tau if self.cross_loss_name == "listmle" else self.approxndcg_tau
+            return function(pred, target_raw, tau=tau)
 
         if self.cross_loss_name == "mse":
             pred, target = self._normalize_cross_scores(pred_raw, target_raw)
@@ -385,7 +420,11 @@ class CompositeTradingLossV3(CompositeTradingLossV2):
         pred_raw: torch.Tensor,
         target_raw: torch.Tensor,
     ) -> torch.Tensor:
-        """Natural/complementary weighted pairs from realized financial gaps.
+        """Natural/complementary weights from realized financial gaps.
+
+        ListNet/ListMLE/ApproxNDCG use absolute kernel values in their listwise
+        objectives. The normalized weighted-pair contract below applies to
+        the earlier pair losses and Spearman.
 
         Normalize weights independently within each [N]-asset cross-section,
         then average its loss over batch elements and trading blocks. A mask
@@ -403,6 +442,19 @@ class CompositeTradingLossV3(CompositeTradingLossV2):
         if n_assets < 2:
             return pred_raw.sum() * 0.0
 
+        if self.cross_loss_name in {"listnet_proximity", "listmle_proximity", "approxndcg_proximity"}:
+            # These listwise adaptations require absolute kernel weights.
+            # Pairwise rescaling below is retained unchanged for legacy losses.
+            weight_dtype = (torch.float32 if pred_raw.dtype in (torch.float16, torch.bfloat16)
+                            else pred_raw.dtype)
+            weights = financial_pair_weights(target_raw, self.cross_mask, weight_dtype)
+            pred, target = self._normalize_cross_scores(pred_raw, target_raw.detach())
+            if self.cross_loss_name == "listnet_proximity":
+                return listnet_proximity_loss(pred, target, pair_weights=weights, tau=self.listnet_tau)
+            if self.cross_loss_name == "listmle_proximity":
+                return listmle_loss(pred, target_raw, pair_weights=weights, tau=self.listmle_tau)
+            return approxndcg_loss(pred, target_raw, pair_weights=weights, tau=self.approxndcg_tau)
+
         rows, cols = torch.triu_indices(
             n_assets, n_assets, offset=1, device=pred_raw.device
         )
@@ -414,6 +466,9 @@ class CompositeTradingLossV3(CompositeTradingLossV2):
         weights = proximity_weights(gap, self.cross_mask, pred_raw.dtype)
 
         pred, target = self._normalize_cross_scores(pred_raw, target_raw)
+        if self.cross_loss_name == "spearman_proximity":
+            return spearman_loss(pred, target_raw, tau=self.spearman_tau,
+                                 pair_weights=weights, eps=self.eps)
         pred_diff = pred[:, rows] - pred[:, cols]
         target_diff = target[:, rows] - target[:, cols]
         sign = realized_diff.sign().to(pred_diff.dtype)
@@ -471,10 +526,15 @@ class CompositeTradingLossV3(CompositeTradingLossV2):
             momentum_result = momentum_module(history_raw, pred_scores)
             pred_scores = momentum_result["final"]
         cross = self._cross_loss(pred_scores, target_scores)
-        total = (
-            (1.0 - self.cross_lambda) * temporal
-            + self.cross_lambda * self.cross_scale * cross
-        )
+        # An inactive objective must not contaminate a pure endpoint through
+        # 0 * inf/nan (and lambda=1 does not depend on the temporal criterion).
+        if self.cross_lambda == 0.0:
+            total = temporal
+        elif self.cross_lambda == 1.0:
+            total = self.cross_scale * cross
+        else:
+            total = ((1.0 - self.cross_lambda) * temporal
+                     + self.cross_lambda * self.cross_scale * cross)
         if momentum_result is not None:
             # Penalize residual amplitude outside lambda. Normalizing this
             # correction again would erase the amplitude being regularized.

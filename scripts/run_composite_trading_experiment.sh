@@ -123,9 +123,9 @@ DATASET_PATH="${DATASET_PATH:-$TFB_ROOT/dataset/forecasting/b3_daily_tfb_new.csv
 export SOURCE_DATA_KIND="${SOURCE_DATA_KIND:-log_return}"  # log_return: base nova já corrigida; price: calcular diff(log(P))
 
 
-OUT_ROOT="/snfs2/igor.viveiros/previsoes/${RUN_TAG}"
-RESULT_ROOT="/snfs2/igor.viveiros/result/${RUN_TAG}"
-LOG_ROOT="$TFB_ROOT/logs/${RUN_TAG}"
+OUT_ROOT="${OUT_ROOT:-/snfs2/igor.viveiros/previsoes/${RUN_TAG}}"
+RESULT_ROOT="${RESULT_ROOT:-/snfs2/igor.viveiros/result/${RUN_TAG}}"
+LOG_ROOT="${LOG_ROOT:-$TFB_ROOT/logs/${RUN_TAG}}"
 
 
 PARTITION="${PARTITION:-gorgonas}"    # Partição do Slurm

@@ -9,6 +9,10 @@ PROXIMITY_LOSSES = {
     "hinge_proximity": "hinge",
     "ranknet_proximity": "ranknet",
     "pairwise_mse_proximity": "pairwise_mse",
+    "spearman_proximity": "spearman",
+    "listnet_proximity": "listnet",
+    "listmle_proximity": "listmle",
+    "approxndcg_proximity": "approxndcg",
 }
 
 

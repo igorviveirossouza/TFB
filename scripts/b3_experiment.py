@@ -143,11 +143,16 @@ def load_config():
         raise ValueError('train_percentages: inteiros entre 1 e 99')
     if set(config['models']) - set(config['model_defaults']):
         raise ValueError('Modelo sem defaults de arquitetura')
-    if set(config['cross_losses']) - ({'mse', 'bpr', 'ranknet', 'hinge', 'listnet', 'pairwise_mse'} | set(PROXIMITY_LOSSES)):
+    if set(config['cross_losses']) - ({'mse', 'bpr', 'ranknet', 'hinge', 'listnet', 'pairwise_mse', 'spearman', 'listmle', 'approxndcg'} | set(PROXIMITY_LOSSES)):
         raise ValueError('Loss cross não suportada nesta grade')
     if any(loss in PROXIMITY_LOSSES for loss in config['cross_losses']):
         config['loss']['loss_cross_mask'] = list(validate_cross_mask(
             config['loss'].get('loss_cross_mask')))
+    for key in ('loss_huber_delta', 'loss_spearman_tau', 'loss_listnet_tau',
+                'loss_listmle_tau', 'loss_approxndcg_tau'):
+        value = config['loss'].get(key, 0.5 if key == 'loss_huber_delta' else 1.0)
+        if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
+            raise ValueError(f'{key} deve ser positivo e finito')
     if any(not 0 < x <= 1 for x in config['lambdas']):
         raise ValueError('Lambda composto deve estar em (0,1]')
     if any(not math.isfinite(x) or x < 0 for x in config['deltas']):
@@ -187,7 +192,7 @@ def load_config():
 def cross_deltas(config, loss):
     # ListNet and proximity losses have no pairwise dead zone. Keep one inactive delta
     # for paths/audits, independent of the editable DELTAS vector.
-    return [0] if loss in {'mse', 'listnet'} or loss in PROXIMITY_LOSSES else config['deltas']
+    return [0] if loss in {'mse', 'listnet', 'listmle', 'approxndcg', 'spearman'} or loss in PROXIMITY_LOSSES else config['deltas']
 
 
 def make_tasks(config, mode):
@@ -282,6 +287,10 @@ def model_spec(config, task):
     # Ordinary MSE is exactly the composite's temporal term. Do not evaluate
     # unused cross scores at lambda=0 (0 * NaN would still contaminate the loss).
     hyper.update(config['loss'])
+    # Temporal Huber uses the native criterion's key; its scale must match the
+    # composite temporal term exactly in the paired control.
+    if task['experimento'] == 'temporal' and config['loss']['loss_temporal'] == 'huber':
+        hyper['huber_delta'] = config['loss'].get('loss_huber_delta', 0.5)
     # Controls always stay purely temporal, even in a momentum-enabled design.
     for key in MOMENTUM_KEYS + MOMENTUM_INPUT_KEYS:
         hyper.pop(key, None)
@@ -366,7 +375,7 @@ def audit_row(config, task, metadata, out_root, signature):
                 source_sha256=metadata['source_sha256'], dataset_sha256=metadata['dataset_sha256'],
                 n_assets=metadata['n_assets'], seed=config['strategy']['seed'],
                 temporal_loss=config['loss']['loss_temporal'],
-                delta_effective=task['experimento'] == 'composto' and task['loss'] not in {'mse', 'listnet'} and task['loss'] not in PROXIMITY_LOSSES,
+                delta_effective=task['experimento'] == 'composto' and task['loss'] not in {'mse', 'listnet', 'listmle', 'approxndcg', 'spearman'} and task['loss'] not in PROXIMITY_LOSSES,
                 mask_type=task.get('mask_type', ''), mask_a=task.get('mask_a', ''),
                 mask_mode=task.get('mask_mode', 'natural') if task['loss'] in PROXIMITY_LOSSES else '',
                 mask_effective=task['loss'] in PROXIMITY_LOSSES,
@@ -429,6 +438,8 @@ def provenance(config, metadata):
                   'ts_benchmark/baselines/composite_trading_loss_v2.py',
                   'ts_benchmark/baselines/composite_trading_loss_v3.py',
                   'ts_benchmark/baselines/proximity_losses.py',
+                  'ts_benchmark/baselines/global_ranking_losses.py',
+                  'ts_benchmark/baselines/listwise_ranking_losses.py',
                   'ts_benchmark/baselines/self_impl/VAR/VAR.py',
                   'ts_benchmark/baselines/deep_forecasting_model_base.py']
     if momentum_options(config)[0] != 'off':
@@ -783,6 +794,10 @@ def main():
         print(f'{pairs} pares H/K válidos; {variants} combinações efetivas de loss/delta.', flush=True)
         if 'listnet' in config['cross_losses']:
             print('ListNet: delta não se aplica; uma execução por combinação, registrada como delta=0.', flush=True)
+        other_global = [loss for loss in config['cross_losses']
+                        if loss in {'listmle', 'approxndcg', 'spearman'}]
+        if other_global:
+            print(', '.join(other_global) + ': delta não se aplica; uma execução por combinação.', flush=True)
         if any(loss in PROXIMITY_LOSSES for loss in config['cross_losses']):
             mask = validate_cross_mask(config['loss']['loss_cross_mask'])
             mask_type, mask_a = mask[:2]

@@ -22,7 +22,9 @@ from ts_benchmark.baselines.proximity_losses import (
 )
 
 
-NAMES = tuple(PROXIMITY_LOSSES)
+# This oracle describes the original pairwise loss functions. Global rank
+# correlation has its own independent numerical oracle and gradient tests.
+NAMES = ("hinge_proximity", "ranknet_proximity", "pairwise_mse_proximity")
 MASKS = [
     (kernel, bandwidth, mode)
     for kernel, bandwidth in (("uniform", 0.125), ("gaussian", 0.25), ("cauchy", 0.25))

@@ -24,8 +24,10 @@ from backtest_cpu.io import digest, load_predictions
 
 _HASH = re.compile(r"[0-9a-fA-F]{64}")
 _NAME = re.compile(r"[A-Za-z0-9_]+")
-_PROXIMITY = {"hinge_proximity", "ranknet_proximity", "pairwise_mse_proximity"}
-_LOSSES = {"ranknet", "hinge", "listnet", "pairwise_mse"} | _PROXIMITY
+_PROXIMITY = {"hinge_proximity", "ranknet_proximity", "pairwise_mse_proximity", "spearman_proximity",
+              "listnet_proximity", "listmle_proximity", "approxndcg_proximity"}
+_GLOBAL_RANKINGS = {"listnet", "listmle", "approxndcg", "spearman"}
+_LOSSES = {"ranknet", "hinge", "pairwise_mse"} | _GLOBAL_RANKINGS | _PROXIMITY
 _MOMENTUM_KEYS = ("momentum_mode", "momentum_lookback", "momentum_eta",
                   "momentum_gain_init", "momentum_diagnostics")
 _MOMENTUM_INPUT_KEYS = ("momentum_input_mode", "momentum_input_lookback")
@@ -244,7 +246,7 @@ def _expected_tasks(cfg, pct):
     input_mode, input_lb = _momentum_input_options(cfg)
     for loss in cfg["cross_losses"]:
         mask = _cross_mask(cfg) if loss in _PROXIMITY else None
-        deltas = [0] if loss == "listnet" or mask is not None else cfg["deltas"]
+        deltas = [0] if loss in _GLOBAL_RANKINGS or mask is not None else cfg["deltas"]
         for lam, delta, model, lookback, horizon in itertools.product(
                 cfg["lambdas"], deltas, cfg["models"], cfg["lookbacks"], cfg["horizons"]):
             for k_dir in cfg["trade_windows"]:
@@ -253,7 +255,7 @@ def _expected_tasks(cfg, pct):
                                         "lookback": lookback, "pred_len": horizon, "loss": loss,
                                         "cross_lambda": float(lam), "cross_delta": float(delta),
                                         "lambda": format(lam, "g"), "delta": format(delta, "g"),
-                                        "k_dir": k_dir, "delta_effective": loss != "listnet" and mask is None})
+                                        "k_dir": k_dir, "delta_effective": loss not in _GLOBAL_RANKINGS and mask is None})
                     if momentum_mode != "off":
                         definitions[-1].update(momentum_mode=momentum_mode,
                                                momentum_lookback=momentum_lb or lookback,

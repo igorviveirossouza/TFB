@@ -176,6 +176,11 @@ def discover_tasks(root, percentages, market, source_sha256):
         models = cfg["models"] if mode == "temporal" else ["VAR"]
         lookbacks = cfg["lookbacks"] if mode == "temporal" else [cfg["var_lags"]]
         horizons = cfg["horizons"]
+        # Older temporal contracts omitted loss settings and always used MSE.
+        # VAR keeps that historical label, regardless of temporal NN settings.
+        temporal_loss = cfg.get("loss", {}).get("loss_temporal", "mse") if mode == "temporal" else "mse"
+        if temporal_loss not in {"mse", "mae", "huber"}:
+            raise ValueError(f"Loss temporal nao suportada em {group}: {temporal_loss}")
         if (not models or not lookbacks or not horizons
                 or any(not isinstance(m, str) or not re.fullmatch(r"[A-Za-z0-9_]+", m) for m in models)
                 or len(set(models)) != len(models)
@@ -199,12 +204,12 @@ def discover_tasks(root, percentages, market, source_sha256):
             row = done[(done.modelo == model) & (done.lookback == str(lb)) & (done.pred_len == str(registered_h))].iloc[0]
             if (row.source_sha256 != source_sha256 or row.design_sha256 != plan["design_sha256"]
                     or row.source_data_kind != "log_return" or int(row.step_offset) != 1
-                    or row.loss != "mse" or float(row.cross_lambda) != 0
+                    or row.loss != temporal_loss or float(row.cross_lambda) != 0
                     or row.experimento != mode or int(row.treino) != pct
                     or int(row.n_pretest) != market.n*pct//100):
                 raise ValueError(f"Proveniencia inconsistente em {done_path}: {model}/{lb}/{h}")
             expected_hash = row.parquet_sha256 if mode == "temporal" else json.loads(row.parquet_sha256)[str(h)]
-            rel = (Path(f"treino={pct}")/f"experimento={mode}"/"loss=mse"/"lambda=00"
+            rel = (Path(f"treino={pct}")/f"experimento={mode}"/f"loss={temporal_loss}"/"lambda=00"
                    /f"modelo={model}"/f"lookback={lb}"/f"pred_len={h}")
             path = root/rel/"part.parquet"
             schema = pq.ParquetFile(path).schema_arrow.names
@@ -215,7 +220,7 @@ def discover_tasks(root, percentages, market, source_sha256):
             if cut < 1 or market.n-cut < h or nrows != (market.n-cut-h+1)*h:
                 raise ValueError(f"Numero de linhas/janelas incorreto em {path}")
             tasks.append({"id": len(tasks), "treino": pct, "experimento": mode, "modelo": model,
-                          "lookback": lb, "pred_len": h, "loss": "mse", "lambda": "00",
+                          "lookback": lb, "pred_len": h, "loss": temporal_loss, "lambda": "00",
                           "corte": cut, "relpath": str(rel), "path": str(path),
                           "sha256": expected_hash, "size": path.stat().st_size})
     for pct in percentages:

@@ -36,6 +36,10 @@ NS_NUM_ROLLINGS="${NS_NUM_ROLLINGS:-48000}"
 NS_CROSS_SCALE="${NS_CROSS_SCALE:-1}"
 NS_RANKNET_ALPHA="${NS_RANKNET_ALPHA:-1}"
 NS_LISTNET_TAU="${NS_LISTNET_TAU:-1}"
+NS_SPEARMAN_TAU="${NS_SPEARMAN_TAU:-}"
+NS_LISTMLE_TAU="${NS_LISTMLE_TAU:-}"
+NS_APPROXNDCG_TAU="${NS_APPROXNDCG_TAU:-}"
+NS_HUBER_DELTA="${NS_HUBER_DELTA:-}"
 NS_HINGE_MARGIN="${NS_HINGE_MARGIN:-0.1}"
 NS_SCORE_KIND="${NS_SCORE_KIND:-simple_return}"
 NS_CROSS_SCORE_NORMALIZATION="${NS_CROSS_SCORE_NORMALIZATION:-zscore}"
@@ -89,6 +93,7 @@ K_LOSS_VALUES, POSITIVE_LAMBDAS, CROSS_LOSSES_VALUES, K_EVAL_VALUES, DELTAS_VALU
 NS_MASK_A, NS_MASK_MODE, KERNEL_SPECS, NS_SEED, NS_BATCH_SIZE, NS_NUM_EPOCHS,
 NS_PATIENCE, NS_LEARNING_RATE, NS_PARTITION, NS_GRES, NS_NODELIST,
 NS_MAX_CONCURRENT_JOBS, NS_TIME_LIMIT, NS_CPUS_PER_TASK, NS_MEMORY.
+NS_SPEARMAN_TAU, NS_LISTMLE_TAU, NS_APPROXNDCG_TAU (default1) e NS_HUBER_DELTA (default0.5) sao opcionais.
 MOMENTUM_MODE=off|residual_output, MOMENTUM_LOOKBACK (vazio = LB do modelo),
 MOMENTUM_ETA (finito >= 0). Apenas compostos recebem a correcao; controle temporal off.
 MOMENTUM_GAIN_INIT (padrao 0), MOMENTUM_DIAGNOSTICS=0|1 e NS_LRADJ tambem aceitam export.
@@ -159,8 +164,8 @@ grid() {
         [[ ! ${seen[$loss]+yes} ]] || die "Loss repetida: $loss"; seen[$loss]=1
         case "$loss" in
             ranknet|hinge|pairwise_mse) PLAIN_LOSSES+=("$loss"); nplain=$((nplain+${#deltas[@]}));;
-            listnet) PLAIN_LOSSES+=("$loss"); nplain=$((nplain+1));;
-            ranknet_proximity|hinge_proximity|pairwise_mse_proximity) PROXIMITY_LOSSES+=("$loss");;
+            listnet|listmle|approxndcg|spearman) PLAIN_LOSSES+=("$loss"); nplain=$((nplain+1));;
+            ranknet_proximity|hinge_proximity|pairwise_mse_proximity|spearman_proximity|listnet_proximity|listmle_proximity|approxndcg_proximity) PROXIMITY_LOSSES+=("$loss");;
             *) die "Loss desconhecida: $loss";;
         esac
     done
@@ -237,6 +242,7 @@ train_launcher() {
       BATCH_SIZE="$NS_BATCH_SIZE" NUM_EPOCHS="$NS_NUM_EPOCHS" PATIENCE="$NS_PATIENCE" LEARNING_RATE="$NS_LEARNING_RATE" \
       TEMPORAL_LOSS="$NS_TEMPORAL_LOSS" TRAIN_RATIO_IN_TV="$NS_TRAIN_RATIO_IN_TV" SEED="$NS_SEED" STRIDE="$NS_STRIDE" NUM_ROLLINGS="$NS_NUM_ROLLINGS" \
       CROSS_SCALE="$NS_CROSS_SCALE" RANKNET_ALPHA="$NS_RANKNET_ALPHA" LISTNET_TAU="$NS_LISTNET_TAU" HINGE_MARGIN="$NS_HINGE_MARGIN" \
+      SPEARMAN_TAU="$NS_SPEARMAN_TAU" LISTMLE_TAU="$NS_LISTMLE_TAU" APPROXNDCG_TAU="$NS_APPROXNDCG_TAU" HUBER_DELTA="$NS_HUBER_DELTA" \
       SCORE_KIND="$NS_SCORE_KIND" CROSS_SCORE_NORMALIZATION="$NS_CROSS_SCORE_NORMALIZATION" LOSS_INVERSE_NORM="$NS_LOSS_INVERSE_NORM" LOSS_TRACK_COMPONENTS="$NS_LOSS_TRACK_COMPONENTS" \
       MOMENTUM_MODE="$momentum_mode" MOMENTUM_LOOKBACK="$MOMENTUM_LOOKBACK" MOMENTUM_ETA="$MOMENTUM_ETA" \
       MOMENTUM_GAIN_INIT="$MOMENTUM_GAIN_INIT" MOMENTUM_DIAGNOSTICS="$MOMENTUM_DIAGNOSTICS" LRADJ="$NS_LRADJ" \
@@ -252,6 +258,10 @@ branch_fingerprint() {
     printf '%s\n' "$MODEL" "$TRAIN_VALUES" "$LOOKBACKS_VALUES" "$HORIZON_VALUES" "$K_LOSS_VALUES" "$POSITIVE_LAMBDAS" "${BRANCH_LOSSES[$1]}" "${MASKS[$1]}" "$DELTAS_VALUES" \
       "$NS_RETURNS_FILE" "$NS_BATCH_SIZE" "$NS_NUM_EPOCHS" "$NS_PATIENCE" "$NS_LEARNING_RATE" "$NS_TEMPORAL_LOSS" "$NS_TRAIN_RATIO_IN_TV" "$NS_SEED" "$NS_STRIDE" "$NS_NUM_ROLLINGS" \
       "$NS_CROSS_SCALE" "$NS_RANKNET_ALPHA" "$NS_LISTNET_TAU" "$NS_HINGE_MARGIN" "$NS_SCORE_KIND" "$NS_CROSS_SCORE_NORMALIZATION" "$NS_LOSS_INVERSE_NORM" "$NS_LOSS_TRACK_COMPONENTS"
+    [[ -z "$NS_SPEARMAN_TAU" ]] || printf 'spearman_tau=%s\n' "$NS_SPEARMAN_TAU"
+    [[ -z "$NS_LISTMLE_TAU" ]] || printf 'listmle_tau=%s\n' "$NS_LISTMLE_TAU"
+    [[ -z "$NS_APPROXNDCG_TAU" ]] || printf 'approxndcg_tau=%s\n' "$NS_APPROXNDCG_TAU"
+    [[ -z "$NS_HUBER_DELTA" ]] || printf 'huber_delta=%s\n' "$NS_HUBER_DELTA"
     if [[ "${BRANCHES[$1]}" != temporal && "$MOMENTUM_MODE" != off ]]; then
         printf '%s\n' "$MOMENTUM_MODE" "$MOMENTUM_LOOKBACK" "$MOMENTUM_ETA"
         # Preserve historical fingerprints for the neutral new defaults.

@@ -154,6 +154,8 @@ def test_var_fits_once_per_cut_and_exports_all_six_horizons(config, tmp_path, mo
                  'ts_benchmark/baselines/composite_trading_loss_v2.py',
                  'ts_benchmark/baselines/composite_trading_loss_v3.py',
                  'ts_benchmark/baselines/proximity_losses.py',
+                 'ts_benchmark/baselines/global_ranking_losses.py',
+                 'ts_benchmark/baselines/listwise_ranking_losses.py',
                  'ts_benchmark/baselines/self_impl/VAR/VAR.py',
                  'ts_benchmark/baselines/deep_forecasting_model_base.py']
     for relative in relatives:
@@ -205,3 +207,4 @@ def test_var_fits_once_per_cut_and_exports_all_six_horizons(config, tmp_path, mo
         experiment.worker(cfg, tasks, out, index)  # Resume: no second fit.
         assert len(fitted) == index+1
     assert fitted == [280, 320, 360]
+
