@@ -47,6 +47,7 @@ B3_INLINE_CONFIG=$("$PYTHON_BIN" - \
   model_defaults "$MODEL_DEFAULTS_JSON" var_lags "${VAR_LAGS:-32}" \
   training.num_epochs "${NUM_EPOCHS:-100}" training.patience "${PATIENCE:-10}" \
   training.lr "${LEARNING_RATE:-0.0001}" training.lradj "${LRADJ:-}" \
+  training.validation_mode "${VALIDATION_MODE:-}" \
   loss.loss_temporal "${TEMPORAL_LOSS:-mse}" loss.loss_data_kind log_return \
   loss.loss_score_kind "${SCORE_KIND:-simple_return}" \
   loss.loss_cross_score_normalization "${CROSS_SCORE_NORMALIZATION:-zscore}" \
@@ -57,6 +58,7 @@ B3_INLINE_CONFIG=$("$PYTHON_BIN" - \
   loss.momentum_mode "${MOMENTUM_MODE:-off}" \
   loss.momentum_lookback "${MOMENTUM_LOOKBACK:-}" loss.momentum_eta "${MOMENTUM_ETA:-0}" \
   loss.momentum_gain_init "${MOMENTUM_GAIN_INIT:-0}" loss.momentum_diagnostics "${MOMENTUM_DIAGNOSTICS:-0}" \
+  loss.momentum_input_mode "${MOMENTUM_INPUT_MODE:-off}" loss.momentum_input_lookback "${MOMENTUM_INPUT_LOOKBACK:-}" \
   momentum_experiment "$EXPERIMENT" \
   strategy.train_ratio_in_tv "${TRAIN_RATIO_IN_TV:-0.875}" \
   strategy.stride "$STRIDE" strategy.num_rollings "$NUM_ROLLINGS" strategy.seed "$SEED" \
@@ -77,7 +79,7 @@ config = {}
 mask_items = None
 momentum_experiment = None
 for key, raw in zip(sys.argv[1::2], sys.argv[2::2]):
-    if key == 'training.lradj' and not raw:
+    if key in {'training.lradj', 'training.validation_mode'} and not raw:
         continue  # Omit the override: retain each adapter's historical schedule.
     if key == 'momentum_experiment':
         momentum_experiment = raw
@@ -88,7 +90,7 @@ for key, raw in zip(sys.argv[1::2], sys.argv[2::2]):
     if key == 'loss.loss_cross_mask_item':
         mask_items.append(raw)
         continue
-    if key == 'loss.momentum_lookback':
+    if key in {'loss.momentum_lookback', 'loss.momentum_input_lookback'}:
         value = int(raw) if raw else None
     elif key in {'loss.momentum_eta', 'loss.momentum_gain_init'}:
         value = float(raw)
@@ -128,6 +130,17 @@ if mask_items is not None:
         mask.extend(float(item) for item in mask_items[3:])
     config['loss']['loss_cross_mask'] = mask
 loss = config['loss']
+if loss['momentum_input_mode'] not in {'off', 'zero', 'feature'}:
+    raise ValueError('MOMENTUM_INPUT_MODE deve ser off, zero ou feature')
+if loss['momentum_input_lookback'] is not None and loss['momentum_input_lookback'] < 1:
+    raise ValueError('MOMENTUM_INPUT_LOOKBACK deve ser inteiro positivo ou vazio')
+if 'validation_mode' in config['training'] and config['training']['validation_mode'] != 'ordered_sample_mean':
+    raise ValueError('VALIDATION_MODE deve ser vazio ou ordered_sample_mean')
+if momentum_experiment != 'composto' or loss['momentum_input_mode'] == 'off':
+    loss.pop('momentum_input_mode')
+    loss.pop('momentum_input_lookback')
+elif loss['momentum_mode'] != 'off':
+    raise ValueError('Momentum na entrada nao pode ser combinado com momentum residual_output')
 if loss['momentum_mode'] not in {'off', 'residual_output'}:
     raise ValueError('MOMENTUM_MODE deve ser off ou residual_output')
 if loss['momentum_lookback'] is not None and loss['momentum_lookback'] < 1:

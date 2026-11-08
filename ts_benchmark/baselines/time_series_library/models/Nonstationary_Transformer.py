@@ -164,7 +164,19 @@ class Nonstationary_Transformer(nn.Module):
             output_dim=configs.seq_len,
         )
 
-    def forecast(self, x_enc, x_mark_enc, x_dec, x_mark_dec):
+        # Appended after every native module: the off path keeps its parameter
+        # initialization/RNG exactly; zero and feature initialize identically.
+        self.momentum_input = None
+        input_mode = str(getattr(configs, "momentum_input_mode", "off")).lower()
+        if input_mode not in {"off", "zero", "feature"}:
+            raise ValueError("momentum_input_mode deve ser off, zero ou feature.")
+        if input_mode != "off":
+            if self.task_name not in {"long_term_forecast", "short_term_forecast"}:
+                raise ValueError("Momentum na entrada suporta apenas forecasting.")
+            from ts_benchmark.baselines.momentum_input import MomentumInputProjection
+            self.momentum_input = MomentumInputProjection(configs.enc_in, configs.d_model, input_mode)
+
+    def forecast(self, x_enc, x_mark_enc, x_dec, x_mark_dec, momentum_features=None):
         x_raw = x_enc.clone().detach()
 
         # Normalization
@@ -192,6 +204,17 @@ class Nonstationary_Transformer(nn.Module):
         )
 
         enc_out = self.enc_embedding(x_enc, x_mark_enc)
+        if self.momentum_input is not None:
+            if momentum_features is None:
+                raise ValueError("Modelo com momentum na entrada exige momentum_features observadas.")
+            if momentum_features.shape[0] != x_enc.shape[0]:
+                raise ValueError("Feature momentum e entrada devem ter o mesmo batch.")
+            # Injection after temporal normalization prevents a repeated feature
+            # from being centered away. This is a learned input representation,
+            # not an additive momentum term in the final prediction.
+            enc_out = enc_out + self.momentum_input(momentum_features)
+        elif momentum_features is not None:
+            raise ValueError("momentum_features recebidas com momentum_input_mode=off.")
         enc_out, attns = self.encoder(enc_out, attn_mask=None, tau=tau, delta=delta)
 
         dec_out = self.dec_embedding(x_dec_new, x_mark_dec)
@@ -276,12 +299,12 @@ class Nonstationary_Transformer(nn.Module):
         output = self.projection(output)
         return output
 
-    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, mask=None):
+    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, mask=None, momentum_features=None):
         if (
             self.task_name == "long_term_forecast"
             or self.task_name == "short_term_forecast"
         ):
-            dec_out = self.forecast(x_enc, x_mark_enc, x_dec, x_mark_dec)
+            dec_out = self.forecast(x_enc, x_mark_enc, x_dec, x_mark_dec, momentum_features)
             return dec_out[:, -self.pred_len :, :]  # [B, L, D]
         if self.task_name == "imputation":
             dec_out = self.imputation(x_enc, x_mark_enc, x_dec, x_mark_dec, mask)
@@ -293,3 +316,4 @@ class Nonstationary_Transformer(nn.Module):
             dec_out = self.classification(x_enc, x_mark_enc)
             return dec_out  # [B, L, D]
         return None
+

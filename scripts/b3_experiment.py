@@ -36,6 +36,7 @@ LAUNCHERS = {'temporal': 'run_temporal_experiment.sh',
              'var': 'run_var_experiment.sh'}
 MOMENTUM_KEYS = ('momentum_mode', 'momentum_lookback', 'momentum_eta',
                  'momentum_gain_init', 'momentum_diagnostics')
+MOMENTUM_INPUT_KEYS = ('momentum_input_mode', 'momentum_input_lookback')
 LR_SCHEDULES = {'type1', 'type2', 'type3', 'constant'}
 MOMENTUM_MODELS = {'Nonstationary_Transformer', 'DUET', 'TimesNet', 'FEDformer'}
 
@@ -43,7 +44,7 @@ MOMENTUM_MODELS = {'Nonstationary_Transformer', 'DUET', 'TimesNet', 'FEDformer'}
 def momentum_options(config):
     """Validate optional scientific parameters without importing Torch."""
     loss = config['loss']
-    unknown = {key for key in loss if key.startswith('momentum_')} - set(MOMENTUM_KEYS)
+    unknown = {key for key in loss if key.startswith('momentum_')} - set(MOMENTUM_KEYS + MOMENTUM_INPUT_KEYS)
     if unknown:
         raise ValueError(f'Parâmetro momentum desconhecido: {sorted(unknown)}')
     mode = loss.get('momentum_mode', 'off')
@@ -63,7 +64,34 @@ def momentum_options(config):
     return mode, lookback, float(eta)
 
 
+def momentum_input_options(config):
+    """Explicit momentum feature, independently switchable from residual output."""
+    loss = config['loss']
+    mode = loss.get('momentum_input_mode', 'off')
+    if not isinstance(mode, str) or mode not in {'off', 'zero', 'feature'}:
+        raise ValueError('MOMENTUM_INPUT_MODE deve ser off, zero ou feature')
+    lookback = loss.get('momentum_input_lookback')
+    if lookback is not None and (type(lookback) is not int or lookback < 1):
+        raise ValueError('MOMENTUM_INPUT_LOOKBACK deve ser inteiro positivo ou vazio (= LB do modelo)')
+    if mode != 'off':
+        if loss.get('momentum_mode', 'off') != 'off':
+            raise ValueError('Momentum na entrada nao pode ser combinado com momentum residual_output')
+        unsupported = set(config['models']) - {'Nonstationary_Transformer'}
+        if unsupported:
+            raise ValueError(f'Momentum na entrada ainda nao validado para: {sorted(unsupported)}')
+        if (config.get('source_data_kind', 'log_return') != 'log_return'
+                or loss.get('loss_data_kind', 'log_return') != 'log_return'):
+            raise ValueError('Momentum na entrada requer SOURCE_DATA_KIND=log_return e loss_data_kind=log_return')
+        defaults = config['model_defaults']['Nonstationary_Transformer']
+        if defaults.get('target_mode', 'path') == 'cumulative':
+            raise ValueError('Momentum na entrada requer target_mode=path')
+        if defaults.get('task_name', 'short_term_forecast') not in {'short_term_forecast', 'long_term_forecast'}:
+            raise ValueError('Momentum na entrada suporta somente tarefas de forecast')
+    return mode, lookback
+
+
 def validate_momentum_experiment(config):
+    momentum_input_options(config)
     if momentum_options(config)[0] != 'off':
         unsupported = set(config['models']) - MOMENTUM_MODELS
         if unsupported:
@@ -134,6 +162,13 @@ def load_config():
     if 'lradj' in config['training'] and (not isinstance(config['training']['lradj'], str)
                                            or config['training']['lradj'] not in LR_SCHEDULES):
         raise ValueError('LRADJ deve ser type1, type2, type3 ou constant')
+    if ('validation_mode' in config['training']
+            and config['training']['validation_mode'] != 'ordered_sample_mean'):
+        raise ValueError('VALIDATION_MODE deve ser vazio ou ordered_sample_mean')
+    input_mode, _ = momentum_input_options(config)
+    if input_mode == 'off':
+        for key in MOMENTUM_INPUT_KEYS:
+            config['loss'].pop(key, None)
     mode, _, _ = momentum_options(config)
     if mode == 'off':
         # The opt-out keeps historical config identities and cache keys intact.
@@ -157,6 +192,7 @@ def cross_deltas(config, loss):
 
 def make_tasks(config, mode):
     momentum_mode, momentum_lb, momentum_eta = momentum_options(config)
+    input_mode, input_lb = momentum_input_options(config)
     if mode == 'composto':
         validate_momentum_experiment(config)
     tasks = []
@@ -188,6 +224,9 @@ def make_tasks(config, mode):
                             task['momentum_gain_init'] = float(config['loss']['momentum_gain_init'])
                         if config['loss'].get('momentum_diagnostics', False):
                             task['momentum_diagnostics'] = True
+                    if mode == 'composto' and input_mode != 'off':
+                        task.update(momentum_input_mode=input_mode,
+                                    momentum_input_lookback=input_lb or lb)
                     if mask is not None:
                         task.update(mask_type=mask[0], mask_a=mask[1])
                         if len(mask) >= 3 and mask[2] != 'natural':
@@ -220,6 +259,9 @@ def output_path(task):
                     f"momentum_eta={float(task['momentum_eta'])!r}")
             if task.get('momentum_gain_init', 0.0) != 0.0:
                 path /= f"momentum_gain_init={float(task['momentum_gain_init'])!r}"
+        if task.get('momentum_input_mode', 'off') != 'off':
+            path = (path / f"momentum_input={task['momentum_input_mode']}" /
+                    f"momentum_input_lb={task['momentum_input_lookback']}")
     path = path / f"modelo={task['modelo']}" / f"lookback={task['lookback']}" / f"pred_len={task['pred_len']}"
     if task['k'] is not None:
         path /= f"k_dir={task['k']}"
@@ -241,10 +283,12 @@ def model_spec(config, task):
     # unused cross scores at lambda=0 (0 * NaN would still contaminate the loss).
     hyper.update(config['loss'])
     # Controls always stay purely temporal, even in a momentum-enabled design.
-    for key in MOMENTUM_KEYS:
+    for key in MOMENTUM_KEYS + MOMENTUM_INPUT_KEYS:
         hyper.pop(key, None)
     if task.get('momentum_mode') == 'residual_output':
         hyper.update({key: task[key] for key in MOMENTUM_KEYS if key in task})
+    if task.get('momentum_input_mode', 'off') != 'off':
+        hyper.update({key: task[key] for key in MOMENTUM_INPUT_KEYS})
     # Inactive masks must not change the original models' hyperparameters/cache keys.
     hyper.pop('loss_cross_mask', None)
     if task['loss'] in PROXIMITY_LOSSES:
@@ -346,7 +390,8 @@ def validate_lengths(config, tasks, metadata):
         if split['n_windows'] < 1 or max_windows > config['strategy']['num_rollings']:
             raise ValueError('Teste sem janelas ou NUM_ROLLINGS insuficiente para cobrir todo o teste')
         # MASTER keeps partial batches (a sample contains the whole universe).
-        history = max(task['lookback'], task.get('momentum_lookback', task['lookback']))
+        history = max(task['lookback'], task.get('momentum_lookback', task['lookback']),
+                      task.get('momentum_input_lookback', task['lookback']))
         minimum = history + task['pred_len'] + (0 if task['modelo'] == 'MASTER' else 31)
         if split['n_train'] < minimum:
             raise ValueError('Treino insuficiente para contexto, horizonte e batch do modelo')
@@ -389,6 +434,11 @@ def provenance(config, metadata):
     if momentum_options(config)[0] != 'off':
         code_files += ['ts_benchmark/baselines/momentum_score.py',
                        'ts_benchmark/baselines/momentum_score_io.py']
+    if momentum_input_options(config)[0] != 'off':
+        code_files += ['ts_benchmark/baselines/momentum_input.py',
+                       'ts_benchmark/baselines/momentum_score.py',
+                       'ts_benchmark/baselines/time_series_library/adapters_for_transformers.py',
+                       'ts_benchmark/baselines/time_series_library/models/Nonstationary_Transformer.py']
     master_data = None
     if 'MASTER' in config['models']:
         hyper = config['model_defaults']['MASTER']
@@ -717,6 +767,12 @@ def main():
                   'controle temporal inalterado; scores em ranking_scores.parquet.', flush=True)
             print(f"Taxa de aprendizado: LR={config['training']['lr']:g}; "
                   f"regra={config['training'].get('lradj', 'default do modelo')}.", flush=True)
+        input_mode, input_lb = momentum_input_options(config)
+        if input_mode != 'off':
+            print(f'Momentum na entrada: modo={input_mode}; LB={input_lb or "LB do modelo"}; '
+                  'projecao aprendida no encoder; sem soma fixa na saida; previsoes em part.parquet.', flush=True)
+        if config['training'].get('validation_mode') == 'ordered_sample_mean':
+            print('Validacao: ordem fixa e media ponderada pelo numero de amostras.', flush=True)
         pairs = sum(k <= h and h % k == 0 for h in config['horizons'] for k in config['trade_windows'])
         factors = [len(config[key]) for key in ('train_percentages', 'models', 'lookbacks')]
         variants = sum(len(cross_deltas(config, loss)) for loss in config['cross_losses'])

@@ -28,11 +28,13 @@ _PROXIMITY = {"hinge_proximity", "ranknet_proximity", "pairwise_mse_proximity"}
 _LOSSES = {"ranknet", "hinge", "listnet", "pairwise_mse"} | _PROXIMITY
 _MOMENTUM_KEYS = ("momentum_mode", "momentum_lookback", "momentum_eta",
                   "momentum_gain_init", "momentum_diagnostics")
+_MOMENTUM_INPUT_KEYS = ("momentum_input_mode", "momentum_input_lookback")
 
 
 def _momentum_options(cfg):
     loss = cfg["loss"]
-    if {key for key in loss if key.startswith("momentum_")} - set(_MOMENTUM_KEYS):
+    if ({key for key in loss if key.startswith("momentum_")}
+            - set(_MOMENTUM_KEYS + _MOMENTUM_INPUT_KEYS)):
         raise ValueError("Parametro momentum desconhecido no desenho.")
     mode, lb, eta = (loss.get("momentum_mode", "off"), loss.get("momentum_lookback"),
                      loss.get("momentum_eta", 0.0))
@@ -48,6 +50,26 @@ def _momentum_options(cfg):
     if type(loss.get("momentum_diagnostics", False)) is not bool:
         raise ValueError("momentum_diagnostics deve ser booleano.")
     return mode, lb, float(eta)
+
+
+def _momentum_input_options(cfg):
+    """Validate the input feature independently of the residual-output contract."""
+    loss = cfg["loss"]
+    mode = loss.get("momentum_input_mode", "off")
+    lb = loss.get("momentum_input_lookback")
+    if not isinstance(mode, str) or mode not in {"off", "zero", "feature"}:
+        raise ValueError("momentum_input_mode invalido.")
+    if lb is not None and (type(lb) is not int or lb < 1):
+        raise ValueError("momentum_input_lookback deve ser inteiro positivo.")
+    if mode != "off":
+        if loss.get("momentum_mode", "off") != "off":
+            raise ValueError("Momentum de entrada nao pode combinar residual_output.")
+        if set(cfg["models"]) != {"Nonstationary_Transformer"}:
+            raise ValueError("Momentum de entrada requer Nonstationary_Transformer.")
+        if (cfg.get("source_data_kind", "log_return") != "log_return"
+                or loss.get("loss_data_kind", "log_return") != "log_return"):
+            raise ValueError("Momentum de entrada requer log_return.")
+    return mode, lb
 
 
 # Mirror kept self-contained because CPU snapshots do not import training code.
@@ -201,9 +223,13 @@ def _validate_config(plan, pct, market, source_sha256, path):
     for required in ("training", "loss"):
         if not isinstance(cfg.get(required), dict):
             raise ValueError(f"Configuracao {required} ausente.")
+    if ("validation_mode" in cfg["training"]
+            and cfg["training"]["validation_mode"] != "ordered_sample_mean"):
+        raise ValueError("validation_mode invalido no desenho.")
     if set(cfg["cross_losses"]) & _PROXIMITY:
         _cross_mask(cfg)
     _momentum_options(cfg)
+    _momentum_input_options(cfg)
     cut = market.n*pct//100
     hmax = max(cfg["horizons"])
     if cut < 1 or cut+hmax > market.n:
@@ -215,6 +241,7 @@ def _expected_tasks(cfg, pct):
     """Mesma ordem/identidade de b3_experiment.make_tasks; nenhuma dependencia GPU."""
     definitions = []
     momentum_mode, momentum_lb, momentum_eta = _momentum_options(cfg)
+    input_mode, input_lb = _momentum_input_options(cfg)
     for loss in cfg["cross_losses"]:
         mask = _cross_mask(cfg) if loss in _PROXIMITY else None
         deltas = [0] if loss == "listnet" or mask is not None else cfg["deltas"]
@@ -235,6 +262,9 @@ def _expected_tasks(cfg, pct):
                             definitions[-1]["momentum_gain_init"] = float(cfg["loss"]["momentum_gain_init"])
                         if cfg["loss"].get("momentum_diagnostics", False):
                             definitions[-1]["momentum_diagnostics"] = True
+                    if input_mode != "off":
+                        definitions[-1].update(momentum_input_mode=input_mode,
+                                               momentum_input_lookback=input_lb or lookback)
                     if mask is not None:
                         definitions[-1].update(mask_type=mask[0], mask_a=mask[1])
                         if len(mask) >= 3 and mask[2] != "natural":
@@ -259,6 +289,9 @@ def _expected_tasks(cfg, pct):
                     /f"momentum_eta={float(task['momentum_eta'])!r}")
             if task.get("momentum_gain_init", 0.0) != 0.0:
                 path /= f"momentum_gain_init={float(task['momentum_gain_init'])!r}"
+        if task.get("momentum_input_mode", "off") != "off":
+            path = (path/f"momentum_input={task['momentum_input_mode']}"
+                    /f"momentum_input_lb={task['momentum_input_lookback']}")
         task["relpath"] = str(path/f"modelo={task['modelo']}"/f"lookback={task['lookback']}"
                               /f"pred_len={task['pred_len']}"/f"k_dir={task['k_dir']}")
     if len({t["relpath"] for t in definitions}) != len(definitions):
@@ -309,6 +342,13 @@ def _validate_row(row, task, cfg, meta, plan, market, cut):
             raise ValueError(f"Inicializacao/diagnostico momentum divergente na auditoria: {identity}")
     elif any(row.get(key, "") for key in _MOMENTUM_KEYS):
         raise ValueError(f"Momentum ativo fora do desenho: {identity}")
+    if task.get("momentum_input_mode", "off") != "off":
+        if (row.get("momentum_input_mode") != task["momentum_input_mode"]
+                or _int(row.get("momentum_input_lookback"), "momentum_input_lookback")
+                != task["momentum_input_lookback"]):
+            raise ValueError(f"Momentum de entrada divergente na auditoria: {identity}")
+    elif any(row.get(key, "") for key in _MOMENTUM_INPUT_KEYS):
+        raise ValueError(f"Momentum de entrada ativo fora do desenho: {identity}")
     if row["delta_effective"].lower() != str(task["delta_effective"]).lower():
         raise ValueError(f"delta_effective inconsistente: {identity}")
     if task["loss"] in _PROXIMITY:
@@ -335,10 +375,12 @@ def _validate_row(row, task, cfg, meta, plan, market, cut):
     hyper = dict(cfg["model_defaults"][task["modelo"]], **cfg["training"])
     hyper.update(seq_len=task["lookback"], pred_len=horizon, horizon=horizon)
     hyper.update(cfg["loss"])
-    for key in _MOMENTUM_KEYS:
+    for key in _MOMENTUM_KEYS + _MOMENTUM_INPUT_KEYS:
         hyper.pop(key, None)
     if task.get("momentum_mode") == "residual_output":
         hyper.update({key: task[key] for key in _MOMENTUM_KEYS if key in task})
+    if task.get("momentum_input_mode", "off") != "off":
+        hyper.update({key: task[key] for key in _MOMENTUM_INPUT_KEYS})
     hyper.pop("loss_cross_mask", None)
     if task["loss"] in _PROXIMITY:
         hyper["loss_cross_mask"] = [task["mask_type"], task["mask_a"]]

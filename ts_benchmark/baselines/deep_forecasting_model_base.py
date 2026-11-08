@@ -92,11 +92,27 @@ class DeepForecastingModelBase(ModelBase):
             from ts_benchmark.baselines.momentum_score import validate_momentum_config
             self._momentum_config = validate_momentum_config(self.config)
             self.win_size = self._history_length()
+        self._momentum_input_config = {"mode": "off", "lookback": None}
+        if str(getattr(self.config, "momentum_input_mode", "off")).lower() != "off":
+            from ts_benchmark.baselines.momentum_input import validate_momentum_input_config
+            self._momentum_input_config = validate_momentum_input_config(self.config)
+            self.win_size = self._history_length()
+        self._validation_mode = getattr(self.config, "validation_mode", "legacy")
+        if self._validation_mode not in {"legacy", "ordered_sample_mean"}:
+            raise ValueError("validation_mode deve ser legacy ou ordered_sample_mean.")
+
+    def _momentum_input_enabled(self):
+        return getattr(self, "_momentum_input_config", {}).get("mode", "off") in {"zero", "feature"}
+
+    def _financial_history_enabled(self):
+        return self._momentum_enabled() or self._momentum_input_enabled()
 
     def _momentum_enabled(self):
         return self._momentum_config["mode"] == "residual_output"
 
     def _history_length(self):
+        if self._momentum_input_enabled():
+            return max(self.config.seq_len, self._momentum_input_config["lookback"])
         if self._momentum_enabled():
             return max(self.config.seq_len, self._momentum_config["lookback"])
         return self.config.seq_len
@@ -109,12 +125,22 @@ class DeepForecastingModelBase(ModelBase):
         return config
 
     def _process_with_history(self, input, target, input_mark, target_mark):
-        # The extra past belongs to the momentum baseline, not to the backbone.
-        if self._momentum_enabled():
+        # Extra past is available only to momentum; the backbone keeps seq_len.
+        features = None
+        if self._financial_history_enabled():
             if input.shape[1] < self._history_length():
                 raise ValueError("Historico insuficiente para a rede e o momentum.")
+            if self._momentum_input_enabled():
+                from ts_benchmark.baselines.momentum_input import momentum_input_features
+                features = momentum_input_features(
+                    input, self._momentum_input_config["lookback"],
+                    mean=self.scaler.mean_ if self.config.norm else None,
+                    scale=self.scaler.scale_ if self.config.norm else None,
+                )
             input = input[:, -self.config.seq_len:, :]
             input_mark = input_mark[:, -self.config.seq_len:, :]
+        if features is not None:
+            return self._process(input, target, input_mark, target_mark, momentum_features=features)
         return self._process(input, target, input_mark, target_mark)
 
     def _momentum_module(self):
@@ -132,11 +158,11 @@ class DeepForecastingModelBase(ModelBase):
         return {key: float(components[key]) for key in keys if key in components}
 
     @staticmethod
-    def _diagnostic_means(rows):
+    def _diagnostic_means(rows, weights=None):
         if not rows:
             return {}
         return {key: (None if any(row[key] is None for row in rows)
-                      else float(np.mean([row[key] for row in rows]))) for key in rows[0]}
+                      else float(np.average([row[key] for row in rows], weights=weights))) for key in rows[0]}
 
     def _momentum_gradient_norms(self, scale=1.0):
         # Inspect gradients of the TOTAL objective before the optimizer step.
@@ -200,7 +226,7 @@ class DeepForecastingModelBase(ModelBase):
         self._exported_momentum_state = (str(path), payload)
 
     def _check_momentum_inference(self, horizon, exog_data=None):
-        if not self._momentum_enabled():
+        if not self._financial_history_enabled():
             return
         if horizon != self.config.horizon:
             raise ValueError("Momentum exige horizon igual ao horizonte treinado; nao usa historico sintetico.")
@@ -373,6 +399,7 @@ class DeepForecastingModelBase(ModelBase):
     ) -> float:
         config = self.config
         total_loss = []
+        sample_counts = []
         diagnostic_components = [] if self._momentum_diagnostics_enabled() else None
         self.model.eval()
         device = get_device()
@@ -402,12 +429,14 @@ class DeepForecastingModelBase(ModelBase):
                 )
                 loss = all_loss.detach().cpu().numpy()
                 total_loss.append(loss)
+                sample_counts.append(input.shape[0])
                 if diagnostic_components is not None:
                     diagnostic_components.append(self._diagnostic_components(criterion))
 
-        total_loss = np.mean(total_loss)
+        weights = sample_counts if self._validation_mode == "ordered_sample_mean" else None
+        total_loss = np.average(total_loss, weights=weights)
         if diagnostic_components is not None:
-            self._momentum_validation_components = self._diagnostic_means(diagnostic_components)
+            self._momentum_validation_components = self._diagnostic_means(diagnostic_components, weights)
         self.model.train()
         return total_loss
 
@@ -423,7 +452,9 @@ class DeepForecastingModelBase(ModelBase):
             covariates = {}
         series_dim = train_valid_data.shape[-1]
         exog_data = covariates.get("exog", None)
-        if self._momentum_enabled():
+        if self._financial_history_enabled():
+            if self._momentum_input_enabled() and self.model_name != "Nonstationary_Transformer":
+                raise ValueError("Momentum na entrada esta implementado apenas para Nonstationary_Transformer.")
             if exog_data is not None:
                 raise ValueError("O modulo momentum ainda nao aceita covariaveis exogenas.")
             if series_dim < 2 or not np.isfinite(train_valid_data.to_numpy()).all():
@@ -459,7 +490,7 @@ class DeepForecastingModelBase(ModelBase):
             train_valid_data, train_ratio_in_tv, self._history_length()
         )
         data_config = self._data_config()
-        if self._momentum_enabled():
+        if self._financial_history_enabled():
             if len(train_data) < self._history_length() + config.horizon:
                 raise ValueError("Bloco de treino insuficiente para lookback e horizonte.")
             if train_ratio_in_tv != 1 and len(valid_data) < self._history_length() + config.horizon:
@@ -486,7 +517,7 @@ class DeepForecastingModelBase(ModelBase):
                 data_config,
                 timeenc=1,
                 batch_size=config.batch_size,
-                shuffle=True,
+                shuffle=self._validation_mode != "ordered_sample_mean",
                 drop_last=False,
             )
 
@@ -498,7 +529,7 @@ class DeepForecastingModelBase(ModelBase):
             shuffle=True,
             drop_last=train_drop_last,
         )
-        if self._momentum_enabled() and len(self.train_data_loader) == 0:
+        if self._financial_history_enabled() and len(self.train_data_loader) == 0:
             raise ValueError("Nenhum batch de treino; reduza batch_size ou momentum_lookback.")
 
         # Define the loss function and optimizer
@@ -640,7 +671,7 @@ class DeepForecastingModelBase(ModelBase):
         series_dim = series.shape[-1]
         exog_data = covariates.get("exog", None)
         self._check_momentum_inference(horizon, exog_data)
-        if self._momentum_enabled():
+        if self._financial_history_enabled():
             if len(series) < self._history_length() or [str(c) for c in series.columns] != self._momentum_assets:
                 raise ValueError("Historico ou universo de ativos incompativel com o momentum treinado.")
         if exog_data is not None:

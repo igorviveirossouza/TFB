@@ -78,7 +78,7 @@ class TransformerAdapter(DeepForecastingModelBase):
     def _init_model(self):
         return self.model_class(self.config)
 
-    def _process(self, input, target, input_mark, target_mark):
+    def _process(self, input, target, input_mark, target_mark, *, momentum_features=None):
         # decoder input
         dec_input = torch.zeros_like(target[:, -self.config.horizon :, :]).float()
         dec_input = (
@@ -86,7 +86,13 @@ class TransformerAdapter(DeepForecastingModelBase):
             .float()
             .to(input.device)
         )
-        output = self.model(input, input_mark, dec_input, target_mark)
+        if momentum_features is not None:
+            if self.model_name != "Nonstationary_Transformer":
+                raise ValueError("Momentum na entrada esta implementado apenas para Nonstationary_Transformer.")
+            output = self.model(input, input_mark, dec_input, target_mark,
+                                momentum_features=momentum_features)
+        else:
+            output = self.model(input, input_mark, dec_input, target_mark)
 
         return {"output": output}
 
@@ -131,3 +137,4 @@ def transformer_adapter(model_info: Type[object]) -> object:
             "norm": "norm",
         },
     )
+

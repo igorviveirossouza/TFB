@@ -46,6 +46,9 @@ MOMENTUM_LOOKBACK="${MOMENTUM_LOOKBACK:-}"
 MOMENTUM_ETA="${MOMENTUM_ETA:-0}"
 MOMENTUM_GAIN_INIT="${MOMENTUM_GAIN_INIT:-0}"
 MOMENTUM_DIAGNOSTICS="${MOMENTUM_DIAGNOSTICS:-0}"
+MOMENTUM_INPUT_MODE="${MOMENTUM_INPUT_MODE:-off}"
+MOMENTUM_INPUT_LOOKBACK="${MOMENTUM_INPUT_LOOKBACK:-}"
+NS_VALIDATION_MODE="${NS_VALIDATION_MODE:-}" # ordered_sample_mean: ordem fixa/media por amostra.
 NS_LRADJ="${NS_LRADJ:-}" # Vazio conserva a regra nativa de cada modelo.
 NS_PARTITION="${NS_PARTITION:-medusas_dev}"
 NS_GRES="${NS_GRES-gpu:1}" # export NS_GRES="" preserva CPU sem solicitar GPU.
@@ -90,7 +93,11 @@ MOMENTUM_MODE=off|residual_output, MOMENTUM_LOOKBACK (vazio = LB do modelo),
 MOMENTUM_ETA (finito >= 0). Apenas compostos recebem a correcao; controle temporal off.
 MOMENTUM_GAIN_INIT (padrao 0), MOMENTUM_DIAGNOSTICS=0|1 e NS_LRADJ tambem aceitam export.
 NS_LRADJ vazio preserva o modelo; type1 decai; constant mantem a taxa de aprendizado.
-O score final e exportado separadamente em ranking_scores.parquet.
+No modo residual, o score final e exportado separadamente em ranking_scores.parquet.
+MOMENTUM_INPUT_MODE=off|zero|feature e MOMENTUM_INPUT_LOOKBACK habilitam entrada explicita
+(apenas NS). zero usa a mesma arquitetura com feature zerada; feature usa momentum.
+Nao combinar entrada explicita com residual_output; a saida continua part.parquet.
+NS_VALIDATION_MODE=ordered_sample_mean fixa a ordem e pondera por amostras; vazio preserva legado.
 
 KERNEL_SPECS usa 'kernel parametros;kernel parametros', sem A nem modo.
 Ex.: KERNEL_SPECS='cauchy;student 10;generalized_gaussian 1;compact 2 3;cosine;intermediate_band 2'
@@ -120,6 +127,10 @@ integer_list() {
 selected() { [[ -z "$NS_ONLY_BRANCHES" || " $NS_ONLY_BRANCHES " == *" $1 "* ]]; }
 grid() {
     local token spec name label loss h k nplain=0 pairs=0
+    [[ "$MOMENTUM_INPUT_MODE" == off || "$MOMENTUM_INPUT_MODE" == zero || "$MOMENTUM_INPUT_MODE" == feature ]] || die 'MOMENTUM_INPUT_MODE deve ser off, zero ou feature.'
+    [[ -z "$MOMENTUM_INPUT_LOOKBACK" || "$MOMENTUM_INPUT_LOOKBACK" =~ ^[1-9][0-9]*$ ]] || die 'MOMENTUM_INPUT_LOOKBACK deve ser inteiro positivo ou vazio.'
+    [[ -z "$NS_VALIDATION_MODE" || "$NS_VALIDATION_MODE" == ordered_sample_mean ]] || die 'NS_VALIDATION_MODE deve ser vazio ou ordered_sample_mean.'
+    [[ "$MOMENTUM_INPUT_MODE" == off || "$MOMENTUM_MODE" == off ]] || die 'Momentum na entrada nao pode ser combinado com residual_output.'
     [[ "$MOMENTUM_MODE" == off || "$MOMENTUM_MODE" == residual_output ]] || die 'MOMENTUM_MODE deve ser off ou residual_output.'
     [[ -z "$MOMENTUM_LOOKBACK" || "$MOMENTUM_LOOKBACK" =~ ^[1-9][0-9]*$ ]] || die 'MOMENTUM_LOOKBACK deve ser inteiro positivo ou vazio.'
     [[ "$MOMENTUM_ETA" =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)([eE][+-]?[0-9]+)?$ ]] || die 'MOMENTUM_ETA deve ser finito e nao negativo.'
@@ -139,6 +150,9 @@ grid() {
     ((${#models[@]} && ${#losses[@]} && ${#lambdas[@]} && ${#deltas[@]})) || die 'Modelo/loss/lambdas/deltas nao podem ser vazios.'
     local -A seen=()
     for token in "${models[@]}"; do [[ "$token" =~ ^[A-Za-z][A-Za-z0-9_]*$ && ! ${seen[$token]+yes} ]] || die "Modelo invalido/repetido: $token"; seen[$token]=1; done
+    if [[ "$MOMENTUM_INPUT_MODE" != off ]]; then
+        for token in "${models[@]}"; do [[ "$token" == Nonstationary_Transformer ]] || die "Momentum na entrada ainda nao validado para $token."; done
+    fi
     seen=()
     PLAIN_LOSSES=(); PROXIMITY_LOSSES=()
     for loss in "${losses[@]}"; do
@@ -192,6 +206,10 @@ plan() {
         printf 'Momentum residual nos compostos: LB=%s; eta=%s; controle temporal off.\n' "${MOMENTUM_LOOKBACK:-LB do modelo}" "$MOMENTUM_ETA"
         printf 'Ganho inicial: %s; diagnostico: %s; regra LR: %s.\n' "$MOMENTUM_GAIN_INIT" "$MOMENTUM_DIAGNOSTICS" "${NS_LRADJ:-default do modelo}"
     fi
+    if [[ "$MOMENTUM_INPUT_MODE" != off ]]; then
+        printf 'Momentum na entrada: modo=%s; LB=%s; sem soma fixa na saida.\n' "$MOMENTUM_INPUT_MODE" "${MOMENTUM_INPUT_LOOKBACK:-LB do modelo}"
+    fi
+    [[ -z "$NS_VALIDATION_MODE" ]] || printf 'Validacao: %s.\n' "$NS_VALIDATION_MODE"
     for index in "${!BRANCHES[@]}"; do selected "${BRANCHES[index]}" || continue; printf '%-30s %5d treinos  %s\n' "${BRANCHES[index]}" "${COUNTS[index]}" "${MASKS[index]}"; done
     printf 'TOTAL: %d treinos unicos; %d ramos selecionados.\n' "$TOTAL" "$ACTIVE_BRANCHES"
     if [[ "$NS_PARALLEL_BRANCHES" == 0 ]]; then printf 'Ramos encadeados afterany; ate %s tarefas simultaneas por array ativo.\n' "$NS_MAX_CONCURRENT_JOBS";
@@ -206,9 +224,9 @@ preflight() {
 }
 branch_root() { if [[ "$1" == temporal ]]; then printf '%s/temporal' "$PRED_ROOT"; else printf '%s/composto/%s' "$PRED_ROOT" "$1"; fi; }
 train_launcher() {
-    local index=$1 action=$2 dependency=${3:-} branch=${BRANCHES[$1]} launcher tag root momentum_mode=$MOMENTUM_MODE
+    local index=$1 action=$2 dependency=${3:-} branch=${BRANCHES[$1]} launcher tag root momentum_mode=$MOMENTUM_MODE momentum_input_mode=$MOMENTUM_INPUT_MODE
     root=$(branch_root "$branch")
-    if [[ "$branch" == temporal ]]; then launcher=run_temporal_experiment.sh; tag="$EXPERIMENT_TAG/temporal"; momentum_mode=off;
+    if [[ "$branch" == temporal ]]; then launcher=run_temporal_experiment.sh; tag="$EXPERIMENT_TAG/temporal"; momentum_mode=off; momentum_input_mode=off;
     else launcher=run_composite_trading_experiment.sh; tag="$EXPERIMENT_TAG/composto/$branch"; fi
     env -u B3_INLINE_CONFIG -u B3_CONFIG -u B3_CONFIG_SOURCE -u B3_WORKER_LAUNCHER -u EXPERIMENT \
       TFB_ROOT="$TFB_ROOT" PYTHON_BIN="$NS_PYTHON_BIN" VENV_PATH="$NS_VENV_PATH" \
@@ -222,6 +240,7 @@ train_launcher() {
       SCORE_KIND="$NS_SCORE_KIND" CROSS_SCORE_NORMALIZATION="$NS_CROSS_SCORE_NORMALIZATION" LOSS_INVERSE_NORM="$NS_LOSS_INVERSE_NORM" LOSS_TRACK_COMPONENTS="$NS_LOSS_TRACK_COMPONENTS" \
       MOMENTUM_MODE="$momentum_mode" MOMENTUM_LOOKBACK="$MOMENTUM_LOOKBACK" MOMENTUM_ETA="$MOMENTUM_ETA" \
       MOMENTUM_GAIN_INIT="$MOMENTUM_GAIN_INIT" MOMENTUM_DIAGNOSTICS="$MOMENTUM_DIAGNOSTICS" LRADJ="$NS_LRADJ" \
+      MOMENTUM_INPUT_MODE="$momentum_input_mode" MOMENTUM_INPUT_LOOKBACK="$MOMENTUM_INPUT_LOOKBACK" VALIDATION_MODE="$NS_VALIDATION_MODE" \
       RUN_TAG="$tag" OUT_ROOT="$root" RESULT_ROOT="/snfs2/igor.viveiros/result/$tag" LOG_ROOT="$TFB_ROOT/logs/$tag" \
       PARTITION="$NS_PARTITION" GRES="$NS_GRES" TIME_LIMIT="$NS_TIME_LIMIT" NODELIST="$NS_NODELIST" CPUS_PER_TASK="$NS_CPUS_PER_TASK" MEMORY="$NS_MEMORY" \
       MAX_CONCURRENT_JOBS="$NS_MAX_CONCURRENT_JOBS" ARRAY_CHUNK_SIZE="$NS_ARRAY_CHUNK_SIZE" MANTER_CSV="$NS_MANTER_CSV" B3_AFTER_JOB="$dependency" \
@@ -241,6 +260,10 @@ branch_fingerprint() {
         fi
         case "${MOMENTUM_DIAGNOSTICS,,}" in 1|true) printf 'momentum_diagnostics=true\n';; esac
     fi
+    if [[ "${BRANCHES[$1]}" != temporal && "$MOMENTUM_INPUT_MODE" != off ]]; then
+        printf 'momentum_input_mode=%s\nmomentum_input_lookback=%s\n' "$MOMENTUM_INPUT_MODE" "$MOMENTUM_INPUT_LOOKBACK"
+    fi
+    [[ -z "$NS_VALIDATION_MODE" ]] || printf 'validation_mode=%s\n' "$NS_VALIDATION_MODE"
     [[ -z "$NS_LRADJ" ]] || printf 'lradj=%s\n' "$NS_LRADJ"
     } | sha256sum | cut -d' ' -f1
 }

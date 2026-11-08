@@ -267,6 +267,9 @@ def with_meta(frame, task, plan):
                        "eligibility_signal_kind": ("raw_cumulative_log_return", pa.string()),
                        "daily_ic_score_kind": ("raw_daily_log_return", pa.string()),
                        "momentum_manifest_sha256": (task["momentum_files"]["manifest"]["sha256"], pa.string())})
+    if task.get("momentum_input_mode", "off") != "off":
+        values.update({"momentum_input_mode": (task["momentum_input_mode"], pa.string()),
+                       "momentum_input_lookback": (task["momentum_input_lookback"], pa.int64())})
     for key, (value, dtype) in values.items():
         array = pa.array([value]*len(frame), type=dtype)
         if key in table.column_names:
@@ -417,6 +420,9 @@ def consolidate(run):
                         if task.get("momentum_mode") == "residual_output":
                             statuses[-1].update({key: task[key] for key in
                                                 ("momentum_mode", "momentum_lookback", "momentum_eta")})
+                        if task.get("momentum_input_mode", "off") != "off":
+                            statuses[-1].update({key: task[key] for key in
+                                                ("momentum_input_mode", "momentum_input_lookback")})
             for name, parts in frames.items():
                 populated = [p for p in parts if len(p)]
                 if parts:
@@ -425,6 +431,8 @@ def consolidate(run):
             status_columns = ["task_id", "status", "treino", "modelo", "lookback", "pred_len", "loss", "lambda", "delta", "k_dir", "mask_type", "mask_a", "mask_mode", "mask_effective", "mask_shape", "seconds", "erro"]
             if any(t.get("momentum_mode") == "residual_output" for t in plan["tasks"]):
                 status_columns.extend(["momentum_mode", "momentum_lookback", "momentum_eta"])
+            if any(t.get("momentum_input_mode", "off") != "off" for t in plan["tasks"]):
+                status_columns.extend(["momentum_input_mode", "momentum_input_lookback"])
             pd.DataFrame(statuses, columns=status_columns).to_csv(stage/"status_tarefas.csv", index=False)
             counts = {s: sum(x["status"] == s for x in statuses) for s in ("COMPLETA", "PARCIAL", "ERRO", "PENDENTE")}
             state = {"signature": plan["signature"], "contract_signature": plan["contract_signature"],

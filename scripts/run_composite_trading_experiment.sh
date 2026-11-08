@@ -30,6 +30,7 @@ NUM_EPOCHS="${NUM_EPOCHS:-100}"
 BATCH_SIZE="${BATCH_SIZE:-32}"
 PATIENCE="${PATIENCE:-10}"
 LEARNING_RATE="${LEARNING_RATE:-0.0001}"
+VALIDATION_MODE="${VALIDATION_MODE:-}" # ordered_sample_mean: ordem fixa/media por amostra.
 LRADJ="${LRADJ:-}" # Vazio preserva o default de cada modelo; ex.: type1 ou constant.
 TEMPORAL_LOSS="${TEMPORAL_LOSS:-mse}"
 TRAIN_RATIO_IN_TV="${TRAIN_RATIO_IN_TV:-0.875}"   # Validação = 12,5% do bloco anterior ao teste
@@ -76,6 +77,9 @@ MOMENTUM_LOOKBACK="${MOMENTUM_LOOKBACK:-}"
 MOMENTUM_ETA="${MOMENTUM_ETA:-0}"
 MOMENTUM_GAIN_INIT="${MOMENTUM_GAIN_INIT:-0}"
 MOMENTUM_DIAGNOSTICS="${MOMENTUM_DIAGNOSTICS:-0}" # Registros por epoca, somente se ativado.
+# Entrada explicita opt-in (NS): zero e a ablacao pareada; feature usa o momentum.
+MOMENTUM_INPUT_MODE="${MOMENTUM_INPUT_MODE:-off}" # off | zero | feature
+MOMENTUM_INPUT_LOOKBACK="${MOMENTUM_INPUT_LOOKBACK:-}" # Vazio acompanha o LB.
 # Todos os H passos ficam cobertos por blocos completos de K.
 # ListNet não usa delta: pasta/auditoria usam delta=0 e delta_effective=False.
 # Grade padrão: 33.696 tarefas (10.368 por loss de pares; 2.592 para ListNet).
