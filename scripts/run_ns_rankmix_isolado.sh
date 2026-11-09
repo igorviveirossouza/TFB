@@ -336,7 +336,8 @@ train_all() {
             [[ -f "$mark/fingerprint" && $(cat "$mark/fingerprint") == "$fingerprint" ]] || die "Parametros alterados no ramo $branch; use outra EXPERIMENT_TAG."
             [[ -f "$mark/submitted" && -s "$mark/last_job_id" ]] || die "Submissao incerta/parcial em $mark; confira seu log e o Slurm antes de retomar."
             printf 'Ramo %s ja submetido: job %s; preservado.\n' "$branch" "$(cat "$mark/last_job_id")"
-            [[ "$NS_PARALLEL_BRANCHES" == 1 ]] || previous=$(cat "$mark/last_job_id")
+            # Staged callers can avoid dependencies on old IDs already purged by Slurm.
+            [[ "$NS_PARALLEL_BRANCHES" == 1 || "${NS_RESUME_CHAIN_OLD_JOBS:-1}" == 0 ]] || previous=$(cat "$mark/last_job_id")
             continue
         fi
         printf '%s\n' "$fingerprint" > "$mark/fingerprint"
@@ -378,5 +379,5 @@ main() {
       *) die 'Acao desconhecida; use --help.';;
     esac
 }
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then main "$@"; fi
 
