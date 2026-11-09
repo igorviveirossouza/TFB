@@ -256,6 +256,15 @@ def with_meta(frame, task, plan):
                    "slippage_bps": (plan["slippage_bps"], pa.float64()),
                    "cost_bps": (plan["cost_bps"], pa.float64()),
                    "task_signature": (task["task_signature"], pa.string())})
+    if "rank_mix_mode" in task or any("rank_mix_mode" in t for t in plan.get("tasks", [])):
+        # Every task in a mixed plan receives identical Parquet column types,
+        # including standalone controls with null mixture settings.
+        for key in ("weights", "regions"):
+            raw = task.get("rank_mix_" + key)
+            values["rank_mix_" + key] = (
+                json.dumps(raw, separators=(",", ":")) if raw is not None else None, pa.string())
+        values.update({"rank_mix_mode": (task.get("rank_mix_mode"), pa.string()),
+                       "rank_mix_fraction": (task.get("rank_mix_fraction"), pa.float64())})
     if task.get("momentum_mode") == "residual_output":
         state = task["momentum_state"]
         values.update({"momentum_mode": (task["momentum_mode"], pa.string()),
@@ -423,6 +432,11 @@ def consolidate(run):
                         if task.get("momentum_input_mode", "off") != "off":
                             statuses[-1].update({key: task[key] for key in
                                                 ("momentum_input_mode", "momentum_input_lookback")})
+                        if "rank_mix_mode" in task:
+                            statuses[-1].update(rank_mix_mode=task["rank_mix_mode"],
+                                                rank_mix_fraction=task["rank_mix_fraction"],
+                                                rank_mix_weights=json.dumps(task["rank_mix_weights"], separators=(",", ":")),
+                                                rank_mix_regions=json.dumps(task["rank_mix_regions"], separators=(",", ":")))
             for name, parts in frames.items():
                 populated = [p for p in parts if len(p)]
                 if parts:
@@ -433,6 +447,8 @@ def consolidate(run):
                 status_columns.extend(["momentum_mode", "momentum_lookback", "momentum_eta"])
             if any(t.get("momentum_input_mode", "off") != "off" for t in plan["tasks"]):
                 status_columns.extend(["momentum_input_mode", "momentum_input_lookback"])
+            if any("rank_mix_mode" in t for t in plan["tasks"]):
+                status_columns.extend(["rank_mix_mode", "rank_mix_weights", "rank_mix_regions", "rank_mix_fraction"])
             pd.DataFrame(statuses, columns=status_columns).to_csv(stage/"status_tarefas.csv", index=False)
             counts = {s: sum(x["status"] == s for x in statuses) for s in ("COMPLETA", "PARCIAL", "ERRO", "PENDENTE")}
             state = {"signature": plan["signature"], "contract_signature": plan["contract_signature"],
@@ -521,3 +537,4 @@ def run_tasks(args):
                 report(future.result())
     consolidate(run)
     return int(bool(failures))
+

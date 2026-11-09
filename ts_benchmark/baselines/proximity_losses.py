@@ -13,6 +13,7 @@ PROXIMITY_LOSSES = {
     "listnet_proximity": "listnet",
     "listmle_proximity": "listmle",
     "approxndcg_proximity": "approxndcg",
+    "rankmix_proximity": "rankmix",
 }
 
 
@@ -79,3 +80,4 @@ def kernel_parameters(mask) -> tuple:
         "cosine": ("cosine", ()),
     }
     return aliases.get(mask[0], (mask[0], tuple(mask[3:])))
+

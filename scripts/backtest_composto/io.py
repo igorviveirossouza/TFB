@@ -25,13 +25,68 @@ from backtest_cpu.io import digest, load_predictions
 _HASH = re.compile(r"[0-9a-fA-F]{64}")
 _NAME = re.compile(r"[A-Za-z0-9_]+")
 _PROXIMITY = {"hinge_proximity", "ranknet_proximity", "pairwise_mse_proximity", "spearman_proximity",
-              "listnet_proximity", "listmle_proximity", "approxndcg_proximity"}
-_GLOBAL_RANKINGS = {"listnet", "listmle", "approxndcg", "spearman"}
+              "listnet_proximity", "listmle_proximity", "approxndcg_proximity", "rankmix_proximity"}
+_GLOBAL_RANKINGS = {"listnet", "listmle", "approxndcg", "spearman", "rankmix"}
 _LOSSES = {"ranknet", "hinge", "pairwise_mse"} | _GLOBAL_RANKINGS | _PROXIMITY
 _MOMENTUM_KEYS = ("momentum_mode", "momentum_lookback", "momentum_eta",
                   "momentum_gain_init", "momentum_diagnostics")
 _MOMENTUM_INPUT_KEYS = ("momentum_input_mode", "momentum_input_lookback")
+_RANK_MIX_LOSSES = {"rankmix", "rankmix_proximity"}
+_RANK_MIX_FIELDS = ("weights", "mode", "regions", "fraction")
 
+
+def _rank_mix_options(cfg):
+    """Mirror of the pure config validator for self-contained CPU snapshots."""
+    loss = cfg["loss"]
+    return _validate_rank_mix_config(
+        weights=loss.get("loss_rank_mix_weights"),
+        mode=loss.get("loss_rank_mix_mode", "global"),
+        regions=loss.get("loss_rank_mix_regions"),
+        fraction=loss.get("loss_rank_mix_fraction", 1 / 3),
+    )
+
+
+def _validate_rank_mix_config(weights=None, mode="global", regions=None,
+                             fraction=1.0 / 3.0):
+    """Return canonical options without silently normalizing invalid weights.
+
+    Component order is always ListNet, ListMLE, ApproxNDCG. A zero coefficient
+    disables its component. The global mode retains the original losses;
+    regional mode directs each component to its configured realized tail.
+    """
+    if weights is None:
+        weights = (0.5, 0.5, 0.0)
+    if regions is None:
+        regions = ("top", "bottom", "top")
+    if not isinstance(weights, (tuple, list)) or len(weights) != 3:
+        raise ValueError("loss_rank_mix_weights exige 3 pesos: ListNet ListMLE ApproxNDCG.")
+    if any(isinstance(x, bool) or not isinstance(x, Real) for x in weights):
+        raise ValueError("loss_rank_mix_weights exige numeros finitos nao negativos.")
+    try:
+        result_weights = [float(x) for x in weights]
+    except (OverflowError, TypeError, ValueError) as exc:
+        raise ValueError("loss_rank_mix_weights exige numeros finitos nao negativos.") from exc
+    if any(not math.isfinite(x) or x < 0 for x in result_weights):
+        raise ValueError("loss_rank_mix_weights exige numeros finitos nao negativos.")
+    if not math.isclose(math.fsum(result_weights), 1.0, rel_tol=0.0, abs_tol=1e-8):
+        raise ValueError("loss_rank_mix_weights deve somar 1; os pesos nao sao normalizados automaticamente.")
+    if not isinstance(mode, str) or mode.strip().lower() not in ("global", "regional"):
+        raise ValueError("loss_rank_mix_mode deve ser global ou regional.")
+    if not isinstance(regions, (tuple, list)) or len(regions) != 3:
+        raise ValueError("loss_rank_mix_regions exige 3 regioes: top ou bottom.")
+    if any(not isinstance(x, str) or x.strip().lower() not in {"top", "bottom"}
+           for x in regions):
+        raise ValueError("loss_rank_mix_regions aceita somente top e bottom.")
+    if isinstance(fraction, bool) or not isinstance(fraction, Real):
+        raise ValueError("loss_rank_mix_fraction deve ser um numero em (0, 0.5].")
+    try:
+        fraction = float(fraction)
+    except (ValueError, OverflowError) as exc:
+        raise ValueError("loss_rank_mix_fraction deve ser finito em (0, 0.5].") from exc
+    if not math.isfinite(fraction) or not 0 < fraction <= 0.5:
+        raise ValueError("loss_rank_mix_fraction deve estar em (0, 0.5].")
+    return {"weights": result_weights, "mode": mode.strip().lower(),
+            "regions": [x.strip().lower() for x in regions], "fraction": fraction}
 
 def _momentum_options(cfg):
     loss = cfg["loss"]
@@ -230,6 +285,8 @@ def _validate_config(plan, pct, market, source_sha256, path):
         raise ValueError("validation_mode invalido no desenho.")
     if set(cfg["cross_losses"]) & _PROXIMITY:
         _cross_mask(cfg)
+    if set(cfg["cross_losses"]) & _RANK_MIX_LOSSES:
+        _rank_mix_options(cfg)
     _momentum_options(cfg)
     _momentum_input_options(cfg)
     cut = market.n*pct//100
@@ -256,6 +313,9 @@ def _expected_tasks(cfg, pct):
                                         "cross_lambda": float(lam), "cross_delta": float(delta),
                                         "lambda": format(lam, "g"), "delta": format(delta, "g"),
                                         "k_dir": k_dir, "delta_effective": loss not in _GLOBAL_RANKINGS and mask is None})
+                    if loss in _RANK_MIX_LOSSES:
+                        definitions[-1].update({"rank_mix_" + key: value
+                                                for key, value in _rank_mix_options(cfg).items()})
                     if momentum_mode != "off":
                         definitions[-1].update(momentum_mode=momentum_mode,
                                                momentum_lookback=momentum_lb or lookback,
@@ -280,6 +340,11 @@ def _expected_tasks(cfg, pct):
         task["training_array_index"] = offset+i
         path = (Path(f"treino={pct}")/"experimento=composto"/f"loss={task['loss']}"
                 /f"lambda={task['lambda']}"/f"delta={task['delta']}")
+        if task["loss"] in _RANK_MIX_LOSSES:
+            path = (path/f"mix={task['rank_mix_mode']}"
+                    /("weights=" + "_".join(repr(float(x)) for x in task["rank_mix_weights"]))
+                    /("regions=" + "_".join(task["rank_mix_regions"]))
+                    /f"fraction={float(task['rank_mix_fraction'])!r}")
         if task["loss"] in _PROXIMITY:
             path = path/f"mask={task['mask_type']}"/f"a={task['mask_a']!r}"
             if "mask_mode" in task:
@@ -332,6 +397,19 @@ def _validate_row(row, task, cfg, meta, plan, market, cut):
     for key in ("cross_lambda", "cross_delta"):
         if _number(row[key], key) != task[key]:
             raise ValueError(f"Lambda/delta divergente: {identity}")
+    if task["loss"] in _RANK_MIX_LOSSES:
+        for key in _RANK_MIX_FIELDS:
+            name = "rank_mix_" + key
+            raw = row.get(name)
+            try:
+                actual = json.loads(raw) if key in {"weights", "regions"} else (
+                    _number(raw, name) if key == "fraction" else raw)
+            except (TypeError, ValueError) as error:
+                raise ValueError(f"Mistura de ranking invalida na auditoria: {identity}") from error
+            if actual != task[name]:
+                raise ValueError(f"Mistura de ranking divergente na auditoria: {identity}")
+    elif any(row.get("rank_mix_" + key, "") for key in _RANK_MIX_FIELDS):
+        raise ValueError(f"Mistura de ranking ativa fora do desenho: {identity}")
     if task.get("momentum_mode") == "residual_output":
         if (row.get("momentum_mode") != task["momentum_mode"]
                 or _int(row.get("momentum_lookback"), "momentum_lookback") != task["momentum_lookback"]
@@ -377,6 +455,11 @@ def _validate_row(row, task, cfg, meta, plan, market, cut):
     hyper = dict(cfg["model_defaults"][task["modelo"]], **cfg["training"])
     hyper.update(seq_len=task["lookback"], pred_len=horizon, horizon=horizon)
     hyper.update(cfg["loss"])
+    for key in _RANK_MIX_FIELDS:
+        hyper.pop("loss_rank_mix_" + key, None)
+    if task["loss"] in _RANK_MIX_LOSSES:
+        hyper.update({"loss_rank_mix_" + key: task["rank_mix_" + key]
+                      for key in _RANK_MIX_FIELDS})
     for key in _MOMENTUM_KEYS + _MOMENTUM_INPUT_KEYS:
         hyper.pop(key, None)
     if task.get("momentum_mode") == "residual_output":
@@ -618,3 +701,4 @@ def load_composite_predictions(task, market, verify_hash=True):
             or not 1 <= task["corte"] <= task["common_last_origin"] <= market.n-task["pred_len"]):
         raise ValueError("Identidade/origens/K de treino invalidos na tarefa composta.")
     return load_predictions(task, market, verify_hash=verify_hash)
+

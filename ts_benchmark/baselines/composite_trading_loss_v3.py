@@ -48,6 +48,8 @@ from ts_benchmark.baselines.listwise_ranking_losses import (
     validate_temperature, financial_pair_weights, listnet_proximity_loss,
     listmle_loss, approxndcg_loss,
 )
+from ts_benchmark.baselines.ranking_mixture import validate_rank_mix_config
+from ts_benchmark.baselines.hybrid_ranking_losses import ranking_mixture_loss
 
 
 def _scaled_log_weights(log_weights, dtype):
@@ -227,6 +229,10 @@ def build_loss(config, normalizer_mean=None, normalizer_scale=None):
         spearman_tau=float(_cfg(config, "loss_spearman_tau", 1.0)),
         listmle_tau=float(_cfg(config, "loss_listmle_tau", 1.0)),
         approxndcg_tau=float(_cfg(config, "loss_approxndcg_tau", 1.0)),
+        rank_mix_weights=_cfg(config, "loss_rank_mix_weights", None),
+        rank_mix_mode=_cfg(config, "loss_rank_mix_mode", "global"),
+        rank_mix_regions=_cfg(config, "loss_rank_mix_regions", None),
+        rank_mix_fraction=_cfg(config, "loss_rank_mix_fraction", 1.0 / 3.0),
         hinge_margin=float(_cfg(config, "loss_hinge_margin", 0.01)),
         cross_delta=float(_cfg(config, "loss_cross_delta", 0.0)),
         cross_mask=_cfg(config, "loss_cross_mask", None),
@@ -268,6 +274,10 @@ class CompositeTradingLossV3(CompositeTradingLossV2):
         spearman_tau: float = 1.0,
         listmle_tau: float = 1.0,
         approxndcg_tau: float = 1.0,
+        rank_mix_weights=None,
+        rank_mix_mode: str = "global",
+        rank_mix_regions=None,
+        rank_mix_fraction: float = 1.0 / 3.0,
         hinge_margin: float = 0.01,
         cross_delta: float = 0.0,
         cross_mask=None,
@@ -320,7 +330,7 @@ class CompositeTradingLossV3(CompositeTradingLossV2):
             data_kind=data_kind,
             score_kind=score_kind,
             temporal_loss=temporal_loss,
-            cross_loss="ranknet" if base_cross_loss in {"spearman", "listmle", "approxndcg"} else base_cross_loss,
+            cross_loss="ranknet" if base_cross_loss in {"spearman", "listmle", "approxndcg", "rankmix"} else base_cross_loss,
             cross_lambda=cross_lambda,
             cross_scale=cross_scale,
             huber_delta=huber_delta,
@@ -343,6 +353,10 @@ class CompositeTradingLossV3(CompositeTradingLossV2):
         self.spearman_tau = spearman_tau
         self.listmle_tau = listmle_tau
         self.approxndcg_tau = approxndcg_tau
+        # Opt-in: stale or unrelated mixture options cannot change legacy runs.
+        self.rank_mix_config = (validate_rank_mix_config(
+            rank_mix_weights, rank_mix_mode, rank_mix_regions, rank_mix_fraction)
+            if base_cross_loss == "rankmix" else None)
 
     def _normalize_cross_scores(
         self,
@@ -368,6 +382,17 @@ class CompositeTradingLossV3(CompositeTradingLossV2):
         # Delta is evaluated on the realized financial score before z-scoring,
         # so its unit remains the original score unit (e.g. simple return).
         pred_raw, target_raw = self._flatten_blocks(pred_scores, target_scores)
+
+        if self.cross_loss_name in {"rankmix", "rankmix_proximity"}:
+            pred, target = self._normalize_cross_scores(pred_raw, target_raw.detach())
+            weights = None
+            if self.cross_loss_name == "rankmix_proximity":
+                dtype = torch.float32 if pred.dtype in (torch.float16, torch.bfloat16) else pred.dtype
+                weights = financial_pair_weights(target_raw, self.cross_mask, dtype)
+            return ranking_mixture_loss(
+                pred, target_raw, target_values=target, pair_weights=weights,
+                listnet_tau=self.listnet_tau, listmle_tau=self.listmle_tau,
+                approxndcg_tau=self.approxndcg_tau, **self.rank_mix_config)
 
         if self.cross_loss_name in PROXIMITY_LOSSES:
             return self._proximity_cross_loss(pred_raw, target_raw)
@@ -552,3 +577,4 @@ class CompositeTradingLossV3(CompositeTradingLossV2):
                     momentum_lookback=int(momentum_module.lookback),
                 )
         return total
+

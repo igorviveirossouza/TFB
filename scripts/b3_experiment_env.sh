@@ -42,6 +42,12 @@ extra_loss_arguments=()
 [[ -z "${APPROXNDCG_TAU:-}" ]] || extra_loss_arguments+=(loss.loss_approxndcg_tau "$APPROXNDCG_TAU")
 [[ -z "${SPEARMAN_TAU:-}" ]] || extra_loss_arguments+=(loss.loss_spearman_tau "$SPEARMAN_TAU")
 [[ -z "${HUBER_DELTA:-}" ]] || extra_loss_arguments+=(loss.loss_huber_delta "$HUBER_DELTA")
+if [[ "$EXPERIMENT" == composto && " ${CROSS_LOSSES[*]} " =~ [[:space:]]rankmix(_proximity)?[[:space:]] ]]; then
+  extra_loss_arguments+=(loss.loss_rank_mix_weights "${RANK_MIX_WEIGHTS:-0.5 0.5 0}"
+                        loss.loss_rank_mix_mode "${RANK_MIX_MODE:-global}"
+                        loss.loss_rank_mix_regions "${RANK_MIX_REGIONS:-top bottom top}"
+                        loss.loss_rank_mix_fraction "${RANK_MIX_FRACTION:-0.3333333333333333}")
+fi
 
 # Cada valor chega ao Python como argumento separado, sem interpolação em código.
 export B3_INLINE_CONFIG
@@ -75,14 +81,14 @@ import math
 import sys
 
 integer_lists = {'train_percentages', 'lookbacks', 'horizons', 'trade_windows'}
-float_lists = {'lambdas', 'deltas'}
-string_lists = {'models', 'cross_losses'}
+float_lists = {'lambdas', 'deltas', 'loss.loss_rank_mix_weights'}
+string_lists = {'models', 'cross_losses', 'loss.loss_rank_mix_regions'}
 integers = {'var_lags', 'training.num_epochs', 'training.patience',
             'strategy.stride', 'strategy.num_rollings', 'strategy.seed'}
 floats = {'training.lr', 'strategy.train_ratio_in_tv', 'loss.loss_cross_scale',
           'loss.loss_ranknet_alpha', 'loss.loss_listnet_tau', 'loss.loss_hinge_margin',
           'loss.loss_spearman_tau', 'loss.loss_huber_delta',
-          'loss.loss_listmle_tau', 'loss.loss_approxndcg_tau'}
+          'loss.loss_listmle_tau', 'loss.loss_approxndcg_tau', 'loss.loss_rank_mix_fraction'}
 booleans = {'loss.loss_inverse_norm', 'loss.loss_track_components'}
 config = {}
 mask_items = None
@@ -111,12 +117,16 @@ for key, raw in zip(sys.argv[1::2], sys.argv[2::2]):
         value = [int(x) for x in raw.split()]
     elif key in float_lists:
         value = [float(x) for x in raw.split()]
+        if key == 'loss.loss_rank_mix_weights' and any(not math.isfinite(x) for x in value):
+            raise ValueError('loss_rank_mix_weights exige pesos finitos.')
     elif key in string_lists:
         value = raw.split()
     elif key in integers:
         value = int(raw)
     elif key in floats:
         value = float(raw)
+        if key == 'loss.loss_rank_mix_fraction' and not math.isfinite(value):
+            raise ValueError('loss_rank_mix_fraction exige numero finito.')
     elif key in booleans:
         if raw.lower() not in {'true', 'false'}:
             raise ValueError(key + ' deve ser true ou false')
@@ -172,3 +182,4 @@ else:
 print(json.dumps(config, allow_nan=False))
 PY
 )
+

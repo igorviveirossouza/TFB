@@ -30,6 +30,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 from ts_benchmark.baselines.proximity_losses import PROXIMITY_LOSSES, validate_cross_mask
+from ts_benchmark.baselines.ranking_mixture import validate_rank_mix_config
 
 LAUNCHERS = {'temporal': 'run_temporal_experiment.sh',
              'composto': 'run_composite_trading_experiment.sh',
@@ -39,6 +40,19 @@ MOMENTUM_KEYS = ('momentum_mode', 'momentum_lookback', 'momentum_eta',
 MOMENTUM_INPUT_KEYS = ('momentum_input_mode', 'momentum_input_lookback')
 LR_SCHEDULES = {'type1', 'type2', 'type3', 'constant'}
 MOMENTUM_MODELS = {'Nonstationary_Transformer', 'DUET', 'TimesNet', 'FEDformer'}
+RANK_MIX_LOSSES = {'rankmix', 'rankmix_proximity'}
+RANK_MIX_FIELDS = ('weights', 'mode', 'regions', 'fraction')
+
+
+def rank_mix_options(config):
+    """Canonical mixture settings, without importing training/GPU dependencies."""
+    loss = config['loss']
+    return validate_rank_mix_config(
+        weights=loss.get('loss_rank_mix_weights'),
+        mode=loss.get('loss_rank_mix_mode', 'global'),
+        regions=loss.get('loss_rank_mix_regions'),
+        fraction=loss.get('loss_rank_mix_fraction', 1 / 3),
+    )
 
 
 def momentum_options(config):
@@ -143,8 +157,14 @@ def load_config():
         raise ValueError('train_percentages: inteiros entre 1 e 99')
     if set(config['models']) - set(config['model_defaults']):
         raise ValueError('Modelo sem defaults de arquitetura')
-    if set(config['cross_losses']) - ({'mse', 'bpr', 'ranknet', 'hinge', 'listnet', 'pairwise_mse', 'spearman', 'listmle', 'approxndcg'} | set(PROXIMITY_LOSSES)):
+    if set(config['cross_losses']) - ({'mse', 'bpr', 'ranknet', 'hinge', 'listnet', 'pairwise_mse', 'spearman', 'listmle', 'approxndcg'} | RANK_MIX_LOSSES | set(PROXIMITY_LOSSES)):
         raise ValueError('Loss cross não suportada nesta grade')
+    if set(config['cross_losses']) & RANK_MIX_LOSSES:
+        config['loss'].update({'loss_rank_mix_' + key: value
+                               for key, value in rank_mix_options(config).items()})
+    else:
+        for key in RANK_MIX_FIELDS:
+            config['loss'].pop('loss_rank_mix_' + key, None)
     if any(loss in PROXIMITY_LOSSES for loss in config['cross_losses']):
         config['loss']['loss_cross_mask'] = list(validate_cross_mask(
             config['loss'].get('loss_cross_mask')))
@@ -192,7 +212,7 @@ def load_config():
 def cross_deltas(config, loss):
     # ListNet and proximity losses have no pairwise dead zone. Keep one inactive delta
     # for paths/audits, independent of the editable DELTAS vector.
-    return [0] if loss in {'mse', 'listnet', 'listmle', 'approxndcg', 'spearman'} or loss in PROXIMITY_LOSSES else config['deltas']
+    return [0] if loss in {'mse', 'listnet', 'listmle', 'approxndcg', 'spearman', 'rankmix'} or loss in PROXIMITY_LOSSES else config['deltas']
 
 
 def make_tasks(config, mode):
@@ -219,6 +239,9 @@ def make_tasks(config, mode):
                     task = dict(array_index=len(tasks), treino=pct, experimento=mode,
                                 loss=loss, cross_lambda=lam, cross_delta=delta,
                                 modelo=model, lookback=lb, pred_len=horizon, k=k)
+                    if loss in RANK_MIX_LOSSES:
+                        task.update({'rank_mix_' + key: value
+                                     for key, value in rank_mix_options(config).items()})
                     if mode == 'composto' and momentum_mode != 'off':
                         if not 0 < lam <= 1:
                             raise ValueError('Momentum residual exige lambda composto em (0,1]')
@@ -251,6 +274,11 @@ def output_path(task):
     path = group_path(task) / f"loss={task['loss']}" / f'lambda={lam}'
     if task['experimento'] == 'composto':
         path /= f"delta={task['cross_delta']:g}"
+        if task['loss'] in RANK_MIX_LOSSES:
+            path = (path / f"mix={task['rank_mix_mode']}"
+                    / ('weights=' + '_'.join(repr(float(x)) for x in task['rank_mix_weights']))
+                    / ('regions=' + '_'.join(task['rank_mix_regions']))
+                    / f"fraction={float(task['rank_mix_fraction'])!r}")
         if task['loss'] in PROXIMITY_LOSSES:
             # repr preserves distinct float widths; :g would round to six digits.
             path = path / f"mask={task['mask_type']}" / f"a={float(task['mask_a'])!r}"
@@ -287,6 +315,11 @@ def model_spec(config, task):
     # Ordinary MSE is exactly the composite's temporal term. Do not evaluate
     # unused cross scores at lambda=0 (0 * NaN would still contaminate the loss).
     hyper.update(config['loss'])
+    for key in RANK_MIX_FIELDS:
+        hyper.pop('loss_rank_mix_' + key, None)
+    if task['loss'] in RANK_MIX_LOSSES:
+        hyper.update({'loss_rank_mix_' + key: task['rank_mix_' + key]
+                      for key in RANK_MIX_FIELDS})
     # Temporal Huber uses the native criterion's key; its scale must match the
     # composite temporal term exactly in the paired control.
     if task['experimento'] == 'temporal' and config['loss']['loss_temporal'] == 'huber':
@@ -368,14 +401,14 @@ def audit_row(config, task, metadata, out_root, signature):
     paths = task_output_paths(config, task, out_root)
     cut = split_counts(config, task, metadata['n_rows'])['n_pretest']
     cross_blocks = task['pred_len'] // task['k'] if task['k'] is not None else ''
-    return dict(task, **split_counts(config, task, metadata['n_rows']),
+    row = dict(task, **split_counts(config, task, metadata['n_rows']),
                 dataset='log_retornos', data_source=metadata['source'],
                 source_data_kind=metadata.get('source_data_kind', 'price'),
                 step_offset=metadata['step_offset'],
                 source_sha256=metadata['source_sha256'], dataset_sha256=metadata['dataset_sha256'],
                 n_assets=metadata['n_assets'], seed=config['strategy']['seed'],
                 temporal_loss=config['loss']['loss_temporal'],
-                delta_effective=task['experimento'] == 'composto' and task['loss'] not in {'mse', 'listnet', 'listmle', 'approxndcg', 'spearman'} and task['loss'] not in PROXIMITY_LOSSES,
+                delta_effective=task['experimento'] == 'composto' and task['loss'] not in {'mse', 'listnet', 'listmle', 'approxndcg', 'spearman', 'rankmix'} and task['loss'] not in PROXIMITY_LOSSES,
                 mask_type=task.get('mask_type', ''), mask_a=task.get('mask_a', ''),
                 mask_mode=task.get('mask_mode', 'natural') if task['loss'] in PROXIMITY_LOSSES else '',
                 mask_effective=task['loss'] in PROXIMITY_LOSSES,
@@ -390,6 +423,14 @@ def audit_row(config, task, metadata, out_root, signature):
                 strategy_args=json.dumps(strategy_args(config, task, metadata['n_rows']), sort_keys=True),
                 deterministic=deterministic, design_sha256=signature,
                 output_dir=str(out_root / output_path(task)))
+    if set(config['cross_losses']) & RANK_MIX_LOSSES:
+        # Every row in a mixed registry has the same columns. Arrays use JSON,
+        # not Python list repr, so R and CPU consumers can recover the contract.
+        for key in RANK_MIX_FIELDS:
+            name = 'rank_mix_' + key
+            value = task.get(name, '')
+            row[name] = json.dumps(value, separators=(',', ':')) if isinstance(value, list) else value
+    return row
 
 
 def validate_lengths(config, tasks, metadata):
@@ -442,6 +483,9 @@ def provenance(config, metadata):
                   'ts_benchmark/baselines/listwise_ranking_losses.py',
                   'ts_benchmark/baselines/self_impl/VAR/VAR.py',
                   'ts_benchmark/baselines/deep_forecasting_model_base.py']
+    if set(config['cross_losses']) & RANK_MIX_LOSSES:
+        code_files += ['ts_benchmark/baselines/ranking_mixture.py',
+                       'ts_benchmark/baselines/hybrid_ranking_losses.py']
     if momentum_options(config)[0] != 'off':
         code_files += ['ts_benchmark/baselines/momentum_score.py',
                        'ts_benchmark/baselines/momentum_score_io.py']
@@ -784,6 +828,11 @@ def main():
                   'projecao aprendida no encoder; sem soma fixa na saida; previsoes em part.parquet.', flush=True)
         if config['training'].get('validation_mode') == 'ordered_sample_mean':
             print('Validacao: ordem fixa e media ponderada pelo numero de amostras.', flush=True)
+        if set(config['cross_losses']) & RANK_MIX_LOSSES:
+            mixture = rank_mix_options(config)
+            print('Mistura ListNet/ListMLE/ApproxNDCG: '
+                  f"pesos={mixture['weights']}; modo={mixture['mode']}; "
+                  f"regioes={mixture['regions']}; fracao={mixture['fraction']:g}.", flush=True)
         pairs = sum(k <= h and h % k == 0 for h in config['horizons'] for k in config['trade_windows'])
         factors = [len(config[key]) for key in ('train_percentages', 'models', 'lookbacks')]
         variants = sum(len(cross_deltas(config, loss)) for loss in config['cross_losses'])
@@ -821,3 +870,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+

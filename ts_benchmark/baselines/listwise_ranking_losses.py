@@ -86,8 +86,13 @@ def financial_pair_weights(target, mask, dtype):
     realized = target.detach().to(torch.float64)
     gap = (realized.unsqueeze(2) - realized.unsqueeze(1)).abs()
     weights = unscaled_proximity_weights(gap, mask, dtype)
-    diagonal = torch.eye(target.shape[1], device=target.device, dtype=torch.bool)[None]
-    return weights.masked_fill(diagonal, 0)
+    # The financial gap and kernel are mathematically symmetric. Vectorized
+    # transcendental kernels can nevertheless round equal ij/ji arguments
+    # differently in distinct SIMD lanes, especially float64 tail lanes. Use
+    # one canonical value per unordered pair, preserving raw kernel scale and
+    # exact symmetry required by the anchored ApproxNDCG rank construction.
+    upper = torch.triu(weights, diagonal=1)
+    return upper + upper.transpose(1, 2)
 
 
 def _inputs(scores, target, tau, name):
@@ -206,3 +211,4 @@ def approxndcg_loss(scores, target, *, pair_weights=None, tau=1.0):
     values = 1 - dcg / ideal.clamp_min(torch.finfo(scores.dtype).tiny)
     values = torch.where(informative, values, scores.sum(dim=-1) * 0)
     return values.mean()
+
