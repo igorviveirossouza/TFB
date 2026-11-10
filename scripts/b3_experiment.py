@@ -44,6 +44,11 @@ RANK_MIX_LOSSES = {'rankmix', 'rankmix_proximity'}
 RANK_MIX_FIELDS = ('weights', 'mode', 'regions', 'fraction')
 
 
+def task_head_settings(config, task=None):
+    from scripts.itransformer_task_heads import settings
+    return settings(config, task)
+
+
 def rank_mix_options(config):
     """Canonical mixture settings, without importing training/GPU dependencies."""
     loss = config['loss']
@@ -206,6 +211,8 @@ def load_config():
         if not config['loss'].get('momentum_diagnostics', False):
             config['loss'].pop('momentum_diagnostics', None)
     validate_momentum_experiment(config)
+    from scripts.itransformer_task_heads import validate_config as validate_task_heads
+    validate_task_heads(config)
     return path, config
 
 
@@ -340,6 +347,11 @@ def model_spec(config, task):
     hyper.update(loss='composite_trading' if task['experimento'] == 'composto' else config['loss']['loss_temporal'], loss_cross=task['loss'],
                  loss_trade_window=task['k'] or 1,
                  loss_cross_lambda=task['cross_lambda'], loss_cross_delta=task['cross_delta'])
+    heads = task_head_settings(config, task)
+    if heads is not None:
+        hyper.update(task_head_mode=heads['task_head_mode'], rank_windows=heads['rank_windows'],
+                     ranking_construction=heads['ranking_construction'])
+        return 'itransformer_task_heads.ITransformerRestoredTaskAdapter', hyper, None, 'full'
     if name == 'MASTER':
         hyper['seed'] = config['strategy']['seed']
         return 'master.MASTER', hyper, None, 'full'
@@ -430,6 +442,11 @@ def audit_row(config, task, metadata, out_root, signature):
             name = 'rank_mix_' + key
             value = task.get(name, '')
             row[name] = json.dumps(value, separators=(',', ':')) if isinstance(value, list) else value
+    heads = task_head_settings(config, task)
+    if heads is not None:
+        row.update(heads, rank_windows=json.dumps(heads['rank_windows']),
+                   cross_construction='origin_anchored_windows',
+                   cross_blocks='', cross_steps='', cross_tail_steps='')
     return row
 
 
@@ -486,6 +503,17 @@ def provenance(config, metadata):
     if set(config['cross_losses']) & RANK_MIX_LOSSES:
         code_files += ['ts_benchmark/baselines/ranking_mixture.py',
                        'ts_benchmark/baselines/hybrid_ranking_losses.py']
+    if task_head_settings(config) is not None:
+        code_files += ['scripts/itransformer_task_heads.py',
+                       'ts_benchmark/baselines/itransformer_task_heads.py',
+                       'ts_benchmark/baselines/ns_task_heads.py',
+                       'ts_benchmark/baselines/ns_restored_task_heads.py',
+                       'ts_benchmark/baselines/time_series_library/models/iTransformer.py',
+                       'ts_benchmark/baselines/time_series_library/adapters_for_transformers.py',
+                       'ts_benchmark/baselines/time_series_library/layers/Embed.py',
+                       'ts_benchmark/baselines/time_series_library/layers/Transformer_EncDec.py',
+                       'ts_benchmark/baselines/time_series_library/layers/SelfAttention_Family.py',
+                       'ts_benchmark/utils/random_utils.py']
     if momentum_options(config)[0] != 'off':
         code_files += ['ts_benchmark/baselines/momentum_score.py',
                        'ts_benchmark/baselines/momentum_score_io.py']
@@ -597,7 +625,7 @@ def record_completed(directory, row):
         atomic_text(path, csv_text(rows))
 
 
-def record_execution_metadata(paths, parquet_hash, signature):
+def record_execution_metadata(paths, parquet_hash, signature, extra=None):
     """Record the successful worker's host, never the submission/requested node.
 
     Sidecars travel with forecasts copied locally, without changing Parquet or
@@ -614,6 +642,8 @@ def record_execution_metadata(paths, parquet_hash, signature):
         execution[key] = os.environ.get(variable, '')
     for horizon, path in paths.items():
         row = dict(execution, parquet_sha256=hashes[horizon] if hashes is not None else parquet_hash)
+        if extra is not None:
+            row.update(extra)
         atomic_text(path / 'execution_metadata.json', json.dumps(row, indent=2) + '\n')
 
 
@@ -647,6 +677,7 @@ def worker(config, tasks, out_root, index):
     if index < 0 or index >= len(tasks):
         raise ValueError(f'Índice fora da grade: {index}')
     task = tasks[index]
+    heads = task_head_settings(config, task)
     directory = out_root / group_path(task)
     plan = json.loads((directory / 'run_config.json').read_text())
     metadata = plan['metadata']
@@ -659,7 +690,7 @@ def worker(config, tasks, out_root, index):
     output = out_root / output_path(task)
     paths = task_output_paths(config, task, out_root)
     with locked(output / '.task.lock'):
-        parquet = output / 'part.parquet'
+        parquet = output / (heads['primary_file'] if heads is not None else 'part.parquet')
         with locked(directory / '.completed_tasks.lock'):
             with (directory / 'completed_tasks.csv').open(newline='') as f:
                 prior = next((r for r in csv.DictReader(f) if int(r['array_index']) == index), None)
@@ -672,6 +703,9 @@ def worker(config, tasks, out_root, index):
                        file_hash(path/'part.parquet') == prior_hashes.get(h) for h, path in paths.items())
         else:
             finished = bool(prior) and parquet.exists() and file_hash(parquet) == prior['parquet_sha256']
+            if finished and heads is not None:
+                from scripts.itransformer_task_heads import validate_completed
+                finished = validate_completed(output, heads, signature, prior['parquet_sha256'])
         if finished:
             if task.get('momentum_mode') == 'residual_output':
                 from b3_experiment_io import validate_momentum_export
@@ -680,6 +714,7 @@ def worker(config, tasks, out_root, index):
             return
         panel = load_panel(Path(metadata['dataset']))
         split = split_counts(config, task, len(panel))
+        execution_extra = None
         if task['modelo'] == 'VAR':
             import numpy as np
             cut = split['n_pretest']
@@ -693,6 +728,13 @@ def worker(config, tasks, out_root, index):
                                           keep_csv=os.environ.get('MANTER_CSV','FALSE').upper() == 'TRUE',
                                           step_offset=metadata['step_offset'])
             parquet_hash = json.dumps({h:file_hash(path/'part.parquet') for h, path in paths.items()}, sort_keys=True)
+        elif heads is not None:
+            from scripts.itransformer_task_heads import fit_and_export
+            _, hyper, _, _ = model_spec(config, task)
+            print(f'TASK={index}: iTransformer {heads["task_head_mode"]}, janelas={heads["rank_windows"]}: {output}', flush=True)
+            execution_extra = fit_and_export(config, task, hyper, panel, split['n_pretest'], output,
+                                            step_offset=metadata['step_offset'])
+            parquet_hash = execution_extra['files_sha256'][heads['primary_file']]
         else:
             result_root = Path(os.environ.get('RESULT_ROOT', '/snfs2/igor.viveiros/result/b3_new'))
             result_root.mkdir(parents=True, exist_ok=True)
@@ -710,7 +752,7 @@ def worker(config, tasks, out_root, index):
             parquet_hash = file_hash(parquet)
         row = audit_row(config, task, metadata, out_root, signature)
         row.update(slurm_job_id=os.environ.get('SLURM_JOB_ID',''), parquet_sha256=parquet_hash)
-        record_execution_metadata(paths, parquet_hash, signature)
+        record_execution_metadata(paths, parquet_hash, signature, extra=execution_extra)
         record_completed(directory, row)
         print(f'OK: {len(paths)} arquivo(s) Parquet em {directory}', flush=True)
 
