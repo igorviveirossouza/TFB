@@ -58,6 +58,8 @@ def positive(name, default, cast=float):
 
 
 def configuration(study):
+    if study not in {'capacity', 'heads', 'heads_restored'}:
+        raise ValueError('Estudo invalido')
     if os.environ.get('MODEL', 'Nonstationary_Transformer') != 'Nonstationary_Transformer':
         raise ValueError('Este estudo arquitetural e exclusivo do Nonstationary_Transformer')
     if any(os.environ.get(k, 'off') != 'off' for k in ['MOMENTUM_MODE', 'MOMENTUM_INPUT_MODE']):
@@ -85,6 +87,8 @@ def configuration(study):
             raise ValueError('d_model deve ser divisivel por n_heads; dropout em [0,1)')
         if 'rank_head_width' in profile and (type(profile['rank_head_width']) is not int or profile['rank_head_width'] <= 0):
             raise ValueError('rank_head_width deve ser inteiro positivo')
+        if study == 'heads_restored' and 'rank_head_width' in profile:
+            raise ValueError('heads_restored usa projecoes lineares equivalentes; remova rank_head_width')
     if len({signature(x) for x in profiles.values()}) != len(profiles):
         raise ValueError('Perfis de capacidade duplicados')
     weights = [float(x) for x in os.environ.get('RANK_MIX_WEIGHTS', '.5 .5 0').split()]
@@ -125,9 +129,9 @@ def configuration(study):
         raise ValueError('Loss temporal ou corte invalido')
     if any(not 0 <= s <= 4294967295 for s in axes['seeds']):
         raise ValueError('Seed fora do intervalo uint32')
-    if study == 'heads' and axes['k_loss'] != [1]:
+    if study in {'heads', 'heads_restored'} and axes['k_loss'] != [1]:
         raise ValueError('Em heads use RANK_WINDOWS_VALUES; K_LOSS_VALUES deve permanecer 1')
-    head_modes = words('TASK_HEAD_MODES', 'shared separate') if study == 'heads' else ['shared']
+    head_modes = words('TASK_HEAD_MODES', 'shared separate') if study in {'heads', 'heads_restored'} else ['shared']
     if set(head_modes) - {'shared', 'separate'}:
         raise ValueError('TASK_HEAD_MODES: shared/separate')
     training = dict(batch_size=positive('NS_BATCH_SIZE', '16', int), num_epochs=positive('NS_NUM_EPOCHS', '100', int),
@@ -148,8 +152,11 @@ def configuration(study):
                      loss_hinge_margin=positive('NS_HINGE_MARGIN', '.1'), momentum_mode='off', momentum_input_mode='off')
     if loss_args['loss_score_kind'] not in {'simple_return', 'log_return'} or loss_args['loss_cross_score_normalization'] not in {'zscore', 'none'}:
         raise ValueError('Score kind/normalization invalido')
-    return dict(schema_version=1, study=study, profiles=profiles, **axes, cross_losses=losses,
+    config = dict(schema_version=1, study=study, profiles=profiles, **axes, cross_losses=losses,
                 mix_modes=modes, head_modes=head_modes, training=training, loss_args=loss_args, validation_ratio=ratio)
+    if study == 'heads_restored':
+        config.update(schema_version=2, ranking_construction='restored_daily_projection_v1')
+    return config
 
 
 def tasks(config):
@@ -167,6 +174,8 @@ def tasks(config):
                 row = dict(capacity=capacity, seed=seed, treino=train, lookback=lb, pred_len=h,
                            lambda_value=lam, temporal_loss=temporal, loss=loss, mix_mode=mode, k_loss=k,
                            head_mode=head, rank_windows=windows, architecture=config['profiles'][capacity])
+                if config['study'] == 'heads_restored':
+                    row['ranking_construction'] = config['ranking_construction']
                 row['fit_id'] = signature(row)[:20]
                 out.append(row)
     if len({r['fit_id'] for r in out}) != len(out):
@@ -304,7 +313,11 @@ def run_worker(plan_path, index):
         panel.index = pd.date_range('2000-01-02', periods=len(panel), freq='D', name='date')
         cut = len(panel) * task['treino'] // 100
         options = model_options(cfg, task)
-        model = NSTaskAdapter(study=cfg['study'], head_mode=task['head_mode'], rank_windows=task['rank_windows'], **options)
+        adapter_class = NSTaskAdapter
+        if cfg['study'] == 'heads_restored':
+            from ts_benchmark.baselines.ns_restored_task_heads import NSRestoredTaskAdapter
+            adapter_class = NSRestoredTaskAdapter
+        model = adapter_class(study=cfg['study'], head_mode=task['head_mode'], rank_windows=task['rank_windows'], **options)
         model.forecast_fit(panel.iloc[:cut], train_ratio_in_tv=cfg['validation_ratio'])
         h, lb = task['pred_len'], task['lookback']
         valid_returns = task['head_mode'] != 'separate' or task['lambda_value'] < 1
@@ -346,9 +359,12 @@ def run_worker(plan_path, index):
         checkpoint_path = dest / 'checkpoint.pt.tmp'
         torch.save(dict(state_dict=model.check_point, scaler=scaler, options=options, task=task), checkpoint_path)
         os.replace(checkpoint_path, dest / 'checkpoint.pt'); files['checkpoint.pt'] = sha(dest / 'checkpoint.pt')
+        semantics = 'direct_window_score' if rankings else 'cumulative_log_return'
+        if rankings and cfg['study'] == 'heads_restored':
+            semantics = 'cumulative_' + cfg['loss_args']['loss_score_kind']
         atomic_json(record_path, dict(task=task, design_sha256=plan['design_sha256'], files_sha256=files,
             parameter_count=sum(p.numel() for p in model.model.parameters()), return_forecast_valid=valid_returns,
-            score_semantics='direct_window_score' if rankings else 'cumulative_log_return',
+            score_semantics=semantics,
             host=socket.gethostname(), slurm_job_id=os.environ.get('SLURM_JOB_ID'), slurm_node=os.environ.get('SLURMD_NODENAME'),
             torch_version=torch.__version__, device=torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'cpu',
             scaler=scaler, effective_options=options))
@@ -357,7 +373,7 @@ def run_worker(plan_path, index):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--study', choices=['capacity', 'heads'])
+    parser.add_argument('--study', choices=['capacity', 'heads', 'heads_restored'])
     parser.add_argument('--plan', action='store_true'); parser.add_argument('--train', action='store_true')
     parser.add_argument('--worker'); parser.add_argument('--offset', type=int, default=0)
     parser.add_argument('--index', type=int)
@@ -373,6 +389,9 @@ def main():
     print('Momentum externo; lambda=0 compartilhado entre losses/modos; lambda=1 compartilhado entre losses temporais.', flush=True)
     print('Arquiteturas:', json.dumps(config['profiles']), flush=True)
     if args.study == 'heads': print('Janelas supervisionadas por origem:', config['rank_windows'], '(filtradas por H); escores diretos, sem soma de escores.', flush=True)
+    if args.study == 'heads_restored':
+        print('Projecoes lineares com mesma inicializacao; media/desvio por ativo restaurados nas duas saidas.', flush=True)
+        print('Janelas supervisionadas por origem:', config['rank_windows'], '(filtradas por H); acumulacao apos restauracao das duas normalizacoes.', flush=True)
     tag = os.environ.get('EXPERIMENT_TAG', f'isolados/ns_{args.study}_t80_v1')
     if not re.fullmatch('[A-Za-z0-9][A-Za-z0-9_./=-]*', tag) or '..' in tag or '//' in tag or tag.endswith('/'):
         raise ValueError('EXPERIMENT_TAG invalida')
