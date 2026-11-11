@@ -38,6 +38,13 @@ fi
 
 # Optional knobs stay absent from legacy configurations and cache identities.
 extra_loss_arguments=()
+# Explicit opt-in: absent variables must not change historical frozen configs.
+if [[ ${CROSS_CONSTRUCTION+x} ]]; then
+  extra_loss_arguments+=(loss.loss_cross_construction "$CROSS_CONSTRUCTION")
+fi
+if [[ ${RANK_WINDOWS+x} ]]; then
+  extra_loss_arguments+=(loss.loss_rank_windows "$RANK_WINDOWS")
+fi
 [[ -z "${LISTMLE_TAU:-}" ]] || extra_loss_arguments+=(loss.loss_listmle_tau "$LISTMLE_TAU")
 [[ -z "${APPROXNDCG_TAU:-}" ]] || extra_loss_arguments+=(loss.loss_approxndcg_tau "$APPROXNDCG_TAU")
 [[ -z "${SPEARMAN_TAU:-}" ]] || extra_loss_arguments+=(loss.loss_spearman_tau "$SPEARMAN_TAU")
@@ -80,7 +87,8 @@ import json
 import math
 import sys
 
-integer_lists = {'train_percentages', 'lookbacks', 'horizons', 'trade_windows'}
+integer_lists = {'train_percentages', 'lookbacks', 'horizons', 'trade_windows',
+                 'loss.loss_rank_windows'}
 float_lists = {'lambdas', 'deltas', 'loss.loss_rank_mix_weights'}
 string_lists = {'models', 'cross_losses', 'loss.loss_rank_mix_regions'}
 integers = {'var_lags', 'training.num_epochs', 'training.patience',

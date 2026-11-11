@@ -6,6 +6,10 @@ aggregates financially meaningful block scores of length K and only then
 standardizes each block across the N assets. K must divide H exactly, so the
 cross-sectional blocks cover the complete forecast horizon without a remainder.
 
+Opt-in ``origin_anchored_windows`` instead ranks cumulative prefixes of the
+same forecast path (e.g. its first 1, 5 and 25 days), equally weighted. It is
+architecture independent and preserves the existing block objective by default.
+
 For each batch element b and trading block j:
     Z[b,j,i] = (S[b,j,i] - mean_i S[b,j,i]) / std_i S[b,j,i]
 
@@ -205,6 +209,9 @@ def build_loss(config, normalizer_mean=None, normalizer_scale=None):
     inverse_norm = _as_bool(_cfg(config, "loss_inverse_norm", True)) and _as_bool(
         _cfg(config, "norm", False)
     )
+    if (_cfg(config, "loss_cross_construction", "blocks") == "origin_anchored_windows"
+            and _as_bool(_cfg(config, "norm", False)) and not inverse_norm):
+        raise ValueError("origin_anchored_windows exige loss_inverse_norm=True quando norm=True.")
 
     # Backward-compatible fallback: old experiments used loss_rank_score_normalization.
     cross_score_normalization = str(
@@ -242,6 +249,8 @@ def build_loss(config, normalizer_mean=None, normalizer_scale=None):
         normalizer_scale=normalizer_scale,
         track_components=_as_bool(_cfg(config, "loss_track_components", False)),
         momentum_mode=momentum["mode"],
+        cross_construction=str(_cfg(config, "loss_cross_construction", "blocks")),
+        rank_windows=_cfg(config, "loss_rank_windows", None),
     )
 
 
@@ -255,7 +264,9 @@ class CompositeTradingLossV3(CompositeTradingLossV2):
     """V2 objective with one normalization rule for every cross loss.
 
     Financial scores S are always built first. Then each [N]-asset score vector
-    is optionally standardized independently inside its batch/trading block.
+    is optionally standardized independently inside its batch/trading window.
+    ``blocks`` retains the historical disjoint aggregation; the opt-in
+    ``origin_anchored_windows`` matches the restored shared-head experiment.
     """
 
     def __init__(
@@ -288,8 +299,24 @@ class CompositeTradingLossV3(CompositeTradingLossV2):
         track_components: bool = False,
         eps: float = 1e-8,
         momentum_mode: str = "off",
+        cross_construction: str = "blocks",
+        rank_windows=None,
     ) -> None:
         momentum_mode = str(momentum_mode).lower()
+        if cross_construction not in {"blocks", "origin_anchored_windows"}:
+            raise ValueError("loss_cross_construction deve ser blocks ou origin_anchored_windows.")
+        if cross_construction == "origin_anchored_windows":
+            if str(data_kind).lower() not in LOG_RETURN_KINDS:
+                raise ValueError("origin_anchored_windows exige dados em log-retornos.")
+            if momentum_mode != "off":
+                raise ValueError("origin_anchored_windows exige momentum_mode=off.")
+            if trade_window != 1:
+                raise ValueError("origin_anchored_windows exige K_loss=1; use loss_rank_windows para as janelas.")
+            if (not isinstance(rank_windows, (list, tuple)) or not rank_windows
+                    or any(type(k) is not int or k < 1 for k in rank_windows)
+                    or len(set(rank_windows)) != len(rank_windows)):
+                raise ValueError("loss_rank_windows exige uma lista nao vazia de inteiros positivos unicos.")
+            canonical_score_kind(score_kind)
         if momentum_mode not in {"off", "residual_output"}:
             raise ValueError("momentum_mode deve ser off ou residual_output.")
         if momentum_mode == "residual_output":
@@ -350,6 +377,9 @@ class CompositeTradingLossV3(CompositeTradingLossV2):
         self.cross_mask = proximity_mask
         self.cross_score_normalization = normalization
         self.momentum_mode = momentum_mode
+        self.cross_construction = cross_construction
+        # Inactive options must not change the legacy blocks calculation.
+        self.rank_windows = tuple(rank_windows) if cross_construction == "origin_anchored_windows" else ()
         self.spearman_tau = spearman_tau
         self.listmle_tau = listmle_tau
         self.approxndcg_tau = approxndcg_tau
@@ -519,6 +549,56 @@ class CompositeTradingLossV3(CompositeTradingLossV2):
         denominator = weights.sum(dim=1).clamp_min(1.0)
         return ((weights * values).sum(dim=1) / denominator).mean()
 
+    def _forward_origin_windows(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        """Rank equally weighted cumulative windows starting at each origin.
+
+        This is the shared-head objective used by NSTaskAdapter, expressed as
+        a loss so any native forecasting architecture can use it. The temporal
+        target remains the complete model-space path. Ranking uses restored
+        economic log returns; a window K never observes target steps after K.
+        """
+        if pred.ndim != 3 or pred.shape[1] < 1:
+            raise ValueError("origin_anchored_windows exige tensores [B,H,N] com H positivo.")
+        windows = tuple(k for k in self.rank_windows if k <= pred.shape[1])
+        if not windows:
+            raise ValueError("Nenhuma loss_rank_windows cabe no horizonte H.")
+
+        temporal = cross = None
+        if self.cross_lambda != 1.0:
+            temporal = self._temporal_loss(pred, target)
+        if self.cross_lambda != 0.0:
+            raw_pred = self.aggregator._maybe_inverse_norm(pred)
+            raw_target = self.aggregator._maybe_inverse_norm(target)
+            scores, labels = [], []
+            for k in windows:
+                score = raw_pred[:, :k].sum(1)
+                label = raw_target[:, :k].sum(1)
+                if canonical_score_kind(self.aggregator.score_kind) == "simple_return":
+                    score, label = torch.expm1(score), torch.expm1(label)
+                scores.append(score)
+                labels.append(label)
+            cross = self._cross_loss(torch.stack(scores, 1), torch.stack(labels, 1))
+
+        if self.cross_lambda == 0.0:
+            total = temporal
+        elif self.cross_lambda == 1.0:
+            total = self.cross_scale * cross
+        else:
+            total = (1.0 - self.cross_lambda) * temporal + self.cross_lambda * self.cross_scale * cross
+        if self.track_components:
+            # None denotes an inactive objective, not an artificially zero error.
+            self.last_components = {
+                "temporal": None if temporal is None else float(temporal.detach().cpu()),
+                "cross": None if cross is None else float(cross.detach().cpu()),
+                "cross_scaled": None if cross is None else float((self.cross_scale * cross).detach().cpu()),
+                "total": float(total.detach().cpu()),
+                "H": int(pred.shape[1]), "K": 1, "n_assets": int(pred.shape[2]),
+                "cross_construction": self.cross_construction,
+                "rank_windows": list(windows), "n_rank_windows": len(windows),
+                "cross_active": self.cross_lambda != 0.0,
+            }
+        return total
+
     def forward(
         self,
         pred: torch.Tensor,
@@ -536,6 +616,9 @@ class CompositeTradingLossV3(CompositeTradingLossV2):
                 raise ValueError("Contexto momentum fornecido com momentum_mode=off.")
         elif momentum_history is None or momentum_module is None:
             raise ValueError("Momentum habilitado exige momentum_history e momentum_module.")
+
+        if self.cross_construction == "origin_anchored_windows":
+            return self._forward_origin_windows(pred, target)
 
         temporal = self._temporal_loss(pred, target)
         pred_scores, target_scores = self.aggregator(

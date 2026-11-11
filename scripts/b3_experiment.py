@@ -42,6 +42,53 @@ LR_SCHEDULES = {'type1', 'type2', 'type3', 'constant'}
 MOMENTUM_MODELS = {'Nonstationary_Transformer', 'DUET', 'TimesNet', 'FEDformer'}
 RANK_MIX_LOSSES = {'rankmix', 'rankmix_proximity'}
 RANK_MIX_FIELDS = ('weights', 'mode', 'regions', 'fraction')
+RANKING_PROTOCOL_FIELDS = ('loss_cross_construction', 'loss_rank_windows')
+
+
+def ranking_protocol_settings(config, task=None):
+    """Validate the opt-in shared-output objective, without importing Torch.
+
+    Missing protocol fields retain the legacy configuration and task identities.
+    Origin windows are prefix sums, not the native disjoint K-day blocks.
+    """
+    loss = config['loss']
+    if not any(key in loss for key in RANKING_PROTOCOL_FIELDS):
+        return None
+    construction = loss.get('loss_cross_construction')
+    if not isinstance(construction, str) or construction not in {'blocks', 'origin_anchored_windows'}:
+        raise ValueError('CROSS_CONSTRUCTION deve ser blocks ou origin_anchored_windows')
+    windows = loss.get('loss_rank_windows', [])
+    if (not isinstance(windows, list) or any(type(k) is not int or k < 1 for k in windows)
+            or len(windows) != len(set(windows))):
+        raise ValueError('RANK_WINDOWS exige inteiros positivos unicos')
+    if construction == 'blocks':
+        if windows:
+            raise ValueError('RANK_WINDOWS nao se aplica a blocks; use TRADE_WINDOWS/K_LOSS_VALUES')
+    else:
+        if not windows or any(not any(k <= h for k in windows) for h in config['horizons']):
+            raise ValueError('Cada H precisa de ao menos uma janela de RANK_WINDOWS <= H')
+        if any(k != 1 for k in config['trade_windows']):
+            raise ValueError('origin_anchored_windows exige K_LOSS_VALUES=1; use RANK_WINDOWS')
+        if (config.get('source_data_kind', 'log_return') != 'log_return'
+                or loss.get('loss_data_kind', 'log_return') != 'log_return'):
+            raise ValueError('origin_anchored_windows exige dados log_return')
+        if (not loss.get('loss_inverse_norm', True)
+                and any(config['model_defaults'].get(model, {}).get('norm', True)
+                        for model in config['models'])):
+            raise ValueError('origin_anchored_windows com norm=True exige loss_inverse_norm=True '
+                             'para supervisionar retornos economicos')
+        if loss.get('momentum_mode', 'off') != 'off' or loss.get('momentum_input_mode', 'off') != 'off':
+            raise ValueError('origin_anchored_windows exige momentum somente como benchmark externo')
+        if any('task_head_mode' in config['model_defaults'].get(model, {})
+               for model in config['models']):
+            raise ValueError('origin_anchored_windows usa adaptadores nativos; nao combine task_head_mode')
+    result = dict(cross_construction=construction, rank_windows=list(windows))
+    if task is not None:
+        active = task['experimento'] == 'composto' and task['cross_lambda'] > 0
+        result['ranking_supervision_active'] = active
+        result['rank_windows'] = ([k for k in windows if k <= task['pred_len']]
+                                  if active else [])
+    return result
 
 
 def task_head_settings(config, task=None):
@@ -211,6 +258,7 @@ def load_config():
         if not config['loss'].get('momentum_diagnostics', False):
             config['loss'].pop('momentum_diagnostics', None)
     validate_momentum_experiment(config)
+    ranking_protocol_settings(config)
     from scripts.itransformer_task_heads import validate_config as validate_task_heads
     validate_task_heads(config)
     return path, config
@@ -223,6 +271,7 @@ def cross_deltas(config, loss):
 
 
 def make_tasks(config, mode):
+    ranking_protocol_settings(config)
     momentum_mode, momentum_lb, momentum_eta = momentum_options(config)
     input_mode, input_lb = momentum_input_options(config)
     if mode == 'composto':
@@ -268,6 +317,9 @@ def make_tasks(config, mode):
                             task['mask_mode'] = mask[2]
                         if len(mask) > 3:
                             task['mask_shape'] = list(mask[3:])
+                    protocol = ranking_protocol_settings(config, task)
+                    if protocol is not None:
+                        task.update(protocol)
                     tasks.append(task)
     return tasks
 
@@ -442,6 +494,11 @@ def audit_row(config, task, metadata, out_root, signature):
             name = 'rank_mix_' + key
             value = task.get(name, '')
             row[name] = json.dumps(value, separators=(',', ':')) if isinstance(value, list) else value
+    protocol = ranking_protocol_settings(config, task)
+    if protocol is not None:
+        row.update(protocol, rank_windows=json.dumps(protocol['rank_windows']))
+        if protocol['cross_construction'] == 'origin_anchored_windows':
+            row.update(cross_blocks='', cross_steps='', cross_tail_steps='')
     heads = task_head_settings(config, task)
     if heads is not None:
         row.update(heads, rank_windows=json.dumps(heads['rank_windows']),
@@ -714,7 +771,7 @@ def worker(config, tasks, out_root, index):
             return
         panel = load_panel(Path(metadata['dataset']))
         split = split_counts(config, task, len(panel))
-        execution_extra = None
+        execution_extra = ranking_protocol_settings(config, task)
         if task['modelo'] == 'VAR':
             import numpy as np
             cut = split['n_pretest']
@@ -856,6 +913,14 @@ def main():
     if args.mode == 'var':
         print(f'Um ajuste por corte; os horizontes saem do mesmo VAR: {config["horizons"]}.', flush=True)
     if args.mode == 'composto':
+        protocol = ranking_protocol_settings(config)
+        if protocol is not None:
+            if protocol['cross_construction'] == 'origin_anchored_windows':
+                print('Ranking: origin_anchored_windows; somas desde a origem; '
+                      f"janelas={protocol['rank_windows']} filtradas por K<=H no mesmo treino; "
+                      'K_loss=1 e identificador neutro.', flush=True)
+            else:
+                print('Ranking: blocks; blocos futuros disjuntos de K_loss pregoes.', flush=True)
         if momentum_options(config)[0] != 'off':
             _, lookback, eta = momentum_options(config)
             print(f'Momentum residual: LB={lookback or "LB do modelo"}; eta={eta:g}; '
