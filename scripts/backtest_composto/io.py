@@ -33,6 +33,7 @@ _MOMENTUM_KEYS = ("momentum_mode", "momentum_lookback", "momentum_eta",
 _MOMENTUM_INPUT_KEYS = ("momentum_input_mode", "momentum_input_lookback")
 _RANK_MIX_LOSSES = {"rankmix", "rankmix_proximity"}
 _RANK_MIX_FIELDS = ("weights", "mode", "regions", "fraction")
+_RANK_MIX_PROXIMITY_KEY = "loss_rank_mix_proximity_components"
 
 
 def _rank_mix_options(cfg):
@@ -44,6 +45,63 @@ def _rank_mix_options(cfg):
         regions=loss.get("loss_rank_mix_regions"),
         fraction=loss.get("loss_rank_mix_fraction", 1 / 3),
     )
+
+
+def _rank_mix_proximity_options(cfg):
+    """Mirror the optional selector without changing historical CPU identities."""
+    if "rankmix_proximity" not in cfg["cross_losses"]:
+        return None
+    names = ("listnet", "listmle", "approxndcg")
+    raw = cfg["loss"].get(_RANK_MIX_PROXIMITY_KEY)
+    if raw is None:
+        return None
+    if (not isinstance(raw, (list, tuple)) or not raw
+            or any(not isinstance(x, str) or x.strip().lower() not in names for x in raw)):
+        raise ValueError("loss_rank_mix_proximity_components exige lista nao vazia de componentes validos.")
+    selected = [x.strip().lower() for x in raw]
+    if len(selected) != len(set(selected)):
+        raise ValueError("loss_rank_mix_proximity_components nao aceita componentes repetidos.")
+    canonical = [name for name in names if name in selected]
+    return None if canonical == list(names) else canonical
+
+
+def _ranking_protocol_settings(cfg, task=None):
+    """CPU copy of the producer's optional native shared-output contract."""
+    loss = cfg['loss']
+    if not any(key in loss for key in ('loss_cross_construction', 'loss_rank_windows')):
+        return None
+    construction = loss.get('loss_cross_construction')
+    if not isinstance(construction, str) or construction not in {'blocks', 'origin_anchored_windows'}:
+        raise ValueError('CROSS_CONSTRUCTION deve ser blocks ou origin_anchored_windows')
+    windows = loss.get('loss_rank_windows', [])
+    if (not isinstance(windows, list) or any(type(k) is not int or k < 1 for k in windows)
+            or len(windows) != len(set(windows))):
+        raise ValueError('RANK_WINDOWS exige inteiros positivos unicos')
+    if construction == 'blocks':
+        if windows:
+            raise ValueError('RANK_WINDOWS nao se aplica a blocks; use TRADE_WINDOWS/K_LOSS_VALUES')
+    else:
+        if not windows or any(not any(k <= h for k in windows) for h in cfg['horizons']):
+            raise ValueError('Cada H precisa de ao menos uma janela de RANK_WINDOWS <= H')
+        if any(k != 1 for k in cfg['trade_windows']):
+            raise ValueError('origin_anchored_windows exige K_LOSS_VALUES=1; use RANK_WINDOWS')
+        if (cfg.get('source_data_kind', 'log_return') != 'log_return'
+                or loss.get('loss_data_kind', 'log_return') != 'log_return'):
+            raise ValueError('origin_anchored_windows exige dados log_return')
+        if (not loss.get('loss_inverse_norm', True)
+                and any(cfg['model_defaults'].get(model, {}).get('norm', True)
+                        for model in cfg['models'])):
+            raise ValueError('origin_anchored_windows com norm=True exige loss_inverse_norm=True')
+        if loss.get('momentum_mode', 'off') != 'off' or loss.get('momentum_input_mode', 'off') != 'off':
+            raise ValueError('origin_anchored_windows exige momentum somente como benchmark externo')
+        if any('task_head_mode' in cfg['model_defaults'].get(model, {}) for model in cfg['models']):
+            raise ValueError('origin_anchored_windows usa adaptadores nativos; nao combine task_head_mode')
+    result = dict(cross_construction=construction, rank_windows=list(windows))
+    if task is not None:
+        active = task['experimento'] == 'composto' and task['cross_lambda'] > 0
+        result['ranking_supervision_active'] = active
+        result['rank_windows'] = [k for k in windows if k <= task['pred_len']] if active else []
+    return result
 
 
 def _validate_rank_mix_config(weights=None, mode="global", regions=None,
@@ -287,6 +345,8 @@ def _validate_config(plan, pct, market, source_sha256, path):
         _cross_mask(cfg)
     if set(cfg["cross_losses"]) & _RANK_MIX_LOSSES:
         _rank_mix_options(cfg)
+    _rank_mix_proximity_options(cfg)
+    _ranking_protocol_settings(cfg)
     _momentum_options(cfg)
     _momentum_input_options(cfg)
     cut = market.n*pct//100
@@ -299,6 +359,8 @@ def _validate_config(plan, pct, market, source_sha256, path):
 def _expected_tasks(cfg, pct):
     """Mesma ordem/identidade de b3_experiment.make_tasks; nenhuma dependencia GPU."""
     definitions = []
+    proximity_components = _rank_mix_proximity_options(cfg)
+    _ranking_protocol_settings(cfg)
     momentum_mode, momentum_lb, momentum_eta = _momentum_options(cfg)
     input_mode, input_lb = _momentum_input_options(cfg)
     for loss in cfg["cross_losses"]:
@@ -316,6 +378,8 @@ def _expected_tasks(cfg, pct):
                     if loss in _RANK_MIX_LOSSES:
                         definitions[-1].update({"rank_mix_" + key: value
                                                 for key, value in _rank_mix_options(cfg).items()})
+                    if loss == "rankmix_proximity" and proximity_components is not None:
+                        definitions[-1]["rank_mix_proximity_components"] = list(proximity_components)
                     if momentum_mode != "off":
                         definitions[-1].update(momentum_mode=momentum_mode,
                                                momentum_lookback=momentum_lb or lookback,
@@ -333,6 +397,9 @@ def _expected_tasks(cfg, pct):
                             definitions[-1]["mask_mode"] = mask[2]
                         if len(mask) > 3:
                             definitions[-1]["mask_shape"] = list(mask[3:])
+                    protocol = _ranking_protocol_settings(cfg, definitions[-1])
+                    if protocol is not None:
+                        definitions[-1].update(protocol)
     if not definitions:
         raise ValueError("Grade composta sem pares H/K de treino elegiveis.")
     offset = cfg["train_percentages"].index(pct)*len(definitions)
@@ -345,6 +412,8 @@ def _expected_tasks(cfg, pct):
                     /("weights=" + "_".join(repr(float(x)) for x in task["rank_mix_weights"]))
                     /("regions=" + "_".join(task["rank_mix_regions"]))
                     /f"fraction={float(task['rank_mix_fraction'])!r}")
+            if task["loss"] == "rankmix_proximity" and task.get("rank_mix_proximity_components"):
+                path /= "proximity_on=" + "_".join(task["rank_mix_proximity_components"])
         if task["loss"] in _PROXIMITY:
             path = path/f"mask={task['mask_type']}"/f"a={task['mask_a']!r}"
             if "mask_mode" in task:
@@ -385,6 +454,22 @@ def _validate_row(row, task, cfg, meta, plan, market, cut):
                     "cross_blocks": task["pred_len"]//task["k_dir"], "cross_steps": task["pred_len"],
                     "cross_tail_steps": 0}
     expected_int["n_validation"] = cut-expected_int["n_train"]
+    protocol = _ranking_protocol_settings(cfg, task)
+    if protocol is not None:
+        try:
+            actual_windows = json.loads(row.get('rank_windows', ''))
+        except (TypeError, ValueError) as error:
+            raise ValueError(f'Janelas de ranking invalidas na auditoria: {identity}') from error
+        if (actual_windows != protocol['rank_windows']
+                or row.get('cross_construction') != protocol['cross_construction']
+                or row.get('ranking_supervision_active', '').lower()
+                != str(protocol['ranking_supervision_active']).lower()):
+            raise ValueError(f'Protocolo de ranking divergente na auditoria: {identity}')
+        if protocol['cross_construction'] == 'origin_anchored_windows':
+            for key in ('cross_blocks', 'cross_steps', 'cross_tail_steps'):
+                expected_int.pop(key)
+                if row.get(key, ''):
+                    raise ValueError(f'Blocos incompatíveis com janelas na origem: {identity}')
     if any(_int(row[key], key) != value for key, value in expected_int.items()):
         raise ValueError(f"Dimensoes/corte/identidade inconsistentes: {identity}")
     expected_text = {"experimento": "composto", "dataset": "log_retornos", "source_data_kind": "log_return",
@@ -410,6 +495,16 @@ def _validate_row(row, task, cfg, meta, plan, market, cut):
                 raise ValueError(f"Mistura de ranking divergente na auditoria: {identity}")
     elif any(row.get("rank_mix_" + key, "") for key in _RANK_MIX_FIELDS):
         raise ValueError(f"Mistura de ranking ativa fora do desenho: {identity}")
+    selector = row.get("rank_mix_proximity_components", "")
+    if "rank_mix_proximity_components" in task:
+        try:
+            actual = json.loads(selector)
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"Proximity seletiva invalida na auditoria: {identity}") from error
+        if actual != task["rank_mix_proximity_components"]:
+            raise ValueError(f"Proximity seletiva divergente na auditoria: {identity}")
+    elif selector:
+        raise ValueError(f"Proximity seletiva ativa fora do desenho: {identity}")
     if task.get("momentum_mode") == "residual_output":
         if (row.get("momentum_mode") != task["momentum_mode"]
                 or _int(row.get("momentum_lookback"), "momentum_lookback") != task["momentum_lookback"]
@@ -457,9 +552,12 @@ def _validate_row(row, task, cfg, meta, plan, market, cut):
     hyper.update(cfg["loss"])
     for key in _RANK_MIX_FIELDS:
         hyper.pop("loss_rank_mix_" + key, None)
+    hyper.pop(_RANK_MIX_PROXIMITY_KEY, None)
     if task["loss"] in _RANK_MIX_LOSSES:
         hyper.update({"loss_rank_mix_" + key: task["rank_mix_" + key]
                       for key in _RANK_MIX_FIELDS})
+    if task.get("rank_mix_proximity_components"):
+        hyper[_RANK_MIX_PROXIMITY_KEY] = list(task["rank_mix_proximity_components"])
     for key in _MOMENTUM_KEYS + _MOMENTUM_INPUT_KEYS:
         hyper.pop(key, None)
     if task.get("momentum_mode") == "residual_output":

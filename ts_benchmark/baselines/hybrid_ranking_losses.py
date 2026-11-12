@@ -28,7 +28,7 @@ from ts_benchmark.baselines.listwise_ranking_losses import (
     listnet_proximity_loss,
 )
 from ts_benchmark.baselines.ranking_mixture import (
-    RANK_MIX_COMPONENTS, validate_rank_mix_config,
+    RANK_MIX_COMPONENTS, validate_rank_mix_config, validate_rank_mix_proximity_components,
 )
 
 
@@ -168,7 +168,8 @@ def regional_approxndcg_loss(scores, target, *, region="top", fraction=1.0 / 3.0
 
 def ranking_mixture_loss(scores, target, *, target_values=None, weights=None,
                          mode="global", regions=None, fraction=1.0 / 3.0,
-                         pair_weights=None, listnet_tau=1.0, listmle_tau=1.0,
+                         pair_weights=None, proximity_components=None,
+                         listnet_tau=1.0, listmle_tau=1.0,
                          approxndcg_tau=1.0):
     """Weighted sum in fixed ListNet, ListMLE, ApproxNDCG component order.
 
@@ -176,8 +177,12 @@ def ranking_mixture_loss(scores, target, *, target_values=None, weights=None,
     target_values contains optionally normalized target scores for ListNet.
     Global mode calls the existing objectives without changing their tie or
     reduction conventions, including ListNet's uniform target at all ties.
+    When pair_weights are supplied, proximity_components selects which losses
+    receive them; omitted means all, exactly as in the historical mixture.
+    Unselected components retain their original objectives and coefficients.
     """
     config = validate_rank_mix_config(weights, mode, regions, fraction)
+    proximity_components = validate_rank_mix_proximity_components(proximity_components)
     if scores.ndim != 2 or target.shape != scores.shape:
         raise ValueError("Mixture exige scores e target com formato [B,N].")
     if scores.dtype in (torch.float16, torch.bfloat16):
@@ -189,8 +194,9 @@ def ranking_mixture_loss(scores, target, *, target_values=None, weights=None,
     for name, coefficient, region in zip(RANK_MIX_COMPONENTS, config["weights"], config["regions"]):
         if coefficient == 0:
             continue
+        component_weights = pair_weights if name in proximity_components else None
         if config["mode"] == "regional":
-            kwargs = dict(region=region, fraction=config["fraction"], pair_weights=pair_weights)
+            kwargs = dict(region=region, fraction=config["fraction"], pair_weights=component_weights)
             if name == "listnet":
                 value = regional_listnet_loss(scores, target, target_values=target_values,
                                              tau=listnet_tau, **kwargs)
@@ -199,16 +205,16 @@ def ranking_mixture_loss(scores, target, *, target_values=None, weights=None,
             else:
                 value = regional_approxndcg_loss(scores, target, tau=approxndcg_tau, **kwargs)
         elif name == "listnet":
-            if pair_weights is None:
+            if component_weights is None:
                 pred, labels, tau = _inputs(scores, target_values, listnet_tau, "loss_listnet_tau")
                 value = -(F.softmax(labels.to(pred.dtype) / tau, -1)
                           * F.log_softmax(pred / tau, -1)).sum(-1).mean()
             else:
-                value = listnet_proximity_loss(scores, target_values, pair_weights=pair_weights,
+                value = listnet_proximity_loss(scores, target_values, pair_weights=component_weights,
                                                tau=listnet_tau)
         elif name == "listmle":
-            value = listmle_loss(scores, target, pair_weights=pair_weights, tau=listmle_tau)
+            value = listmle_loss(scores, target, pair_weights=component_weights, tau=listmle_tau)
         else:
-            value = approxndcg_loss(scores, target, pair_weights=pair_weights, tau=approxndcg_tau)
+            value = approxndcg_loss(scores, target, pair_weights=component_weights, tau=approxndcg_tau)
         total = total + coefficient * value
     return total

@@ -11,6 +11,29 @@ RANK_MIX_DEFAULT_WEIGHTS = (0.5, 0.5, 0.0)
 RANK_MIX_DEFAULT_REGIONS = ("top", "bottom", "top")
 
 
+def validate_rank_mix_proximity_components(components=None):
+    """Canonical components that receive financial-kernel pair weights.
+
+    None preserves the historical all-Proximity mixture. An explicit subset
+    changes only the selected objectives, never their mixture coefficients.
+    The original ``rankmix`` objective remains the no-kernel control.
+    """
+    if components is None:
+        return list(RANK_MIX_COMPONENTS)
+    if not isinstance(components, (tuple, list)) or not components:
+        raise ValueError(
+            "loss_rank_mix_proximity_components exige uma lista nao vazia de "
+            "listnet, listmle ou approxndcg.")
+    if any(not isinstance(name, str) or name.strip().lower() not in RANK_MIX_COMPONENTS
+           for name in components):
+        raise ValueError(
+            "loss_rank_mix_proximity_components aceita somente listnet, listmle e approxndcg.")
+    names = [name.strip().lower() for name in components]
+    if len(set(names)) != len(names):
+        raise ValueError("loss_rank_mix_proximity_components nao aceita componentes repetidos.")
+    return [name for name in RANK_MIX_COMPONENTS if name in names]
+
+
 def validate_rank_mix_config(weights=None, mode="global", regions=None,
                              fraction=1.0 / 3.0):
     """Return canonical options without silently normalizing invalid weights.

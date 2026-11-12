@@ -265,6 +265,17 @@ def with_meta(frame, task, plan):
                 json.dumps(raw, separators=(",", ":")) if raw is not None else None, pa.string())
         values.update({"rank_mix_mode": (task.get("rank_mix_mode"), pa.string()),
                        "rank_mix_fraction": (task.get("rank_mix_fraction"), pa.float64())})
+    if ("rank_mix_proximity_components" in task
+            or any("rank_mix_proximity_components" in t for t in plan.get("tasks", []))):
+        raw = task.get("rank_mix_proximity_components")
+        values["rank_mix_proximity_components"] = (
+            json.dumps(raw, separators=(",", ":")) if raw is not None else None, pa.string())
+    if ('cross_construction' in task
+            or any('cross_construction' in t for t in plan.get('tasks', []))):
+        windows = task.get('rank_windows')
+        values.update(cross_construction=(task.get('cross_construction'), pa.string()),
+                      rank_windows=(json.dumps(windows) if windows is not None else None, pa.string()),
+                      ranking_supervision_active=(task.get('ranking_supervision_active'), pa.bool_()))
     if task.get("momentum_mode") == "residual_output":
         state = task["momentum_state"]
         values.update({"momentum_mode": (task["momentum_mode"], pa.string()),
@@ -437,6 +448,13 @@ def consolidate(run):
                                                 rank_mix_fraction=task["rank_mix_fraction"],
                                                 rank_mix_weights=json.dumps(task["rank_mix_weights"], separators=(",", ":")),
                                                 rank_mix_regions=json.dumps(task["rank_mix_regions"], separators=(",", ":")))
+                        if "rank_mix_proximity_components" in task:
+                            statuses[-1]["rank_mix_proximity_components"] = json.dumps(
+                                task["rank_mix_proximity_components"], separators=(",", ":"))
+                        if 'cross_construction' in task:
+                            statuses[-1].update(cross_construction=task['cross_construction'],
+                                                rank_windows=json.dumps(task['rank_windows']),
+                                                ranking_supervision_active=task['ranking_supervision_active'])
             for name, parts in frames.items():
                 populated = [p for p in parts if len(p)]
                 if parts:
@@ -449,6 +467,10 @@ def consolidate(run):
                 status_columns.extend(["momentum_input_mode", "momentum_input_lookback"])
             if any("rank_mix_mode" in t for t in plan["tasks"]):
                 status_columns.extend(["rank_mix_mode", "rank_mix_weights", "rank_mix_regions", "rank_mix_fraction"])
+            if any("rank_mix_proximity_components" in t for t in plan["tasks"]):
+                status_columns.append("rank_mix_proximity_components")
+            if any('cross_construction' in t for t in plan['tasks']):
+                status_columns.extend(['cross_construction', 'rank_windows', 'ranking_supervision_active'])
             pd.DataFrame(statuses, columns=status_columns).to_csv(stage/"status_tarefas.csv", index=False)
             counts = {s: sum(x["status"] == s for x in statuses) for s in ("COMPLETA", "PARCIAL", "ERRO", "PENDENTE")}
             state = {"signature": plan["signature"], "contract_signature": plan["contract_signature"],

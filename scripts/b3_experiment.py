@@ -30,7 +30,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 from ts_benchmark.baselines.proximity_losses import PROXIMITY_LOSSES, validate_cross_mask
-from ts_benchmark.baselines.ranking_mixture import validate_rank_mix_config
+from ts_benchmark.baselines.ranking_mixture import (
+    RANK_MIX_COMPONENTS, validate_rank_mix_config,
+    validate_rank_mix_proximity_components,
+)
 
 LAUNCHERS = {'temporal': 'run_temporal_experiment.sh',
              'composto': 'run_composite_trading_experiment.sh',
@@ -42,6 +45,7 @@ LR_SCHEDULES = {'type1', 'type2', 'type3', 'constant'}
 MOMENTUM_MODELS = {'Nonstationary_Transformer', 'DUET', 'TimesNet', 'FEDformer'}
 RANK_MIX_LOSSES = {'rankmix', 'rankmix_proximity'}
 RANK_MIX_FIELDS = ('weights', 'mode', 'regions', 'fraction')
+RANK_MIX_PROXIMITY_KEY = 'loss_rank_mix_proximity_components'
 RANKING_PROTOCOL_FIELDS = ('loss_cross_construction', 'loss_rank_windows')
 
 
@@ -105,6 +109,15 @@ def rank_mix_options(config):
         regions=loss.get('loss_rank_mix_regions'),
         fraction=loss.get('loss_rank_mix_fraction', 1 / 3),
     )
+
+
+def rank_mix_proximity_options(config):
+    """Return only an opt-in partial selection; all retains the legacy identity."""
+    if 'rankmix_proximity' not in config['cross_losses']:
+        return None
+    selected = validate_rank_mix_proximity_components(
+        config['loss'].get(RANK_MIX_PROXIMITY_KEY))
+    return None if selected == list(RANK_MIX_COMPONENTS) else selected
 
 
 def momentum_options(config):
@@ -217,6 +230,11 @@ def load_config():
     else:
         for key in RANK_MIX_FIELDS:
             config['loss'].pop('loss_rank_mix_' + key, None)
+    proximity_components = rank_mix_proximity_options(config)
+    if proximity_components is None:
+        config['loss'].pop(RANK_MIX_PROXIMITY_KEY, None)
+    else:
+        config['loss'][RANK_MIX_PROXIMITY_KEY] = proximity_components
     if any(loss in PROXIMITY_LOSSES for loss in config['cross_losses']):
         config['loss']['loss_cross_mask'] = list(validate_cross_mask(
             config['loss'].get('loss_cross_mask')))
@@ -272,6 +290,7 @@ def cross_deltas(config, loss):
 
 def make_tasks(config, mode):
     ranking_protocol_settings(config)
+    proximity_components = rank_mix_proximity_options(config)
     momentum_mode, momentum_lb, momentum_eta = momentum_options(config)
     input_mode, input_lb = momentum_input_options(config)
     if mode == 'composto':
@@ -298,6 +317,8 @@ def make_tasks(config, mode):
                     if loss in RANK_MIX_LOSSES:
                         task.update({'rank_mix_' + key: value
                                      for key, value in rank_mix_options(config).items()})
+                    if loss == 'rankmix_proximity' and proximity_components is not None:
+                        task['rank_mix_proximity_components'] = list(proximity_components)
                     if mode == 'composto' and momentum_mode != 'off':
                         if not 0 < lam <= 1:
                             raise ValueError('Momentum residual exige lambda composto em (0,1]')
@@ -338,6 +359,8 @@ def output_path(task):
                     / ('weights=' + '_'.join(repr(float(x)) for x in task['rank_mix_weights']))
                     / ('regions=' + '_'.join(task['rank_mix_regions']))
                     / f"fraction={float(task['rank_mix_fraction'])!r}")
+            if task['loss'] == 'rankmix_proximity' and task.get('rank_mix_proximity_components'):
+                path /= 'proximity_on=' + '_'.join(task['rank_mix_proximity_components'])
         if task['loss'] in PROXIMITY_LOSSES:
             # repr preserves distinct float widths; :g would round to six digits.
             path = path / f"mask={task['mask_type']}" / f"a={float(task['mask_a'])!r}"
@@ -376,9 +399,12 @@ def model_spec(config, task):
     hyper.update(config['loss'])
     for key in RANK_MIX_FIELDS:
         hyper.pop('loss_rank_mix_' + key, None)
+    hyper.pop(RANK_MIX_PROXIMITY_KEY, None)
     if task['loss'] in RANK_MIX_LOSSES:
         hyper.update({'loss_rank_mix_' + key: task['rank_mix_' + key]
                       for key in RANK_MIX_FIELDS})
+    if task['loss'] == 'rankmix_proximity' and task.get('rank_mix_proximity_components'):
+        hyper[RANK_MIX_PROXIMITY_KEY] = list(task['rank_mix_proximity_components'])
     # Temporal Huber uses the native criterion's key; its scale must match the
     # composite temporal term exactly in the paired control.
     if task['experimento'] == 'temporal' and config['loss']['loss_temporal'] == 'huber':
@@ -494,6 +520,10 @@ def audit_row(config, task, metadata, out_root, signature):
             name = 'rank_mix_' + key
             value = task.get(name, '')
             row[name] = json.dumps(value, separators=(',', ':')) if isinstance(value, list) else value
+    if rank_mix_proximity_options(config) is not None:
+        selected = task.get('rank_mix_proximity_components')
+        row['rank_mix_proximity_components'] = (
+            json.dumps(selected, separators=(',', ':')) if selected is not None else '')
     protocol = ranking_protocol_settings(config, task)
     if protocol is not None:
         row.update(protocol, rank_windows=json.dumps(protocol['rank_windows']))
@@ -682,7 +712,7 @@ def record_completed(directory, row):
         atomic_text(path, csv_text(rows))
 
 
-def record_execution_metadata(paths, parquet_hash, signature, extra=None):
+def record_execution_metadata(paths, parquet_hash, signature, extra=None, task=None):
     """Record the successful worker's host, never the submission/requested node.
 
     Sidecars travel with forecasts copied locally, without changing Parquet or
@@ -701,6 +731,9 @@ def record_execution_metadata(paths, parquet_hash, signature, extra=None):
         row = dict(execution, parquet_sha256=hashes[horizon] if hashes is not None else parquet_hash)
         if extra is not None:
             row.update(extra)
+        if (task is not None and task['loss'] == 'rankmix_proximity'
+                and task.get('rank_mix_proximity_components')):
+            row['rank_mix_proximity_components'] = list(task['rank_mix_proximity_components'])
         atomic_text(path / 'execution_metadata.json', json.dumps(row, indent=2) + '\n')
 
 
@@ -809,7 +842,7 @@ def worker(config, tasks, out_root, index):
             parquet_hash = file_hash(parquet)
         row = audit_row(config, task, metadata, out_root, signature)
         row.update(slurm_job_id=os.environ.get('SLURM_JOB_ID',''), parquet_sha256=parquet_hash)
-        record_execution_metadata(paths, parquet_hash, signature, extra=execution_extra)
+        record_execution_metadata(paths, parquet_hash, signature, extra=execution_extra, task=task)
         record_completed(directory, row)
         print(f'OK: {len(paths)} arquivo(s) Parquet em {directory}', flush=True)
 
@@ -940,6 +973,10 @@ def main():
             print('Mistura ListNet/ListMLE/ApproxNDCG: '
                   f"pesos={mixture['weights']}; modo={mixture['mode']}; "
                   f"regioes={mixture['regions']}; fracao={mixture['fraction']:g}.", flush=True)
+            selected = rank_mix_proximity_options(config)
+            if selected is not None:
+                print('Proximity seletiva na mistura: ' + ', '.join(selected)
+                      + '; demais componentes usam a loss original.', flush=True)
         pairs = sum(k <= h and h % k == 0 for h in config['horizons'] for k in config['trade_windows'])
         factors = [len(config[key]) for key in ('train_percentages', 'models', 'lookbacks')]
         variants = sum(len(cross_deltas(config, loss)) for loss in config['cross_losses'])

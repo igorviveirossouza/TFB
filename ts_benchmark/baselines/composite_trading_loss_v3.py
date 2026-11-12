@@ -52,7 +52,9 @@ from ts_benchmark.baselines.listwise_ranking_losses import (
     validate_temperature, financial_pair_weights, listnet_proximity_loss,
     listmle_loss, approxndcg_loss,
 )
-from ts_benchmark.baselines.ranking_mixture import validate_rank_mix_config
+from ts_benchmark.baselines.ranking_mixture import (
+    validate_rank_mix_config, validate_rank_mix_proximity_components,
+)
 from ts_benchmark.baselines.hybrid_ranking_losses import ranking_mixture_loss
 
 
@@ -240,6 +242,7 @@ def build_loss(config, normalizer_mean=None, normalizer_scale=None):
         rank_mix_mode=_cfg(config, "loss_rank_mix_mode", "global"),
         rank_mix_regions=_cfg(config, "loss_rank_mix_regions", None),
         rank_mix_fraction=_cfg(config, "loss_rank_mix_fraction", 1.0 / 3.0),
+        rank_mix_proximity_components=_cfg(config, "loss_rank_mix_proximity_components", None),
         hinge_margin=float(_cfg(config, "loss_hinge_margin", 0.01)),
         cross_delta=float(_cfg(config, "loss_cross_delta", 0.0)),
         cross_mask=_cfg(config, "loss_cross_mask", None),
@@ -289,6 +292,7 @@ class CompositeTradingLossV3(CompositeTradingLossV2):
         rank_mix_mode: str = "global",
         rank_mix_regions=None,
         rank_mix_fraction: float = 1.0 / 3.0,
+        rank_mix_proximity_components=None,
         hinge_margin: float = 0.01,
         cross_delta: float = 0.0,
         cross_mask=None,
@@ -387,6 +391,9 @@ class CompositeTradingLossV3(CompositeTradingLossV2):
         self.rank_mix_config = (validate_rank_mix_config(
             rank_mix_weights, rank_mix_mode, rank_mix_regions, rank_mix_fraction)
             if base_cross_loss == "rankmix" else None)
+        self.rank_mix_proximity_components = (
+            validate_rank_mix_proximity_components(rank_mix_proximity_components)
+            if cross_loss_name == "rankmix_proximity" else None)
 
     def _normalize_cross_scores(
         self,
@@ -421,6 +428,7 @@ class CompositeTradingLossV3(CompositeTradingLossV2):
                 weights = financial_pair_weights(target_raw, self.cross_mask, dtype)
             return ranking_mixture_loss(
                 pred, target_raw, target_values=target, pair_weights=weights,
+                proximity_components=self.rank_mix_proximity_components,
                 listnet_tau=self.listnet_tau, listmle_tau=self.listmle_tau,
                 approxndcg_tau=self.approxndcg_tau, **self.rank_mix_config)
 

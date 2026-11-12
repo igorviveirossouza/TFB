@@ -55,6 +55,13 @@ if [[ "$EXPERIMENT" == composto && " ${CROSS_LOSSES[*]} " =~ [[:space:]]rankmix(
                         loss.loss_rank_mix_regions "${RANK_MIX_REGIONS:-top bottom top}"
                         loss.loss_rank_mix_fraction "${RANK_MIX_FRACTION:-0.3333333333333333}")
 fi
+# A distinct launcher opts in deliberately. A selector left in a terminal must
+# not silently change an old rankmix launcher or any original-loss control.
+if [[ "${RANK_MIX_PROXIMITY_SELECTIVE:-0}" == 1 && "$EXPERIMENT" == composto &&
+      " ${CROSS_LOSSES[*]} " =~ [[:space:]]rankmix_proximity[[:space:]] &&
+      ${RANK_MIX_PROXIMITY_COMPONENTS+x} ]]; then
+  extra_loss_arguments+=(loss.loss_rank_mix_proximity_components "$RANK_MIX_PROXIMITY_COMPONENTS")
+fi
 
 # Cada valor chega ao Python como argumento separado, sem interpolação em código.
 export B3_INLINE_CONFIG
@@ -90,7 +97,8 @@ import sys
 integer_lists = {'train_percentages', 'lookbacks', 'horizons', 'trade_windows',
                  'loss.loss_rank_windows'}
 float_lists = {'lambdas', 'deltas', 'loss.loss_rank_mix_weights'}
-string_lists = {'models', 'cross_losses', 'loss.loss_rank_mix_regions'}
+string_lists = {'models', 'cross_losses', 'loss.loss_rank_mix_regions',
+                'loss.loss_rank_mix_proximity_components'}
 integers = {'var_lags', 'training.num_epochs', 'training.patience',
             'strategy.stride', 'strategy.num_rollings', 'strategy.seed'}
 floats = {'training.lr', 'strategy.train_ratio_in_tv', 'loss.loss_cross_scale',
