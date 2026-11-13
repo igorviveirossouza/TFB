@@ -239,7 +239,7 @@ def get_time_mark(
     return data_stamp.astype(np.float32)
 
 
-def forecasting_data_provider(data, config, timeenc, batch_size, shuffle, drop_last):
+def forecasting_data_provider(data, config, timeenc, batch_size, shuffle, drop_last, *, raw_targets=None):
     dataset = DatasetForTransformer(
         dataset=data,
         history_len=config.seq_len,
@@ -247,6 +247,7 @@ def forecasting_data_provider(data, config, timeenc, batch_size, shuffle, drop_l
         label_len=config.label_len,
         timeenc=timeenc,
         freq=config.freq,
+        raw_targets=raw_targets,
     )
     data_loader = DataLoader(
         dataset,
@@ -268,6 +269,7 @@ class DatasetForTransformer:
         label_len: int = 5,
         timeenc: int = 1,
         freq: str = "h",
+        raw_targets: pd.DataFrame = None,
     ):
         # init
 
@@ -278,6 +280,17 @@ class DatasetForTransformer:
         self.current_index = 0
         self.timeenc = timeenc
         self.freq = freq
+        # Opt-in ordinal supervision: preserve the source economic returns in
+        # double precision. This table is never part of the model input.
+        self.raw_targets = raw_targets
+        if raw_targets is not None:
+            if (not isinstance(raw_targets, pd.DataFrame)
+                    or not raw_targets.index.equals(dataset.index)
+                    or list(raw_targets.columns) != list(dataset.columns[:raw_targets.shape[1]])
+                    or raw_targets.shape[1] == 0):
+                raise ValueError("raw_targets deve alinhar datas e canais com dataset.")
+            if not np.isfinite(raw_targets.to_numpy(dtype=np.float64)).all():
+                raise ValueError("raw_targets deve conter apenas retornos finitos.")
         self.__read_data__()
 
     def __len__(self) -> int:
@@ -309,7 +322,11 @@ class DatasetForTransformer:
         seq_y = torch.tensor(seq_y.values, dtype=torch.float32)
         seq_x_mark = torch.tensor(seq_x_mark, dtype=torch.float32)
         seq_y_mark = torch.tensor(seq_y_mark, dtype=torch.float32)
-        return seq_x, seq_y, seq_x_mark, seq_y_mark
+        result = (seq_x, seq_y, seq_x_mark, seq_y_mark)
+        if self.raw_targets is not None:
+            raw_y = self.raw_targets.iloc[s_end:s_end + self.prediction_length]
+            return result + (torch.tensor(raw_y.to_numpy(dtype=np.float64), dtype=torch.float64),)
+        return result
 
 
 class SegLoader(object):

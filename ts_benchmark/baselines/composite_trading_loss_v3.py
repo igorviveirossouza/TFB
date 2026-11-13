@@ -56,6 +56,11 @@ from ts_benchmark.baselines.ranking_mixture import (
     validate_rank_mix_config, validate_rank_mix_proximity_components,
 )
 from ts_benchmark.baselines.hybrid_ranking_losses import ranking_mixture_loss
+from ts_benchmark.baselines.ordinal_losses import (
+    ORDINAL_LOSSES, BUCKET_TIE_POLICY, OrderedThresholds, bucket_labels,
+    validate_bucket_count, positive_temperature, ordinal_cross_entropy,
+    bucket_pairwise_loss, bucket_listnet_loss,
+)
 
 
 def _scaled_log_weights(log_weights, dtype):
@@ -254,6 +259,10 @@ def build_loss(config, normalizer_mean=None, normalizer_scale=None):
         momentum_mode=momentum["mode"],
         cross_construction=str(_cfg(config, "loss_cross_construction", "blocks")),
         rank_windows=_cfg(config, "loss_rank_windows", None),
+        bucket_count=_cfg(config, "loss_bucket_count", 3),
+        ordinal_tau=_cfg(config, "loss_ordinal_tau", 1.0),
+        bucket_tau=_cfg(config, "loss_bucket_tau", 1.0),
+        bucket_target_tau=_cfg(config, "loss_bucket_target_tau", 1.0),
     )
 
 
@@ -305,6 +314,10 @@ class CompositeTradingLossV3(CompositeTradingLossV2):
         momentum_mode: str = "off",
         cross_construction: str = "blocks",
         rank_windows=None,
+        bucket_count=3,
+        ordinal_tau=1.0,
+        bucket_tau=1.0,
+        bucket_target_tau=1.0,
     ) -> None:
         momentum_mode = str(momentum_mode).lower()
         if cross_construction not in {"blocks", "origin_anchored_windows"}:
@@ -361,7 +374,7 @@ class CompositeTradingLossV3(CompositeTradingLossV2):
             data_kind=data_kind,
             score_kind=score_kind,
             temporal_loss=temporal_loss,
-            cross_loss="ranknet" if base_cross_loss in {"spearman", "listmle", "approxndcg", "rankmix"} else base_cross_loss,
+            cross_loss="ranknet" if base_cross_loss in ({"spearman", "listmle", "approxndcg", "rankmix"} | ORDINAL_LOSSES) else base_cross_loss,
             cross_lambda=cross_lambda,
             cross_scale=cross_scale,
             huber_delta=huber_delta,
@@ -394,6 +407,18 @@ class CompositeTradingLossV3(CompositeTradingLossV2):
         self.rank_mix_proximity_components = (
             validate_rank_mix_proximity_components(rank_mix_proximity_components)
             if cross_loss_name == "rankmix_proximity" else None)
+        # All new options are opt-in: unrelated legacy objectives ignore them.
+        if cross_loss_name in ORDINAL_LOSSES:
+            self.bucket_count = validate_bucket_count(bucket_count)
+            self.ordinal_tau = positive_temperature(ordinal_tau, "loss_ordinal_tau")
+            self.bucket_tau = positive_temperature(bucket_tau, "loss_bucket_tau")
+            self.bucket_target_tau = positive_temperature(bucket_target_tau, "loss_bucket_target_tau")
+            if not math.isfinite(self.cross_scale):
+                raise ValueError("loss_cross_scale deve ser finito.")
+            if not math.isfinite(self.hinge_margin):
+                raise ValueError("loss_hinge_margin deve ser finita.")
+            self.ordinal_thresholds = (OrderedThresholds(self.bucket_count)
+                if cross_loss_name == "ordinal_ce" and self.cross_lambda > 0 else None)
 
     def _normalize_cross_scores(
         self,
@@ -410,6 +435,26 @@ class CompositeTradingLossV3(CompositeTradingLossV2):
 
         return zscore(pred), zscore(target)
 
+    def _ordinal_metadata(self):
+        metadata = {"bucket_count": self.bucket_count, "bucket_tie_policy": BUCKET_TIE_POLICY,
+                    "ordinal_tau": self.ordinal_tau, "bucket_tau": self.bucket_tau,
+                    "bucket_target_tau": self.bucket_target_tau}
+        if self.ordinal_thresholds is not None:
+            metadata["ordinal_thresholds"] = self.ordinal_thresholds().detach().cpu().tolist()
+        return metadata
+
+    def _remember_ordinal(self, temporal, cross, total, pred):
+        if self.track_components:
+            self.last_components = {
+                "temporal": None if temporal is None else float(temporal.detach().cpu()),
+                "cross": None if cross is None else float(cross.detach().cpu()),
+                "cross_scaled": None if cross is None else float((self.cross_scale * cross).detach().cpu()),
+                "total": float(total.detach().cpu()), "H": int(pred.shape[1]),
+                "K": self.trade_window, "n_assets": int(pred.shape[2]),
+                "cross_construction": self.cross_construction,
+                "cross_active": self.cross_lambda != 0., **self._ordinal_metadata(),
+            }
+
     def _cross_loss(
         self,
         pred_scores: torch.Tensor,
@@ -419,6 +464,21 @@ class CompositeTradingLossV3(CompositeTradingLossV2):
         # Delta is evaluated on the realized financial score before z-scoring,
         # so its unit remains the original score unit (e.g. simple return).
         pred_raw, target_raw = self._flatten_blocks(pred_scores, target_scores)
+
+        if self.cross_loss_name in ORDINAL_LOSSES:
+            classes = bucket_labels(target_raw, self.bucket_count)
+            pred, _ = self._normalize_cross_scores(pred_raw, target_raw.detach())
+            if pred.dtype in (torch.float16, torch.bfloat16):
+                pred = pred.float()
+            if not torch.isfinite(pred).all():
+                raise ValueError("Scores ordinais devem ser finitos.")
+            if self.cross_loss_name == "ordinal_ce":
+                return ordinal_cross_entropy(pred, classes, self.ordinal_thresholds, self.ordinal_tau)
+            if self.cross_loss_name == "bucket_listnet":
+                return bucket_listnet_loss(pred, classes, self.bucket_count,
+                    temperature=self.bucket_tau, target_temperature=self.bucket_target_tau)
+            return bucket_pairwise_loss(pred, classes, kind=self.cross_loss_name,
+                temperature=self.bucket_tau, margin=self.hinge_margin)
 
         if self.cross_loss_name in {"rankmix", "rankmix_proximity"}:
             pred, target = self._normalize_cross_scores(pred_raw, target_raw.detach())
@@ -557,7 +617,21 @@ class CompositeTradingLossV3(CompositeTradingLossV2):
         denominator = weights.sum(dim=1).clamp_min(1.0)
         return ((weights * values).sum(dim=1) / denominator).mean()
 
-    def _forward_origin_windows(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    def _economic_ordinal_target(self, pred, target_economic):
+        if target_economic is None:
+            return None
+        if self.cross_loss_name not in ORDINAL_LOSSES:
+            raise ValueError("target_economic e exclusivo das losses ordinais.")
+        if target_economic.shape != pred.shape:
+            raise ValueError("target_economic deve ter o mesmo formato [B,H,N] da previsao.")
+        if self.aggregator.data_kind not in LOG_RETURN_KINDS:
+            raise ValueError("target_economic ordinal exige log-retornos economicos.")
+        # Keep source ties and tiny gaps intact; recovering model-space float32
+        # targets with per-asset means/scales can create spurious preferences.
+        return target_economic.detach().to(device=pred.device, dtype=torch.float64)
+
+    def _forward_origin_windows(self, pred: torch.Tensor, target: torch.Tensor,
+                                target_economic=None) -> torch.Tensor:
         """Rank equally weighted cumulative windows starting at each origin.
 
         This is the shared-head objective used by NSTaskAdapter, expressed as
@@ -576,13 +650,18 @@ class CompositeTradingLossV3(CompositeTradingLossV2):
             temporal = self._temporal_loss(pred, target)
         if self.cross_lambda != 0.0:
             raw_pred = self.aggregator._maybe_inverse_norm(pred)
-            raw_target = self.aggregator._maybe_inverse_norm(target)
+            raw_target = (self.aggregator._maybe_inverse_norm(target)
+                          if target_economic is None else target_economic)
             scores, labels = [], []
             for k in windows:
                 score = raw_pred[:, :k].sum(1)
                 label = raw_target[:, :k].sum(1)
                 if canonical_score_kind(self.aggregator.score_kind) == "simple_return":
-                    score, label = torch.expm1(score), torch.expm1(label)
+                    score = torch.expm1(score)
+                    if target_economic is None:
+                        label = torch.expm1(label)
+                # Raw ordinal labels use the double-precision log sum. Its
+                # rank equals simple-return rank without another rounding step.
                 scores.append(score)
                 labels.append(label)
             cross = self._cross_loss(torch.stack(scores, 1), torch.stack(labels, 1))
@@ -605,6 +684,10 @@ class CompositeTradingLossV3(CompositeTradingLossV2):
                 "rank_windows": list(windows), "n_rank_windows": len(windows),
                 "cross_active": self.cross_lambda != 0.0,
             }
+            if self.cross_loss_name in ORDINAL_LOSSES:
+                self.last_components.update(self._ordinal_metadata())
+                self.last_components["ordinal_target_source"] = (
+                    "economic_float64" if target_economic is not None else "inverse_normalized")
         return total
 
     def forward(
@@ -615,6 +698,7 @@ class CompositeTradingLossV3(CompositeTradingLossV2):
         *,
         momentum_history: Optional[torch.Tensor] = None,
         momentum_module=None,
+        target_economic: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         # Kept explicit for auditability: both losses feed the same backward pass.
         if pred.shape != target.shape:
@@ -625,15 +709,31 @@ class CompositeTradingLossV3(CompositeTradingLossV2):
         elif momentum_history is None or momentum_module is None:
             raise ValueError("Momentum habilitado exige momentum_history e momentum_module.")
 
+        if self.cross_lambda != 0.:
+            target_economic = self._economic_ordinal_target(pred, target_economic)
         if self.cross_construction == "origin_anchored_windows":
-            return self._forward_origin_windows(pred, target)
+            return self._forward_origin_windows(pred, target, target_economic)
 
-        temporal = self._temporal_loss(pred, target)
-        pred_scores, target_scores = self.aggregator(
-            pred,
-            target,
-            base_value=base_value,
-        )
+        ordinal = self.cross_loss_name in ORDINAL_LOSSES
+        # Ordinal endpoints are exact: inactive labels, aggregations and loss
+        # parameters are never evaluated, including the shared temporal control.
+        if ordinal and self.cross_lambda == 0.:
+            temporal = self._temporal_loss(pred, target)
+            self._remember_ordinal(temporal, None, temporal, pred)
+            return temporal
+        temporal = (None if ordinal and self.cross_lambda == 1.
+                    else self._temporal_loss(pred, target))
+        if target_economic is not None:
+            self.aggregator._validate(pred, target)
+            pred_scores = self.aggregator._aggregate_returns(self.aggregator._maybe_inverse_norm(pred))
+            b, h, n = target_economic.shape
+            target_scores = target_economic.reshape(b, h // self.trade_window, self.trade_window, n).sum(2)
+        else:
+            pred_scores, target_scores = self.aggregator(
+                pred,
+                target,
+                base_value=base_value,
+            )
         momentum_result = None
         if self.momentum_mode == "residual_output":
             # The same training-only scaler restores both historical returns
@@ -655,7 +755,13 @@ class CompositeTradingLossV3(CompositeTradingLossV2):
             # Penalize residual amplitude outside lambda. Normalizing this
             # correction again would erase the amplitude being regularized.
             total = total + momentum_result["penalty"]
-        self._remember(temporal, cross, total, pred_scores)
+        if ordinal:
+            self._remember_ordinal(temporal, cross, total, pred)
+            if self.track_components:
+                self.last_components["ordinal_target_source"] = (
+                    "economic_float64" if target_economic is not None else "inverse_normalized")
+        else:
+            self._remember(temporal, cross, total, pred_scores)
         if self.track_components:
             self.last_components.update(H=int(pred.shape[1]),
                                         cross_steps=int(pred_scores.shape[1] * self.trade_window),

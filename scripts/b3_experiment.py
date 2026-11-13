@@ -47,6 +47,32 @@ RANK_MIX_LOSSES = {'rankmix', 'rankmix_proximity'}
 RANK_MIX_FIELDS = ('weights', 'mode', 'regions', 'fraction')
 RANK_MIX_PROXIMITY_KEY = 'loss_rank_mix_proximity_components'
 RANKING_PROTOCOL_FIELDS = ('loss_cross_construction', 'loss_rank_windows')
+ORDINAL_LOSSES = {'ordinal_ce', 'bucket_ranknet', 'bucket_hinge', 'bucket_listnet'}
+ORDINAL_FIELDS = ('bucket_count', 'ordinal_tau', 'bucket_tau', 'bucket_target_tau',
+                  'bucket_margin', 'bucket_tie_policy')
+
+
+def ordinal_options(config, name):
+    """Active ordinal settings only; safe to inspect without Torch installed."""
+    if name not in ORDINAL_LOSSES:
+        return {}
+    loss = config['loss']
+    count = loss.get('loss_bucket_count', 3)
+    if type(count) is not int or count < 2:
+        raise ValueError('loss_bucket_count deve ser inteiro >= 2')
+    result = dict(bucket_count=count, bucket_tie_policy='stable_channel_order')
+    keys = {'ordinal_ce': [('ordinal_tau', 'loss_ordinal_tau', 1.0)],
+            'bucket_ranknet': [('bucket_tau', 'loss_bucket_tau', 1.0)],
+            'bucket_hinge': [('bucket_margin', 'loss_hinge_margin', .1)],
+            'bucket_listnet': [('bucket_tau', 'loss_bucket_tau', 1.0),
+                               ('bucket_target_tau', 'loss_bucket_target_tau', 1.0)]}
+    for short, key, default in keys[name]:
+        value = loss.get(key, default)
+        if (type(value) not in (int, float) or not math.isfinite(value)
+                or value < 0 or value == 0 and short != 'bucket_margin'):
+            raise ValueError(key + ' deve ser finito e positivo (margem pode ser zero)')
+        result[short] = float(value)
+    return result
 
 
 def ranking_protocol_settings(config, task=None):
@@ -222,8 +248,10 @@ def load_config():
         raise ValueError('train_percentages: inteiros entre 1 e 99')
     if set(config['models']) - set(config['model_defaults']):
         raise ValueError('Modelo sem defaults de arquitetura')
-    if set(config['cross_losses']) - ({'mse', 'bpr', 'ranknet', 'hinge', 'listnet', 'pairwise_mse', 'spearman', 'listmle', 'approxndcg'} | RANK_MIX_LOSSES | set(PROXIMITY_LOSSES)):
+    if set(config['cross_losses']) - ({'mse', 'bpr', 'ranknet', 'hinge', 'listnet', 'pairwise_mse', 'spearman', 'listmle', 'approxndcg'} | RANK_MIX_LOSSES | ORDINAL_LOSSES | set(PROXIMITY_LOSSES)):
         raise ValueError('Loss cross não suportada nesta grade')
+    for name in set(config['cross_losses']) & ORDINAL_LOSSES:
+        ordinal_options(config, name)
     if set(config['cross_losses']) & RANK_MIX_LOSSES:
         config['loss'].update({'loss_rank_mix_' + key: value
                                for key, value in rank_mix_options(config).items()})
@@ -285,7 +313,7 @@ def load_config():
 def cross_deltas(config, loss):
     # ListNet and proximity losses have no pairwise dead zone. Keep one inactive delta
     # for paths/audits, independent of the editable DELTAS vector.
-    return [0] if loss in {'mse', 'listnet', 'listmle', 'approxndcg', 'spearman', 'rankmix'} or loss in PROXIMITY_LOSSES else config['deltas']
+    return [0] if loss in {'mse', 'listnet', 'listmle', 'approxndcg', 'spearman', 'rankmix'} or loss in PROXIMITY_LOSSES or loss in ORDINAL_LOSSES else config['deltas']
 
 
 def make_tasks(config, mode):
@@ -314,6 +342,7 @@ def make_tasks(config, mode):
                     task = dict(array_index=len(tasks), treino=pct, experimento=mode,
                                 loss=loss, cross_lambda=lam, cross_delta=delta,
                                 modelo=model, lookback=lb, pred_len=horizon, k=k)
+                    task.update(ordinal_options(config, loss))
                     if loss in RANK_MIX_LOSSES:
                         task.update({'rank_mix_' + key: value
                                      for key, value in rank_mix_options(config).items()})
@@ -354,6 +383,11 @@ def output_path(task):
     path = group_path(task) / f"loss={task['loss']}" / f'lambda={lam}'
     if task['experimento'] == 'composto':
         path /= f"delta={task['cross_delta']:g}"
+        if task['loss'] in ORDINAL_LOSSES:
+            path /= f"buckets={task['bucket_count']}"
+            for key in ('ordinal_tau', 'bucket_tau', 'bucket_target_tau', 'bucket_margin'):
+                if key in task:
+                    path /= f"{key}={float(task[key])!r}"
         if task['loss'] in RANK_MIX_LOSSES:
             path = (path / f"mix={task['rank_mix_mode']}"
                     / ('weights=' + '_'.join(repr(float(x)) for x in task['rank_mix_weights']))
@@ -498,7 +532,7 @@ def audit_row(config, task, metadata, out_root, signature):
                 source_sha256=metadata['source_sha256'], dataset_sha256=metadata['dataset_sha256'],
                 n_assets=metadata['n_assets'], seed=config['strategy']['seed'],
                 temporal_loss=config['loss']['loss_temporal'],
-                delta_effective=task['experimento'] == 'composto' and task['loss'] not in {'mse', 'listnet', 'listmle', 'approxndcg', 'spearman', 'rankmix'} and task['loss'] not in PROXIMITY_LOSSES,
+                delta_effective=task['experimento'] == 'composto' and task['loss'] not in {'mse', 'listnet', 'listmle', 'approxndcg', 'spearman', 'rankmix'} and task['loss'] not in PROXIMITY_LOSSES and task['loss'] not in ORDINAL_LOSSES,
                 mask_type=task.get('mask_type', ''), mask_a=task.get('mask_a', ''),
                 mask_mode=task.get('mask_mode', 'natural') if task['loss'] in PROXIMITY_LOSSES else '',
                 mask_effective=task['loss'] in PROXIMITY_LOSSES,
@@ -513,6 +547,8 @@ def audit_row(config, task, metadata, out_root, signature):
                 strategy_args=json.dumps(strategy_args(config, task, metadata['n_rows']), sort_keys=True),
                 deterministic=deterministic, design_sha256=signature,
                 output_dir=str(out_root / output_path(task)))
+    if set(config['cross_losses']) & ORDINAL_LOSSES:
+        row.update({key: task.get(key, '') for key in ORDINAL_FIELDS})
     if set(config['cross_losses']) & RANK_MIX_LOSSES:
         # Every row in a mixed registry has the same columns. Arrays use JSON,
         # not Python list repr, so R and CPU consumers can recover the contract.
@@ -539,6 +575,8 @@ def audit_row(config, task, metadata, out_root, signature):
 
 def validate_lengths(config, tasks, metadata):
     for task in tasks:
+        if 'bucket_count' in task and task['bucket_count'] > metadata['n_assets']:
+            raise ValueError('Numero de buckets maior que o numero de ativos')
         split = split_counts(config, task, metadata['n_rows'])
         max_windows = metadata['n_rows'] - split['n_pretest'] - min(config['horizons']) + 1 if task['modelo'] == 'VAR' else split['n_windows']
         if split['n_windows'] < 1 or max_windows > config['strategy']['num_rollings']:
@@ -590,6 +628,10 @@ def provenance(config, metadata):
     if set(config['cross_losses']) & RANK_MIX_LOSSES:
         code_files += ['ts_benchmark/baselines/ranking_mixture.py',
                        'ts_benchmark/baselines/hybrid_ranking_losses.py']
+    if set(config['cross_losses']) & ORDINAL_LOSSES:
+        code_files += ['ts_benchmark/baselines/ordinal_losses.py',
+                       'ts_benchmark/baselines/utils.py',
+                       'scripts/ordinal_experiment.py', 'scripts/run_ordinal_experiment.sh']
     if task_head_settings(config) is not None:
         code_files += ['scripts/itransformer_task_heads.py',
                        'ts_benchmark/baselines/itransformer_task_heads.py',

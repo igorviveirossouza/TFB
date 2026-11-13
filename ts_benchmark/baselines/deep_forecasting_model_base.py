@@ -110,6 +110,11 @@ class DeepForecastingModelBase(ModelBase):
     def _momentum_enabled(self):
         return self._momentum_config["mode"] == "residual_output"
 
+    def _ordinal_enabled(self):
+        return (str(getattr(self.config, "loss", "")).lower() == "composite_trading"
+                and str(getattr(self.config, "loss_cross", "")).lower() in {
+                    "ordinal_ce", "bucket_ranknet", "bucket_hinge", "bucket_listnet"})
+
     def _history_length(self):
         if self._momentum_input_enabled():
             return max(self.config.seq_len, self._momentum_input_config["lookback"])
@@ -247,7 +252,8 @@ class DeepForecastingModelBase(ModelBase):
         normalizer_scale = getattr(self.scaler, "scale_", None)
 
         loss_builder = build_loss
-        if self._momentum_enabled():
+        ordinal = self._ordinal_enabled()
+        if self._momentum_enabled() or ordinal:
             from ts_benchmark.baselines.composite_trading_loss_v3 import build_loss as loss_builder
         criterion = loss_builder(
             self.config,
@@ -256,6 +262,9 @@ class DeepForecastingModelBase(ModelBase):
         )
         if self._momentum_diagnostics_enabled():
             criterion.track_components = True
+        if ordinal:
+            from ts_benchmark.baselines.ordinal_losses import attach_ordinal_parameters
+            attach_ordinal_parameters(self.model, criterion)
 
         weight_decay = float(getattr(self.config, "weight_decay", 0.0))
         if str(getattr(self.config, "loss", "")).lower() == "fingat":
@@ -384,15 +393,18 @@ class DeepForecastingModelBase(ModelBase):
             return target[:, -self.config.horizon - 1, :series_dim]
         return input[:, -1, :series_dim]
 
-    def _criterion_loss(self, criterion, output, target, base_value=None, history=None):
+    def _criterion_loss(self, criterion, output, target, base_value=None, history=None,
+                        target_economic=None):
+        ordinal_kwargs = {} if target_economic is None else {"target_economic": target_economic}
         if self._momentum_enabled():
             return criterion(
                 output, target, base_value=base_value,
                 momentum_history=history, momentum_module=self._momentum_module(),
+                **ordinal_kwargs,
             )
         if loss_accepts_base_value(criterion):
-            return criterion(output, target, base_value=base_value)
-        return criterion(output, target)
+            return criterion(output, target, base_value=base_value, **ordinal_kwargs)
+        return criterion(output, target, **ordinal_kwargs)
 
     def validate(
         self, valid_data_loader: DataLoader, series_dim: int, criterion: torch.nn.Module
@@ -404,7 +416,10 @@ class DeepForecastingModelBase(ModelBase):
         self.model.eval()
         device = get_device()
         with torch.no_grad():
-            for input, target, input_mark, target_mark in valid_data_loader:
+            for batch in valid_data_loader:
+                input, target, input_mark, target_mark = batch[:4]
+                ordinal_kwargs = ({"target_economic": batch[4].to(device)[:, -config.horizon:, :series_dim]}
+                                  if len(batch) == 5 else {})
                 input, target, input_mark, target_mark = (
                     input.to(device),
                     target.to(device),
@@ -424,7 +439,7 @@ class DeepForecastingModelBase(ModelBase):
                 output, target = self._post_process(output, target)
                 all_loss = (
                     self._criterion_loss(criterion, output, target, base_value=base_value,
-                                         history=input[:, :, :series_dim])
+                                         history=input[:, :, :series_dim], **ordinal_kwargs)
                     + additional_loss
                 )
                 loss = all_loss.detach().cpu().numpy()
@@ -498,6 +513,11 @@ class DeepForecastingModelBase(ModelBase):
 
         self.scaler.fit(train_data.values)
 
+        raw_ordinal = self._ordinal_enabled() and float(getattr(config, "loss_cross_lambda", .5)) > 0
+        raw_train = train_data.iloc[:, :series_dim].copy() if raw_ordinal else None
+        raw_valid = (valid_data.iloc[:, :series_dim].copy()
+                     if raw_ordinal and valid_data is not None else None)
+
         if config.norm:
             train_data = pd.DataFrame(
                 self.scaler.transform(train_data.values),
@@ -519,6 +539,7 @@ class DeepForecastingModelBase(ModelBase):
                 batch_size=config.batch_size,
                 shuffle=self._validation_mode != "ordered_sample_mean",
                 drop_last=False,
+                **({"raw_targets": raw_valid} if raw_valid is not None else {}),
             )
 
         train_dataset, self.train_data_loader = forecasting_data_provider(
@@ -528,6 +549,7 @@ class DeepForecastingModelBase(ModelBase):
             batch_size=config.batch_size,
             shuffle=True,
             drop_last=train_drop_last,
+            **({"raw_targets": raw_train} if raw_train is not None else {}),
         )
         if self._financial_history_enabled() and len(self.train_data_loader) == 0:
             raise ValueError("Nenhum batch de treino; reduza batch_size ou momentum_lookback.")
@@ -578,9 +600,10 @@ class DeepForecastingModelBase(ModelBase):
                 }
                 train_losses, train_components, gradient_norms = [], [], []
             # for input, target, input_mark, target_mark in train_data_loader:
-            for i, (input, target, input_mark, target_mark) in enumerate(
-                self.train_data_loader
-            ):
+            for i, batch in enumerate(self.train_data_loader):
+                input, target, input_mark, target_mark = batch[:4]
+                ordinal_kwargs = ({"target_economic": batch[4].to(device)[:, -config.horizon:, :series_dim]}
+                                  if len(batch) == 5 else {})
                 optimizer.zero_grad()
                 input, target, input_mark, target_mark = (
                     input.to(device),
@@ -600,7 +623,7 @@ class DeepForecastingModelBase(ModelBase):
                 output = output[:, -config.horizon :, :series_dim]
                 output, target = self._post_process(output, target)
                 loss = self._criterion_loss(criterion, output, target, base_value=base_value,
-                                            history=input[:, :, :series_dim])
+                                            history=input[:, :, :series_dim], **ordinal_kwargs)
 
                 total_loss = loss + additional_loss
                 if diagnostics:
