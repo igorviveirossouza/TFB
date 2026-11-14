@@ -165,7 +165,7 @@ class OrdinalLauncherTest(unittest.TestCase):
 
     def test_submission_is_serial_and_retry_does_not_duplicate(self):
         with tempfile.TemporaryDirectory() as tmp:
-            s=settings(NS_LOG_ROOT=tmp,NS_PYTHON_BIN=sys.executable,
+            s=settings(NS_LOG_ROOT=tmp,PRED_ROOT=str(Path(tmp)/'predictions'),NS_PYTHON_BIN=sys.executable,
                 LOOKBACKS_VALUES='32',HORIZON_VALUES='1',LAMBDAS_VALUES='0 1')
             branches=ordinal.build_branches(s); seen=[]
             def producer(s,b,action,dependency=''):
@@ -181,7 +181,7 @@ class OrdinalLauncherTest(unittest.TestCase):
 
     def test_interrupted_resume_requires_explicit_saved_dependency(self):
         with tempfile.TemporaryDirectory() as tmp:
-            s=settings(NS_LOG_ROOT=tmp,NS_PYTHON_BIN=sys.executable,
+            s=settings(NS_LOG_ROOT=tmp,PRED_ROOT=str(Path(tmp)/'predictions'),NS_PYTHON_BIN=sys.executable,
                 LOOKBACKS_VALUES='32',HORIZON_VALUES='1',LAMBDAS_VALUES='0 1')
             branches=ordinal.build_branches(s)
             with patch.object(ordinal.shutil,'which',return_value='/bin/true'),patch.object(ordinal,'run_producer',return_value=['123']):
@@ -198,7 +198,7 @@ class OrdinalLauncherTest(unittest.TestCase):
 
     def test_partial_array_submission_is_recorded_and_cannot_silently_repeat(self):
         with tempfile.TemporaryDirectory() as tmp:
-            s=settings(NS_LOG_ROOT=tmp,NS_PYTHON_BIN=sys.executable,
+            s=settings(NS_LOG_ROOT=tmp,PRED_ROOT=str(Path(tmp)/'predictions'),NS_PYTHON_BIN=sys.executable,
                 LOOKBACKS_VALUES='32',HORIZON_VALUES='1',LAMBDAS_VALUES='1',CROSS_LOSSES_VALUES='bucket_ranknet')
             branches=ordinal.build_branches(s)
             def producer(s,b,action,dependency=''):
@@ -207,7 +207,7 @@ class OrdinalLauncherTest(unittest.TestCase):
                 return []
             with patch.object(ordinal.shutil,'which',return_value='/bin/true'),patch.object(ordinal,'run_producer',side_effect=producer):
                 with self.assertRaises(RuntimeError): ordinal.train(s,branches)
-                marker=next((Path(tmp)/'ordinal_submissions').glob('*.json'))
+                marker=next(ordinal.submission_state(s).glob('*.json'))
                 self.assertEqual(json.loads(marker.read_text())['status'],'partial')
                 with self.assertRaisesRegex(ValueError,'Submissao parcial'):
                     ordinal.train(s,branches)

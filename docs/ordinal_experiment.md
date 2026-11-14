@@ -119,14 +119,35 @@ Para imprimir **todos** os campos públicos com seus valores efetivos:
 ```bash
 bash scripts/run_ordinal_experiment.sh --print-exports
 bash scripts/run_ordinal_experiment.sh --print-config
+bash scripts/run_ordinal_experiment.sh --submission-status
 ```
+
+`--submission-status` é somente leitura: mostra os caminhos resolvidos, registros atuais e legados, IDs Slurm e diferenças entre a configuração registrada e a solicitada. Também lista ramos históricos do mesmo destino que não estão na grade atual. Não consulta nem altera o scheduler e não cria arquivos. `--trainplan` não é uma opção: use `--plan` para conferir e `--train` para submeter.
 
 ## Saídas e reexecução
 
 Cada ramo possui um `run_config.json` congelado em `treino=N/experimento=temporal|composto`. As previsões continuam em `part.parquet`; o manifesto de tarefas inclui T, temperaturas/margem ativas e a política de empates. Os caminhos separam protocolo, seed, perda temporal, variante, T, loss, lambda, modelo, LB e H. O `run_config.json` registra a ordem dos canais, calendários, resolução do modelo/adaptador em `model_specs` e hashes dos dados/código.
 
-Por padrão, os arrays dos ramos são encadeados, mantendo até `NS_MAX_CONCURRENT_JOBS` tarefas simultâneas para o experimento. `NS_PARALLEL_BRANCHES=1` altera esse limite para **cada ramo**, explicitamente. Marcas de submissão ficam em `NS_LOG_ROOT/ordinal_submissions`; elas registram submissão, não conclusão do treino.
+Por padrão, os arrays dos ramos são encadeados, mantendo até `NS_MAX_CONCURRENT_JOBS` tarefas simultâneas para o experimento. `NS_PARALLEL_BRANCHES=1` altera esse limite para **cada ramo**, explicitamente. O plano imprime a raiz das previsões, resultados, logs e estado de submissão.
 
-Após uma interrupção com alguns ramos submetidos e outros pendentes, o launcher exige `NS_RESUME_CHAIN_OLD_JOBS=1` para encadear os próximos aos IDs Slurm registrados e manter o limite global. Esses IDs precisam continuar válidos no scheduler. Uma falha após a submissão de parte de um array registra os IDs já criados e interrompe a retomada automática, evitando duplicação silenciosa. Ao modificar a grade/hiperparâmetros de um experimento já submetido, use outra `EXPERIMENT_TAG`.
+As marcas atuais ficam em `PRED_ROOT/.ordinal_submissions`. Cada marca registra o destino absoluto, o ramo, a configuração, os IDs Slurm e o estado da submissão. Assim, experimentos com destinos diferentes podem compartilhar uma raiz de logs sem colidir; mudar apenas os logs não permite repetir jobs no mesmo destino. A assinatura da configuração continua sendo comparada para impedir que um ramo já submetido receba outros hiperparâmetros. As marcas registram submissão, não conclusão do treino.
+
+Registros antigos em `NS_LOG_ROOT/ordinal_submissions` são preservados. Só são migrados automaticamente quando trazem identificação explícita do destino correspondente. Um `run_config.json` equivalente serve para diagnóstico, mas não prova onde os jobs antigos foram submetidos: o mesmo desenho pode ter sido preparado em mais de uma pasta. Se o registro antigo não identifica seu destino, a tentativa fica bloqueada e `--submission-status` mostra o arquivo e os IDs envolvidos; nenhum registro é apagado.
+
+Ao iniciar outro experimento, atualize `EXPERIMENT_TAG` **e os três caminhos**, caso já estejam exportados no terminal. Alterar a tag não modifica automaticamente valores de caminhos exportados anteriormente:
+
+```bash
+export EXPERIMENT_TAG='isolados/ordinal_buckets_t80_v2'
+export PRED_ROOT="/snfs2/igor.viveiros/previsoes/$EXPERIMENT_TAG"
+export NS_RESULT_ROOT="/snfs2/igor.viveiros/result/$EXPERIMENT_TAG"
+export NS_LOG_ROOT="$TFB_ROOT/logs/$EXPERIMENT_TAG"
+bash scripts/run_ordinal_experiment.sh --submission-status
+```
+
+Após uma interrupção com alguns ramos submetidos e outros pendentes, o launcher exige `NS_RESUME_CHAIN_OLD_JOBS=1` para encadear os próximos aos IDs Slurm registrados e manter o limite global. A retomada serial automática exige que os ramos antigos formem um prefixo na ordem de dependências registrada, com histórico serial conhecido; esses IDs precisam continuar válidos no scheduler. Ramos antigos intercalados, histórico paralelo/indefinido, novas dependências incompatíveis ou ramos históricos fora da grade interrompem a retomada e são mostrados no diagnóstico.
+
+Antes de contactar o Slurm, o launcher grava a intenção de submissão (`submitting`). Se houver interrupção ou perda dos IDs retornados, essa marca impede repetição automática. Falhas após submissão de parte dos arrays preservam os IDs conhecidos com estado `partial`. Esses casos exigem conferir os jobs existentes antes de uma nova submissão; o launcher não presume que uma falha de comunicação significa ausência de jobs.
 
 A análise em R deve ser executada no repositório `analise_resultados`, branch `feat/base-mercado-backtest`, com `src/analise_ic_ordinal.R` e a raiz `PRED_ROOT` deste experimento. Ela usa os escores contínuos para o IC de Spearman e discretiza o ranking previsto com a mesma regra para medir acerto em cada estrato solicitado.
+
+A [auditoria da supervisão ordinal](ordinal_supervision_audit.md) explicita quais parcelas usam classes ou retornos, o papel dos escores diferenciáveis e a diferença entre o agrupamento previsto pelo ranking e a classificação pelos limiares da Ordinal CE.
