@@ -424,7 +424,8 @@ def task_output_paths(config, task, out_root):
 
 def model_spec(config, task):
     name = task['modelo']
-    if name == 'VAR':
+    selected = config.get('model_specs', {}).get(name)
+    if name == 'VAR' and selected is None:
         return 'self_impl.VAR_model', {'lags': config['var_lags']}, None, 'full'
     hyper = dict(config['model_defaults'][name], **config['training'])
     hyper.update(seq_len=task['lookback'], pred_len=task['pred_len'], horizon=task['pred_len'])
@@ -459,6 +460,11 @@ def model_spec(config, task):
     hyper.update(loss='composite_trading' if task['experimento'] == 'composto' else config['loss']['loss_temporal'], loss_cross=task['loss'],
                  loss_trade_window=task['k'] or 1,
                  loss_cross_lambda=task['cross_lambda'], loss_cross_delta=task['cross_delta'])
+    if selected is not None:
+        hyper.update(_ordinal_model_name=selected['model_name'],
+                     _ordinal_model_adapter=selected['adapter'],
+                     _ordinal_model_label=name)
+        return 'ordinal_model_adapter.OrdinalModel', hyper, None, selected['deterministic']
     heads = task_head_settings(config, task)
     if heads is not None:
         hyper.update(task_head_mode=heads['task_head_mode'], rank_windows=heads['rank_windows'],
@@ -632,6 +638,20 @@ def provenance(config, metadata):
         code_files += ['ts_benchmark/baselines/ordinal_losses.py',
                        'ts_benchmark/baselines/utils.py',
                        'scripts/ordinal_experiment.py', 'scripts/run_ordinal_experiment.sh']
+    if config.get('model_specs'):
+        code_files += ['scripts/ordinal_model_registry.py',
+                       'ts_benchmark/baselines/ordinal_model_adapter.py',
+                       'ts_benchmark/models/model_loader.py']
+        # Native defaults and architecture dependencies belong to the frozen design.
+        for spec in config['model_specs'].values():
+            source = (ROOT / spec['source_path']).resolve()
+            source.relative_to(ROOT.resolve())
+            code_files.append(source.relative_to(ROOT).as_posix())
+            family = ROOT / 'ts_benchmark' / 'baselines' / spec['family']
+            family.resolve().relative_to((ROOT / 'ts_benchmark' / 'baselines').resolve())
+            if family.is_dir():
+                code_files.extend(p.relative_to(ROOT).as_posix() for p in sorted(family.rglob('*.py')))
+        code_files = list(dict.fromkeys(code_files))
     if task_head_settings(config) is not None:
         code_files += ['scripts/itransformer_task_heads.py',
                        'ts_benchmark/baselines/itransformer_task_heads.py',
@@ -683,6 +703,14 @@ def provenance(config, metadata):
 
 def prepare(config_path, config, tasks, out_root):
     from b3_experiment_io import prepare_dataset
+    if config.get('model_specs'):
+        from ts_benchmark.baselines.ordinal_model_adapter import validate_model
+        checked = set()
+        for task in tasks:
+            if task['modelo'] not in checked:
+                _, hyper, _, _ = model_spec(config, task)
+                validate_model(**hyper)
+                checked.add(task['modelo'])
     source = Path(os.environ.get('DATASET_PATH', ROOT / 'dataset/forecasting/b3_daily_tfb_new.csv')).resolve()
     dataset = ROOT / 'dataset/forecasting/b3_log_returns_new.csv'
     with locked(dataset.parent / '.b3_new_prepare.lock'):

@@ -72,8 +72,10 @@ class OrdinalLauncherTest(unittest.TestCase):
             NS_BUCKET_TARGET_TAU='.8', NS_HINGE_MARGIN='0', NS_BATCH_SIZE='8',
             NS_NUM_EPOCHS='11', NS_PATIENCE='4', NS_LEARNING_RATE='.002', NS_LRADJ='constant'))
         for b,t in tasks(branches):
-            _, hyper, adapter, _ = b3.model_spec(b['config'],t)
-            self.assertEqual(adapter, 'transformer_adapter')
+            factory, hyper, adapter, _ = b3.model_spec(b['config'],t)
+            self.assertEqual(factory, 'ordinal_model_adapter.OrdinalModel')
+            self.assertIsNone(adapter)
+            self.assertEqual(hyper['_ordinal_model_adapter'], 'transformer_adapter')
             self.assertEqual(hyper['batch_size'],8)
             self.assertEqual(hyper['num_epochs'],11)
             self.assertEqual(hyper['patience'],4)
@@ -91,6 +93,39 @@ class OrdinalLauncherTest(unittest.TestCase):
             elif t['loss']=='bucket_listnet':
                 self.assertEqual(hyper['loss_bucket_tau'],.6)
                 self.assertEqual(hyper['loss_bucket_target_tau'],.8)
+
+    def test_model_override_merges_without_hiding_other_architectures(self):
+        branches = ordinal.build_branches(settings(MODEL='DUET PatchTST DTAF',
+            NS_MODEL_DEFAULTS_JSON='{"Nonstationary_Transformer":{"d_model":64},"PatchTST":{"d_model":32}}'))
+        cfg = branches[0]['config']
+        self.assertEqual(set(cfg['models']), {'DUET', 'PatchTST', 'DTAF'})
+        self.assertEqual(cfg['model_defaults']['DUET']['d_model'],32)
+        self.assertEqual(cfg['model_defaults']['DUET']['num_experts'],4)
+        self.assertEqual(cfg['model_defaults']['PatchTST']['d_model'],32)
+        self.assertTrue(cfg['model_defaults']['DTAF']['norm'])
+        self.assertNotIn('d_model',cfg['model_defaults']['DTAF'])
+        self.assertEqual(cfg['model_specs']['PatchTST']['adapter'],'transformer_adapter')
+        self.assertIsNone(cfg['model_specs']['DTAF']['adapter'])
+
+    def test_qualified_aliases_deduplicate_and_overrides_merge_with_old_defaults(self):
+        branches = ordinal.build_branches(settings(MODEL='NonStationary_Transformer time_series_library.Nonstationary_Transformer ts_benchmark.baselines.time_series_library.models.Nonstationary_Transformer.Nonstationary_Transformer',
+            NS_MODEL_DEFAULTS_JSON='{"time_series_library.Nonstationary_Transformer":{"d_model":64}}'))
+        self.assertEqual(len(tasks(branches)),102)
+        cfg = branches[0]['config']
+        self.assertEqual(cfg['models'],['Nonstationary_Transformer'])
+        self.assertEqual(cfg['model_defaults']['Nonstationary_Transformer']['d_model'],64)
+        self.assertEqual(cfg['model_defaults']['Nonstationary_Transformer']['p_hidden_dims'],[32,32])
+
+    def test_full_source_class_and_exported_statistical_models_are_discoverable(self):
+        branches = ordinal.build_branches(settings(MODEL='time_series_library.models.TiDE.TiDE darts.ARIMA',
+            NS_MODEL_DEFAULTS_JSON=''))
+        cfg = branches[0]['config']
+        self.assertIn('time_series_library.models.TiDE.TiDE',cfg['models'])
+        self.assertIn('ARIMA',cfg['models'])
+        self.assertEqual(cfg['model_specs']['ARIMA']['family'],'darts')
+        self.assertEqual(cfg['model_specs']['time_series_library.models.TiDE.TiDE']['adapter'],'transformer_adapter')
+        # Discovery says nothing about whether a native training loop can use
+        # ordinal labels: the producer's runtime preflight makes that decision.
 
     def test_pure_ordinal_not_repeated_for_inactive_temporal_loss(self):
         branches = ordinal.build_branches(settings(TEMPORAL_LOSSES_VALUES='mse huber',

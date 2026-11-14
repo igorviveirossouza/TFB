@@ -15,7 +15,7 @@ As quatro opções de `CROSS_LOSSES_VALUES` são:
 - `bucket_hinge`: média de `max(0, margin-(s_i-s_j))` nos mesmos pares; `margin>=0`.
 - `bucket_listnet`: `-sum_i p_i log(q_i)`, com `p=softmax((T-c)/tau_y)` e `q=softmax(s/tau_s)`.
 
-O escore `s` segue a agregação financeira e a normalização transversal configuradas. As perdas são promediadas entre amostras e janelas. A perda total é `(1-lambda)*temporal + lambda*CROSS_SCALE*ordinal`. Lambda zero usa exatamente o modelo temporal nativo e não treina limites ordinais. Lambda um não avalia a perda temporal.
+O escore `s` segue a agregação financeira e a normalização transversal configuradas. As perdas são promediadas entre amostras e janelas. A parcela supervisionada é `(1-lambda)*temporal + lambda*CROSS_SCALE*ordinal`. Lambda zero usa o objetivo temporal e não treina limites ordinais. Lambda um não avalia a perda temporal. Regularizações próprias da arquitetura, como o `additional_loss` do DUET, continuam sendo somadas pelo treinador nativo fora dessa combinação, inclusive nos extremos de lambda; seus controles arquiteturais permanecem preservados.
 
 Não há kernel proximity nem zona morta delta nestas quatro opções. RankNet e Hinge desconsideram a ordem interna de um estrato. ListNet atribui probabilidades-alvo iguais aos ativos de um mesmo estrato.
 
@@ -72,11 +72,12 @@ export NS_LEARNING_RATE=0.0001
 export NS_LRADJ=''                                  # vazio: regra nativa; ou constant
 export NS_TRAIN_RATIO_IN_TV=0.875
 export NS_VALIDATION_MODE='ordered_sample_mean'
-export NS_STRIDE=1
+export NS_STRIDE=1                                  # restrição atual do produtor B3
 export NS_NUM_ROLLINGS=48000
 
-# Arquitetura: JSON por modelo escolhido, sem os campos de treino/loss acima
-export NS_MODEL_DEFAULTS_JSON='{"Nonstationary_Transformer":{"d_model":128,"d_ff":256,"e_layers":2,"d_layers":1,"n_heads":8,"dropout":0.1,"factor":3,"norm":true,"p_hidden_dims":[32,32],"p_hidden_layers":2,"lradj":"type1"}}'
+# Arquitetura: opcional; inclua apenas modelos/campos que deseja sobrescrever
+export NS_MODEL_DEFAULTS_JSON='{}'
+# Exemplo: '{"Nonstationary_Transformer":{"d_model":128,"d_ff":256}}'
 
 # Slurm: vazio em NS_GRES solicita nenhum recurso GPU
 export NS_PARTITION='gorgonas'
@@ -107,7 +108,11 @@ bash scripts/run_ordinal_experiment.sh --dry-run
 bash scripts/run_ordinal_experiment.sh --train
 ```
 
-O nome `NonStationary_Transformer` também é aceito como alias, convertido para o nome nativo `Nonstationary_Transformer`. Outros modelos nativos disponíveis: iTransformer, simpleFORMER, simpleMLP, TimesNet, FEDformer e DUET. Ao escolher vários, inclua cada modelo no JSON de arquitetura; `--print-exports` mostra o JSON default completo.
+`MODEL` é resolvido dinamicamente pelos modelos publicados no checkout TFB, sem uma lista fixa de sete arquiteturas. Aceita nomes como `DUET PatchTST DTAF`, caminhos de exportação como `time_series_library.PatchTST` e caminhos completos locais como `ts_benchmark.baselines.time_series_library.models.TiDE.TiDE`. Nomes que apontam para a mesma implementação são deduplicados; se um nome curto for ambíguo, informe o pacote. `NonStationary_Transformer` continua sendo um alias de `Nonstationary_Transformer`.
+
+`NS_MODEL_DEFAULTS_JSON` é opcional e funciona por sobrescrita de campos. Um JSON que contenha somente `Nonstationary_Transformer` não bloqueia `MODEL=DUET`. Os sete defaults anteriores são conservados; modelos adicionais usam seus defaults nativos, com os controles comuns de treinamento deste experimento e `norm=true` por padrão. Portanto, para mudar somente o modelo, basta alterar `MODEL`; não é necessário criar uma entrada no JSON. Exemplo de ajuste específico: `export NS_MODEL_DEFAULTS_JSON='{"DUET":{"num_experts":8},"PatchTST":{"d_model":64}}'`.
+
+A descoberta de um modelo no plano não garante que seu treinador aceite esse objetivo. Antes de preparar dados ou submeter jobs, o produtor carrega o adaptador nativo e verifica sua compatibilidade com a loss ordinal, os alvos econômicos e os checkpoints. Modelos estatísticos ou provedores com um treinador próprio incompatível exigem uma adaptação específica e geram erro explicativo, em vez de treinarem silenciosamente com outra loss. Os modelos Time Series Library recebem automaticamente o `transformer_adapter`; outros pacotes conservam seus wrappers nativos. Restrições próprias de cada arquitetura, como combinações de lookback, tamanho de patch e número de cabeças, continuam válidas.
 
 Para imprimir **todos** os campos públicos com seus valores efetivos:
 
@@ -118,7 +123,7 @@ bash scripts/run_ordinal_experiment.sh --print-config
 
 ## Saídas e reexecução
 
-Cada ramo possui um `run_config.json` congelado em `treino=N/experimento=temporal|composto`. As previsões continuam em `part.parquet`; o manifesto de tarefas inclui T, temperaturas/margem ativas e a política de empates. Os caminhos separam protocolo, seed, perda temporal, variante, T, loss, lambda, modelo, LB e H. O `run_config.json` registra a ordem dos canais, calendários e hashes dos dados/código.
+Cada ramo possui um `run_config.json` congelado em `treino=N/experimento=temporal|composto`. As previsões continuam em `part.parquet`; o manifesto de tarefas inclui T, temperaturas/margem ativas e a política de empates. Os caminhos separam protocolo, seed, perda temporal, variante, T, loss, lambda, modelo, LB e H. O `run_config.json` registra a ordem dos canais, calendários, resolução do modelo/adaptador em `model_specs` e hashes dos dados/código.
 
 Por padrão, os arrays dos ramos são encadeados, mantendo até `NS_MAX_CONCURRENT_JOBS` tarefas simultâneas para o experimento. `NS_PARALLEL_BRANCHES=1` altera esse limite para **cada ramo**, explicitamente. Marcas de submissão ficam em `NS_LOG_ROOT/ordinal_submissions`; elas registram submissão, não conclusão do treino.
 

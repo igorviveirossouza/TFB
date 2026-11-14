@@ -19,6 +19,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from scripts import b3_experiment as b3
+from scripts.ordinal_model_registry import discover_models, resolve_model
 
 DEFAULT_MODELS = {
     'Nonstationary_Transformer': dict(d_model=128, d_ff=256, e_layers=2, d_layers=1,
@@ -109,21 +110,27 @@ def boolean(s, key):
 
 
 def build_branches(s):
-    models = tokens(s['MODEL'], str, 'MODEL')
-    models = list(dict.fromkeys('Nonstationary_Transformer' if x == 'NonStationary_Transformer' else x for x in models))
-    if set(models) - set(DEFAULT_MODELS):
-        raise ValueError('Modelo sem integracao ordinal nativa: ' + ' '.join(sorted(set(models)-set(DEFAULT_MODELS))))
-    model_defaults = json.loads(s['NS_MODEL_DEFAULTS_JSON'])
-    if not isinstance(model_defaults, dict):
+    registry = discover_models(ROOT)
+    model_specs = {}
+    for requested in tokens(s['MODEL'], str, 'MODEL'):
+        label, spec = resolve_model(requested, ROOT, registry)
+        model_specs.setdefault(label, spec)
+    models = list(model_specs)
+    overrides = json.loads(s['NS_MODEL_DEFAULTS_JSON'].strip() or '{}')
+    if not isinstance(overrides, dict):
         raise ValueError('NS_MODEL_DEFAULTS_JSON deve ser objeto por modelo')
+    model_defaults = {name: {'norm': True, **DEFAULT_MODELS.get(name, {})} for name in models}
     reserved = {'batch_size', 'seq_len', 'pred_len', 'horizon', 'task_head_mode', 'rank_windows',
                 'ranking_construction', 'parallel_strategy', 'lr', 'num_epochs', 'patience', 'validation_mode'}
-    for name in models:
-        opts = model_defaults.get(name)
+    for requested, opts in overrides.items():
         if not isinstance(opts, dict):
-            raise ValueError('Modelo sem arquitetura em NS_MODEL_DEFAULTS_JSON: ' + name)
+            raise ValueError('Override de arquitetura deve ser objeto: '+requested)
+        name, _ = resolve_model(requested, ROOT, registry)
+        if name not in model_defaults:
+            continue
         if any(k in reserved or k.startswith(('loss', 'momentum')) for k in opts):
             raise ValueError('JSON de arquitetura contem campos de treino/loss; use exports especificos')
+        model_defaults[name].update(opts)
     batch = number(s, 'NS_BATCH_SIZE', int)
     architecture = {name: dict(model_defaults[name], batch_size=batch, parallel_strategy=None) for name in models}
     temporal = tokens(s['TEMPORAL_LOSSES_VALUES'], str, 'TEMPORAL_LOSSES_VALUES')
@@ -168,7 +175,8 @@ def build_branches(s):
         training['validation_mode'] = s['NS_VALIDATION_MODE']
     config = dict(source_data_kind=s['SOURCE_DATA_KIND'],
         train_percentages=tokens(s['TRAIN_VALUES'], int, 'TRAIN_VALUES', 1, 99),
-        models=models, model_defaults=architecture, training=training, loss=loss,
+        models=models, model_defaults=architecture, model_specs=model_specs,
+        training=training, loss=loss,
         lookbacks=tokens(s['LOOKBACKS_VALUES'], int, 'LOOKBACKS_VALUES', 1), horizons=horizons,
         trade_windows=windows, cross_losses=['ranknet'], lambdas=[.5], deltas=[0], var_lags=13,
         strategy=dict(train_ratio_in_tv=number(s, 'NS_TRAIN_RATIO_IN_TV'),

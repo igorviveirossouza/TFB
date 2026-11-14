@@ -255,11 +255,13 @@ class DeepForecastingModelBase(ModelBase):
         ordinal = self._ordinal_enabled()
         if self._momentum_enabled() or ordinal:
             from ts_benchmark.baselines.composite_trading_loss_v3 import build_loss as loss_builder
-        criterion = loss_builder(
-            self.config,
-            normalizer_mean=normalizer_mean,
-            normalizer_scale=normalizer_scale,
-        )
+        criterion = getattr(self, "_ordinal_prepared_criterion", None)
+        if criterion is None:
+            criterion = loss_builder(
+                self.config,
+                normalizer_mean=normalizer_mean,
+                normalizer_scale=normalizer_scale,
+            )
         if self._momentum_diagnostics_enabled():
             criterion.track_components = True
         if ordinal:
@@ -436,7 +438,8 @@ class DeepForecastingModelBase(ModelBase):
                 base_value = self._get_loss_base_value(input, target, series_dim)
                 target = target[:, -config.horizon :, :series_dim]
                 output = output[:, -config.horizon :, :series_dim]
-                output, target = self._post_process(output, target)
+                if not getattr(self, "_ordinal_experiment_adapter", False):
+                    output, target = self._post_process(output, target)
                 all_loss = (
                     self._criterion_loss(criterion, output, target, base_value=base_value,
                                          history=input[:, :, :series_dim], **ordinal_kwargs)
@@ -566,7 +569,11 @@ class DeepForecastingModelBase(ModelBase):
         self.early_stopping = self._init_early_stopping()
         self.model.to(device)
 
-        criterion, optimizer = self._init_criterion_and_optimizer()
+        if getattr(self, "_ordinal_experiment_adapter", False):
+            from ts_benchmark.baselines.ordinal_model_adapter import initialize_objective
+            criterion, optimizer = initialize_objective(self)
+        else:
+            criterion, optimizer = self._init_criterion_and_optimizer()
 
         if config.use_amp == 1:
             scaler = torch.cuda.amp.GradScaler()
@@ -621,7 +628,8 @@ class DeepForecastingModelBase(ModelBase):
                 base_value = self._get_loss_base_value(input, target, series_dim)
                 target = target[:, -config.horizon :, :series_dim]
                 output = output[:, -config.horizon :, :series_dim]
-                output, target = self._post_process(output, target)
+                if not getattr(self, "_ordinal_experiment_adapter", False):
+                    output, target = self._post_process(output, target)
                 loss = self._criterion_loss(criterion, output, target, base_value=base_value,
                                             history=input[:, :, :series_dim], **ordinal_kwargs)
 
