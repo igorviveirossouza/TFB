@@ -124,3 +124,42 @@ def test_continuous_return_target_is_retained_only_in_temporal_component():
                   - mixed(prediction, first, target_economic=first))
     expected = .5 * (F.mse_loss(prediction, second) - F.mse_loss(prediction, first))
     torch.testing.assert_close(difference, expected, rtol=1e-12, atol=1e-12)
+
+
+@pytest.mark.parametrize("name", sorted(ORDINAL_LOSSES))
+def test_blocks_k1_supervises_every_day_of_h25_instead_of_only_the_origin_prefix(name):
+    batch_size, horizon = 2, 25
+    daily_returns = torch.tensor([.03, .01, -.02, .04, 0., -.01], dtype=torch.float64)
+    # Daily classes change through the horizon; day 25 has the initial ordering.
+    actual = torch.stack([daily_returns.roll(h) for h in range(horizon)])
+    actual = actual.unsqueeze(0).repeat(batch_size, 1, 1)
+    model_target = torch.zeros_like(actual)
+    prediction = torch.tensor([.3, -.1, .4, -.8, .1, .2], dtype=torch.float64)
+    prediction = prediction.reshape(1, 1, -1).repeat(batch_size, horizon, 1).requires_grad_()
+    blocks = objective(name, cross_construction="blocks", trade_window=1)
+    prefix = objective(name, cross_construction="origin_anchored_windows", rank_windows=[1])
+
+    block_loss = blocks(prediction, model_target, target_economic=actual)
+    prefix_loss = prefix(prediction, model_target, target_economic=actual)
+    block_gradient = torch.autograd.grad(block_loss, prediction)[0]
+    prefix_gradient = torch.autograd.grad(prefix_loss, prediction)[0]
+    assert torch.all(block_gradient.abs().sum(-1) > 0)
+    assert torch.all(prefix_gradient[:, 0].abs().sum(-1) > 0)
+    assert torch.count_nonzero(prefix_gradient[:, 1:]) == 0
+
+    changed = prediction.detach().clone()
+    changed[-1, -1] = torch.tensor([1.2, .2, -1.2, .8, -.1, -.9], dtype=torch.float64)
+    changed_blocks = blocks(changed, model_target, target_economic=actual)
+    changed_prefix = prefix(changed, model_target, target_economic=actual)
+    assert changed_blocks < block_loss
+    torch.testing.assert_close(changed_prefix, prefix_loss, rtol=0, atol=0)
+
+    # With lambda=1, changing one future cross-section contributes exactly
+    # 1/(B*H) of its daily ordinal loss change, without any temporal term.
+    last_target = model_target[-1:, -1:]
+    last_actual = actual[-1:, -1:]
+    last_before = blocks(prediction[-1:, -1:], last_target, target_economic=last_actual)
+    last_after = blocks(changed[-1:, -1:], last_target, target_economic=last_actual)
+    expected_change = (last_after - last_before) / (batch_size * horizon)
+    torch.testing.assert_close(changed_blocks - block_loss, expected_change,
+                               rtol=1e-10, atol=1e-12)

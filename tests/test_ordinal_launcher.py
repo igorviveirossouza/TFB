@@ -36,7 +36,12 @@ class OrdinalLauncherTest(unittest.TestCase):
         self.assertEqual({t['pred_len'] for _, t in rows}, {1, 25})
         for b, t in rows:
             if t['cross_lambda']:
-                self.assertEqual(t['rank_windows'], [k for k in [1,5,10,15,20,25] if k <= t['pred_len']])
+                self.assertEqual(t['cross_construction'], 'blocks')
+                self.assertEqual(t['k'], 1)
+                self.assertEqual(t['rank_windows'], [])
+                _, hyper, _, _ = b3.model_spec(b['config'], t)
+                self.assertEqual(hyper['loss_cross_construction'], 'blocks')
+                self.assertEqual(hyper['loss_trade_window'], 1)
                 self.assertEqual(t['bucket_count'], 3)
             else:
                 self.assertNotIn('loss_bucket_count', b['config']['loss'])
@@ -65,6 +70,33 @@ class OrdinalLauncherTest(unittest.TestCase):
         self.assertEqual({(t['pred_len'], t['k']) for _,t in rows if t['cross_lambda']},
                          {(1,1),(5,1),(5,5),(25,1),(25,5),(25,25)})
         self.assertTrue(all(not t.get('rank_windows') for _,t in rows))
+
+    def test_accumulated_origin_windows_require_explicit_protocol(self):
+        s = settings(NS_RANKING_PROTOCOL='origin_anchored_windows', LOOKBACKS_VALUES='32',
+                     LAMBDAS_VALUES='1', CROSS_LOSSES_VALUES='bucket_hinge')
+        branches = ordinal.build_branches(s)
+        for _, t in tasks(branches):
+            self.assertEqual(t['cross_construction'], 'origin_anchored_windows')
+            self.assertEqual(t['rank_windows'], [k for k in [1,5,10,15,20,25] if k <= t['pred_len']])
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            ordinal.plan(s, branches)
+        self.assertIn('acumulados desde a origem', output.getvalue())
+        self.assertIn('nao limita este protocolo ao ranking diario', output.getvalue())
+
+    def test_default_daily_training_is_independent_of_evaluation_windows(self):
+        s = settings(LOOKBACKS_VALUES='32', HORIZON_VALUES='25',
+                     LAMBDAS_VALUES='1', CROSS_LOSSES_VALUES='bucket_hinge')
+        branches = ordinal.build_branches(s)
+        other = dict(s, RANK_WINDOWS_VALUES='unused', K_EVAL_VALUES='1 25')
+        changed = ordinal.build_branches(other)
+        self.assertEqual(branches, changed)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            ordinal.plan(s, branches)
+        self.assertIn('ranking diario em cada um dos H passos', output.getvalue())
+        self.assertIn('RANK_WINDOWS_VALUES inativo', output.getvalue())
+        self.assertIn('configurar separadamente no R', output.getvalue())
 
     def test_hyperparameters_reach_native_model_and_active_paths(self):
         branches = ordinal.build_branches(settings(LOOKBACKS_VALUES='32', HORIZON_VALUES='1',

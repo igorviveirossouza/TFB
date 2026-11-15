@@ -4,7 +4,7 @@ Esta auditoria descreve o comportamento efetivo do experimento. A correção do 
 
 ## Alvos reais
 
-Para cada origem e janela K, os log-retornos futuros verdadeiros são acumulados por ativo. No protocolo `origin_anchored_windows`, usam-se somente os primeiros K passos daquela origem. O universo é ordenado de forma decrescente e recebe
+O padrão do launcher é `blocks` com K_loss=1: os retornos futuros verdadeiros de cada passo são classificados separadamente entre os ativos. Para H=25, há 25 seções transversais supervisionadas por amostra, com igual peso. Para outros valores de K_loss em `blocks`, acumulam-se blocos disjuntos de K passos. No protocolo opcional `origin_anchored_windows`, cada janela K usa somente os primeiros K passos daquela origem; `RANK_WINDOWS_VALUES=1` nesse protocolo supervisiona apenas o primeiro passo. Em cada seção, o universo é ordenado de forma decrescente e recebe
 
 \[
 c_i=1+\left\lfloor \frac{T\,\operatorname{rank0}_{\downarrow}(r_i)}{N}\right\rfloor,
@@ -17,7 +17,7 @@ O treinador conserva esses retornos reais em float64 antes da padronização e o
 
 ## Previsão e função de perda
 
-A rede mantém sua saída contínua `[batch, H, N]`. A loss acumula essa saída em um escore por ativo e janela, restaura a escala quando necessário e aplica a normalização transversal configurada. Denote esse escore por s: maior s significa ativo melhor colocado.
+A rede mantém sua saída contínua `[batch, H, N]`. A loss restaura a escala quando necessário, agrega a saída conforme o protocolo e aplica a normalização transversal configurada. No padrão `blocks` com K_loss=1, cada passo fornece seu próprio escore, sem acumulação entre dias. Denote esse escore por s: maior s significa ativo melhor colocado. As janelas de avaliação dos ICs são independentes dessa escolha de treinamento.
 
 As classes inteiras são os alvos da parcela ordinal. As previsões entram na loss como escores ou probabilidades diferenciáveis. Transformá-las primeiro em rótulos inteiros com `argsort`, `argmax` ou arredondamento interromperia o gradiente usual entre a loss e a rede. A conversão final para uma classe pertence à inferência/avaliação, ou exige uma relaxação diferenciável explicitamente definida.
 

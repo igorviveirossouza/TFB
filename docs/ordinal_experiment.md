@@ -1,6 +1,6 @@
 # Experimento ordinal por estratos
 
-O launcher `scripts/run_ordinal_experiment.sh` usa os produtores B3 existentes, o mesmo painel de log-retornos e uma saída temporal compartilhada `[B,H,N]`. Os alvos da parcela ordinatória são estratos transversais de retornos acumulados: `1` é o melhor e `T` o pior. A parcela temporal continua sendo MSE por padrão.
+O launcher `scripts/run_ordinal_experiment.sh` usa os produtores B3 existentes, o mesmo painel de log-retornos e uma saída temporal compartilhada `[B,H,N]`. Por padrão, os alvos da parcela ordinatória são estratos transversais de retornos diários, construídos separadamente em cada um dos H passos previstos: `1` é o melhor e `T` o pior. A parcela temporal continua sendo MSE por padrão.
 
 ## Objetivos
 
@@ -23,9 +23,15 @@ Não há kernel proximity nem zona morta delta nestas quatro opções. RankNet e
 
 Defaults: `Nonstationary_Transformer`, treino 80%, H=`1 25`, LB=`32 256 512`, T=`3`, seed=`2026`, lambdas=`0 .1 .5 .8 1`. São **102 ajustes**: 6 controles temporais, 72 mistos e 24 ordinais puros. Os quatro objetivos compartilham os seis controles.
 
-`NS_RANKING_PROTOCOL=origin_anchored_windows` supervisiona, no mesmo treino, os retornos acumulados desde a origem nas janelas de `RANK_WINDOWS_VALUES` que cabem em H. O default é `1 5 10 15 20 25`; para H=1, somente a janela 1 é usada. `K_LOSS_VALUES=1` é obrigatório neste protocolo.
+O padrão de treinamento é `NS_RANKING_PROTOCOL=blocks` com `K_LOSS_VALUES=1`. Para H=25, a loss compara os ativos separadamente em cada um dos 25 dias previstos e faz a média dessas perdas. Não há acumulação entre dias no treinamento padrão. Com H=1, existe uma única seção transversal. `RANK_WINDOWS_VALUES` fica inativo neste protocolo.
 
-`NS_RANKING_PROTOCOL=blocks` conserva os blocos disjuntos de K; são gerados somente pares `K<=H` e `H % K == 0`. Nesse caso, `RANK_WINDOWS_VALUES` é inativo. `K_EVAL_VALUES` informa a configuração da análise, sem alterar o treino.
+É possível escolher outros valores de K_loss em `blocks`; nesse caso, os retornos são acumulados em blocos disjuntos de K, com `K<=H` e `H % K == 0`.
+
+O protocolo opcional `NS_RANKING_PROTOCOL=origin_anchored_windows` supervisiona, no mesmo treino, os retornos acumulados desde a origem nas janelas de `RANK_WINDOWS_VALUES` que cabem em H. Seu vetor padrão é `1 5 10 15 20 25`; para H=1, somente a janela 1 é usada. `K_LOSS_VALUES=1` é obrigatório neste protocolo, mas não limita a supervisão ao retorno diário. Usar `RANK_WINDOWS_VALUES=1` aqui supervisiona apenas o primeiro passo, não todos os H passos individualmente.
+
+`K_EVAL_VALUES=1 5 10 15 20 25` indica as janelas desejadas para a análise e não altera o treinamento. Configure essas janelas separadamente na chamada ao R; o launcher de treinamento não executa o R nem lhe transmite esse export automaticamente. Assim, treinar diariamente com K_loss=1 permite avaliar ICs acumulados até K_eval=H.
+
+Exports já presentes no terminal prevalecem sobre os defaults. Para adotar o treino diário após usar o protocolo acumulado, exporte explicitamente `NS_RANKING_PROTOCOL=blocks` e `K_LOSS_VALUES=1`; confira a descrição da supervisão em `--plan` antes de submeter. Treinos já executados conservam sua configuração original.
 
 T aceita vários valores em `BUCKET_COUNTS_VALUES`. Modelo, cortes, LB, H, seeds, lambdas, perdas temporais e K_loss também aceitam listas separadas por espaços. Os controles lambda zero não se repetem por T, loss ordinal, temperaturas ou K_loss. Lambda um também não se repete entre perdas temporais, pois essa parcela é inativa; a análise reutiliza o mesmo ordinal puro nas comparações pertinentes.
 
@@ -49,10 +55,10 @@ export LAMBDAS_VALUES='0 0.1 0.5 0.8 1'
 export TEMPORAL_LOSSES_VALUES='mse'
 
 # Construção dos alvos e escala das losses
-export NS_RANKING_PROTOCOL='origin_anchored_windows'  # ou blocks
+export NS_RANKING_PROTOCOL='blocks'                 # padrão: ranking diário em todos os H passos
 export K_LOSS_VALUES='1'
-export RANK_WINDOWS_VALUES='1 5 10 15 20 25'
-export K_EVAL_VALUES='1 5 10 15 20 25'
+export RANK_WINDOWS_VALUES='1 5 10 15 20 25'         # inativo em blocks; treino acumulado se optar por origin_anchored_windows
+export K_EVAL_VALUES='1 5 10 15 20 25'               # somente análise; configurar também na chamada ao R
 export NS_ORDINAL_TAU=1
 export NS_BUCKET_TAU=1
 export NS_BUCKET_TARGET_TAU=1

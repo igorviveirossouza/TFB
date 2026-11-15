@@ -45,7 +45,7 @@ DEFAULTS = dict(
     K_LOSS_VALUES='1', LAMBDAS_VALUES='0 0.1 0.5 0.8 1', SEEDS_VALUES='2026',
     TEMPORAL_LOSSES_VALUES='mse', BUCKET_COUNTS_VALUES='3',
     CROSS_LOSSES_VALUES='ordinal_ce bucket_ranknet bucket_hinge bucket_listnet',
-    NS_RANKING_PROTOCOL='origin_anchored_windows', RANK_WINDOWS_VALUES='1 5 10 15 20 25',
+    NS_RANKING_PROTOCOL='blocks', RANK_WINDOWS_VALUES='1 5 10 15 20 25',
     K_EVAL_VALUES='1 5 10 15 20 25', NS_ORDINAL_TAU='1', NS_BUCKET_TAU='1',
     NS_BUCKET_TARGET_TAU='1', NS_HINGE_MARGIN='0.1',
     NS_BATCH_SIZE='16', NS_NUM_EPOCHS='100', NS_PATIENCE='10', NS_LEARNING_RATE='0.0001',
@@ -274,6 +274,16 @@ def plan(s, branches):
               sum(0 < t['cross_lambda'] < 1 for t in tasks), sum(t['cross_lambda'] == 1 for t in tasks)]
     print(f"Ordinal | modelos={s['MODEL']} | cortes={s['TRAIN_VALUES']} | LB={s['LOOKBACKS_VALUES']} | H={s['HORIZON_VALUES']}")
     print(f"Protocolo={s['NS_RANKING_PROTOCOL']}; T={s['BUCKET_COUNTS_VALUES']}; seeds={s['SEEDS_VALUES']}")
+    if s['NS_RANKING_PROTOCOL'] == 'blocks':
+        if tokens(s['K_LOSS_VALUES'], int, 'K_LOSS_VALUES') == [1]:
+            print('Treino ordinal: K_loss=1; ranking diario em cada um dos H passos previstos.')
+        else:
+            print(f"Treino ordinal: blocos disjuntos de K_loss={s['K_LOSS_VALUES']}; todos os H passos supervisionados.")
+        print('RANK_WINDOWS_VALUES inativo no protocolo blocks.')
+    else:
+        print(f"Treino ordinal: acumulados desde a origem em K={s['RANK_WINDOWS_VALUES']} (somente K<=H).")
+        print('K_LOSS_VALUES=1 nao limita este protocolo ao ranking diario.')
+    print(f"Avaliacao: K_EVAL_VALUES={s['K_EVAL_VALUES']} (configurar separadamente no R; nao altera o treino).")
     print(f"Previsoes: {s['PRED_ROOT']}")
     print(f"Resultados: {s['NS_RESULT_ROOT']}")
     print(f"Logs: {s['NS_LOG_ROOT']}")
