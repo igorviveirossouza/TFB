@@ -50,17 +50,19 @@ class Pyraformer(nn.Module):
 
     def short_forecast(self, x_enc, x_mark_enc, x_dec, x_mark_dec, mask=None):
         # Normalization
-        mean_enc = x_enc.mean(1, keepdim=True).detach()  # B x 1 x E
-        x_enc = x_enc - mean_enc
-        std_enc = torch.sqrt(
-            torch.var(x_enc, dim=1, keepdim=True, unbiased=False) + 1e-5
-        ).detach()  # B x 1 x E
-        x_enc = x_enc / std_enc
+        if not getattr(self, "rank_target_mode", False):
+            mean_enc = x_enc.mean(1, keepdim=True).detach()  # B x 1 x E
+            x_enc = x_enc - mean_enc
+            std_enc = torch.sqrt(
+                torch.var(x_enc, dim=1, keepdim=True, unbiased=False) + 1e-5
+            ).detach()  # B x 1 x E
+            x_enc = x_enc / std_enc
 
         enc_out = self.encoder(x_enc, x_mark_enc)[:, -1, :]
         dec_out = self.projection(enc_out).view(enc_out.size(0), self.pred_len, -1)
 
-        dec_out = dec_out * std_enc + mean_enc
+        if not getattr(self, "rank_target_mode", False):
+            dec_out = dec_out * std_enc + mean_enc
         return dec_out
 
     def imputation(self, x_enc, x_mark_enc, x_dec, x_mark_dec, mask):

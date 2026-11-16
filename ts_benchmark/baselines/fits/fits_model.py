@@ -37,11 +37,12 @@ class FITSModel(nn.Module):
 
     def forward(self, x):
         # RIN
-        x_mean = torch.mean(x, dim=1, keepdim=True)
-        x = x - x_mean
-        x_var = torch.var(x, dim=1, keepdim=True) + 1e-5
-        # print(x_var)
-        x = x / torch.sqrt(x_var)
+        if not getattr(self, "rank_target_mode", False):
+            x_mean = torch.mean(x, dim=1, keepdim=True)
+            x = x - x_mean
+            x_var = torch.var(x, dim=1, keepdim=True) + 1e-5
+            # print(x_var)
+            x = x / torch.sqrt(x_var)
 
         low_specx = torch.fft.rfft(x, dim=1)
         low_specx[:, self.dominance_freq :] = 0  # LPF
@@ -80,5 +81,7 @@ class FITSModel(nn.Module):
 
         # dom_xy=self.Dlinear(dom_x)
         # xy=(low_xy+dom_xy) * torch.sqrt(x_var) +x_mean # REVERSE RIN
+        if getattr(self, "rank_target_mode", False):
+            return low_xy, low_xy
         xy = (low_xy) * torch.sqrt(x_var) + x_mean
         return xy, low_xy * torch.sqrt(x_var)

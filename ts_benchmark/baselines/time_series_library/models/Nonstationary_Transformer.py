@@ -181,11 +181,12 @@ class Nonstationary_Transformer(nn.Module):
 
         # Normalization
         mean_enc = x_enc.mean(1, keepdim=True).detach()  # B x 1 x E
-        x_enc = x_enc - mean_enc
+        centered = x_enc - mean_enc
         std_enc = torch.sqrt(
-            torch.var(x_enc, dim=1, keepdim=True, unbiased=False) + 1e-5
+            torch.var(centered, dim=1, keepdim=True, unbiased=False) + 1e-5
         ).detach()  # B x 1 x E
-        x_enc = x_enc / std_enc
+        if not getattr(self, "rank_target_mode", False):
+            x_enc = centered / std_enc
         # B x S x E, B x 1 x E -> B x 1, positive scalar
         tau = self.tau_learner(x_raw, std_enc).exp()
         # B x S x E, B x 1 x E -> B x S
@@ -221,7 +222,8 @@ class Nonstationary_Transformer(nn.Module):
         dec_out = self.decoder(
             dec_out, enc_out, x_mask=None, cross_mask=None, tau=tau, delta=delta
         )
-        dec_out = dec_out * std_enc + mean_enc
+        if not getattr(self, "rank_target_mode", False):
+            dec_out = dec_out * std_enc + mean_enc
         return dec_out
 
     def imputation(self, x_enc, x_mark_enc, x_dec, x_mark_dec, mask):

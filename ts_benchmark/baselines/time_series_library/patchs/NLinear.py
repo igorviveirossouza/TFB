@@ -34,6 +34,8 @@ class NLinear(nn.Module):
     def encoder(self, x):
         # x: [Batch, Input length, Channel]
         seq_last = x[:, -1:, :].detach()
+        if getattr(self, "rank_target_mode", False):
+            seq_last = torch.zeros_like(seq_last)
         x = x - seq_last
         if self.individual:
             output = torch.zeros(

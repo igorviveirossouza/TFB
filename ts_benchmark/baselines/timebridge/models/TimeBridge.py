@@ -59,15 +59,16 @@ class Model(nn.Module):
         if x_mark_enc is None:
             x_mark_enc = torch.zeros((*x_enc.shape[:-1], 4), device=x_enc.device)
 
-        mean, std = (x_enc.mean(1, keepdim=True).detach(),
-                     x_enc.std(1, keepdim=True).detach())
-        x_enc = (x_enc - mean) / (std + 1e-5)
+        if not getattr(self, "rank_target_mode", False):
+            mean, std = (x_enc.mean(1, keepdim=True).detach(),
+                         x_enc.std(1, keepdim=True).detach())
+            x_enc = (x_enc - mean) / (std + 1e-5)
 
         x_enc = self.embedding(x_enc, x_mark_enc)
         enc_out = self.encoder(x_enc)[0][:, :self.c_in, ...]
         dec_out = self.decoder(enc_out).transpose(-1, -2)
 
-        return dec_out * std + mean
+        return dec_out if getattr(self, "rank_target_mode", False) else dec_out * std + mean
 
     def forward(self, x_enc, x_mark_enc=None):
         dec_out = self.forecast(x_enc, x_mark_enc)

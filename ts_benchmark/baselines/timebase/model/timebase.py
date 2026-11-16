@@ -97,7 +97,8 @@ class TimeBaseModel(nn.Module):
         )  # (bc, p, n)
 
         # Normalize
-        x, norm_stats = self._normalize_input(x, b, c)
+        if not getattr(self, "rank_target_mode", False):
+            x, norm_stats = self._normalize_input(x, b, c)
 
         # Basis transformation
         if self.individual:
@@ -118,7 +119,8 @@ class TimeBaseModel(nn.Module):
             x = self.basis2ts(x_basis)
 
         # Denormalize
-        x = self._denormalize_output(x, norm_stats, b, c)
+        if not getattr(self, "rank_target_mode", False):
+            x = self._denormalize_output(x, norm_stats, b, c)
 
         # Reshape back
         x = x.reshape(batch_size, self.enc_in, self.period_len, self.seg_num_y).permute(

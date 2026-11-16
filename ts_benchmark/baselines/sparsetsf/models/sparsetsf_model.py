@@ -35,6 +35,8 @@ class SparseTSFMoedl(nn.Module):
         batch_size = x.shape[0]
         # normalization and permute     b,s,c -> b,c,s
         seq_mean = torch.mean(x, dim=1).unsqueeze(1)
+        if getattr(self, "rank_target_mode", False):
+            seq_mean = torch.zeros_like(seq_mean)
         x = (x - seq_mean).permute(0, 2, 1)
 
         # 1D convolution aggregation

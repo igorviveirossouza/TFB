@@ -178,10 +178,11 @@ class TiDE(nn.Module):
 
     def forecast(self, x_enc, x_mark_enc, x_dec, batch_y_mark):
         # Normalization
-        means = x_enc.mean(1, keepdim=True).detach()
-        x_enc = x_enc - means
-        stdev = torch.sqrt(torch.var(x_enc, dim=1, keepdim=True, unbiased=False) + 1e-5)
-        x_enc /= stdev
+        if not getattr(self, "rank_target_mode", False):
+            means = x_enc.mean(1, keepdim=True).detach()
+            x_enc = x_enc - means
+            stdev = torch.sqrt(torch.var(x_enc, dim=1, keepdim=True, unbiased=False) + 1e-5)
+            x_enc /= stdev
 
         feature = self.feature_encoder(batch_y_mark)
         hidden = self.encoders(
@@ -195,8 +196,9 @@ class TiDE(nn.Module):
         ).squeeze(-1) + self.residual_proj(x_enc)
 
         # De-Normalization
-        dec_out = dec_out * (stdev[:, 0].unsqueeze(1).repeat(1, self.pred_len))
-        dec_out = dec_out + (means[:, 0].unsqueeze(1).repeat(1, self.pred_len))
+        if not getattr(self, "rank_target_mode", False):
+            dec_out = dec_out * (stdev[:, 0].unsqueeze(1).repeat(1, self.pred_len))
+            dec_out = dec_out + (means[:, 0].unsqueeze(1).repeat(1, self.pred_len))
         return dec_out
 
     def imputation(self, x_enc, x_mark_enc, x_dec, batch_y_mark, mask):

@@ -63,10 +63,11 @@ class CMoSModel(nn.Module):
         x = x.transpose(-2, -1)
 
         # input size: b, c, seq_len
-        means = x.mean(2, keepdim=True).detach()
-        x = x - means
-        stdev = torch.sqrt(torch.var(x, dim=2, keepdim=True, unbiased=False) + 1e-10)
-        x /= stdev
+        if not getattr(self, "rank_target_mode", False):
+            means = x.mean(2, keepdim=True).detach()
+            x = x - means
+            stdev = torch.sqrt(torch.var(x, dim=2, keepdim=True, unbiased=False) + 1e-10)
+            x /= stdev
 
         conv_outs = [self.ds_convs[i](x[:, i, :].unsqueeze(1)) for i in range(self.c)]
 
@@ -89,8 +90,9 @@ class CMoSModel(nn.Module):
 
         x = torch.einsum("bcns,bcn->bcs", x_out, gates_out)
 
-        x = x * stdev
-        x = x + means
+        if not getattr(self, "rank_target_mode", False):
+            x = x * stdev
+            x = x + means
 
         x = x.transpose(-2, -1)
 

@@ -169,14 +169,15 @@ class FiLM(nn.Module):
 
     def forecast(self, x_enc, x_mark_enc, x_dec_true, x_mark_dec):
         # Normalization from Non-stationary Transformer
-        means = x_enc.mean(1, keepdim=True).detach()
-        x_enc = x_enc - means
-        stdev = torch.sqrt(
-            torch.var(x_enc, dim=1, keepdim=True, unbiased=False) + 1e-5
-        ).detach()
-        x_enc /= stdev
+        if not getattr(self, "rank_target_mode", False):
+            means = x_enc.mean(1, keepdim=True).detach()
+            x_enc = x_enc - means
+            stdev = torch.sqrt(
+                torch.var(x_enc, dim=1, keepdim=True, unbiased=False) + 1e-5
+            ).detach()
+            x_enc /= stdev
 
-        x_enc = x_enc * self.affine_weight + self.affine_bias
+            x_enc = x_enc * self.affine_weight + self.affine_bias
         x_decs = []
         jump_dist = 0
         for i in range(0, len(self.multiscale) * len(self.window_size)):
@@ -197,10 +198,11 @@ class FiLM(nn.Module):
         x_dec = self.mlp(x_dec).squeeze(-1).permute(0, 2, 1)
 
         # De-Normalization from Non-stationary Transformer
-        x_dec = x_dec - self.affine_bias
-        x_dec = x_dec / (self.affine_weight + 1e-10)
-        x_dec = x_dec * stdev
-        x_dec = x_dec + means
+        if not getattr(self, "rank_target_mode", False):
+            x_dec = x_dec - self.affine_bias
+            x_dec = x_dec / (self.affine_weight + 1e-10)
+            x_dec = x_dec * stdev
+            x_dec = x_dec + means
         return x_dec
 
     def imputation(self, x_enc, x_mark_enc, x_dec, x_mark_dec, mask):

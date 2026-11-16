@@ -84,12 +84,13 @@ class TimePerceiverModel(nn.Module):
 
     def forward(self, inputs, indices=None, mask=None):
         # RevIN
-        means = inputs.mean(1, keepdim=True).detach()
-        inputs = inputs - means
-        stdev = torch.sqrt(
-            torch.var(inputs, dim=1, keepdim=True, unbiased=False) + 1e-5
-        )
-        inputs /= stdev
+        if not getattr(self, "rank_target_mode", False):
+            means = inputs.mean(1, keepdim=True).detach()
+            inputs = inputs - means
+            stdev = torch.sqrt(
+                torch.var(inputs, dim=1, keepdim=True, unbiased=False) + 1e-5
+            )
+            inputs /= stdev
 
         # Patching (B, S, C) -> (B, C, P_N, D)
         inputs = inputs.transpose(1, 2)
@@ -153,8 +154,9 @@ class TimePerceiverModel(nn.Module):
             outputs.view(batch_size, in_channels, -1).contiguous().permute(0, 2, 1)
         )  # (B, S, C)
 
-        outputs = outputs * (stdev[:, 0, :].unsqueeze(1).repeat(1, self.pred_len, 1))
-        outputs = outputs + (means[:, 0, :].unsqueeze(1).repeat(1, self.pred_len, 1))
+        if not getattr(self, "rank_target_mode", False):
+            outputs = outputs * (stdev[:, 0, :].unsqueeze(1).repeat(1, self.pred_len, 1))
+            outputs = outputs + (means[:, 0, :].unsqueeze(1).repeat(1, self.pred_len, 1))
         return outputs
 
 

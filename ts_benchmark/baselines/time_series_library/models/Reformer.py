@@ -76,12 +76,13 @@ class Reformer(nn.Module):
 
     def short_forecast(self, x_enc, x_mark_enc, x_dec, x_mark_dec):
         # Normalization
-        mean_enc = x_enc.mean(1, keepdim=True).detach()  # B x 1 x E
-        x_enc = x_enc - mean_enc
-        std_enc = torch.sqrt(
-            torch.var(x_enc, dim=1, keepdim=True, unbiased=False) + 1e-5
-        ).detach()  # B x 1 x E
-        x_enc = x_enc / std_enc
+        if not getattr(self, "rank_target_mode", False):
+            mean_enc = x_enc.mean(1, keepdim=True).detach()  # B x 1 x E
+            x_enc = x_enc - mean_enc
+            std_enc = torch.sqrt(
+                torch.var(x_enc, dim=1, keepdim=True, unbiased=False) + 1e-5
+            ).detach()  # B x 1 x E
+            x_enc = x_enc / std_enc
 
         # add placeholder
         x_enc = torch.cat([x_enc, x_dec[:, -self.pred_len :, :]], dim=1)
@@ -94,7 +95,8 @@ class Reformer(nn.Module):
         enc_out, attns = self.encoder(enc_out, attn_mask=None)
         dec_out = self.projection(enc_out)
 
-        dec_out = dec_out * std_enc + mean_enc
+        if not getattr(self, "rank_target_mode", False):
+            dec_out = dec_out * std_enc + mean_enc
         return dec_out  # [B, L, D]
 
     def imputation(self, x_enc, x_mark_enc):

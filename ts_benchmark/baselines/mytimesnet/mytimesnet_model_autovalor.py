@@ -249,15 +249,16 @@ class MyTimesNet(nn.Module):
 
     def forecast(self, x_enc, x_mark_enc, x_dec, x_mark_dec):
 
-        means = x_enc.mean(1, keepdim=True).detach()
+        if not getattr(self, "rank_target_mode", False):
+            means = x_enc.mean(1, keepdim=True).detach()
 
-        x_enc = x_enc - means
+            x_enc = x_enc - means
 
-        stdev = torch.sqrt(
-            torch.var(x_enc, dim=1, keepdim=True, unbiased=False) + 1e-5
-        )
+            stdev = torch.sqrt(
+                torch.var(x_enc, dim=1, keepdim=True, unbiased=False) + 1e-5
+            )
 
-        x_enc /= stdev
+            x_enc /= stdev
 
         enc_out = self.enc_embedding(x_enc, x_mark_enc)
 
@@ -270,17 +271,18 @@ class MyTimesNet(nn.Module):
 
         dec_out = self.projection(enc_out)
 
-        dec_out = dec_out * (
-            stdev[:, 0, :].unsqueeze(1).repeat(
-                1, self.pred_len + self.seq_len, 1
+        if not getattr(self, "rank_target_mode", False):
+            dec_out = dec_out * (
+                stdev[:, 0, :].unsqueeze(1).repeat(
+                    1, self.pred_len + self.seq_len, 1
+                )
             )
-        )
 
-        dec_out = dec_out + (
-            means[:, 0, :].unsqueeze(1).repeat(
-                1, self.pred_len + self.seq_len, 1
+            dec_out = dec_out + (
+                means[:, 0, :].unsqueeze(1).repeat(
+                    1, self.pred_len + self.seq_len, 1
+                )
             )
-        )
 
         if torch.isnan(dec_out).any():
             print("WARNING: NaN detected in model output")

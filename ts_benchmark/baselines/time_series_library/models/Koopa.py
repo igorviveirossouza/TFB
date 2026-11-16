@@ -379,12 +379,13 @@ class Koopa(nn.Module):
 
     def forecast(self, x_enc):
         # Series Stationarization adopted from NSformer
-        mean_enc = x_enc.mean(1, keepdim=True).detach()  # B x 1 x E
-        x_enc = x_enc - mean_enc
-        std_enc = torch.sqrt(
-            torch.var(x_enc, dim=1, keepdim=True, unbiased=False) + 1e-5
-        ).detach()
-        x_enc = x_enc / std_enc
+        if not getattr(self, "rank_target_mode", False):
+            mean_enc = x_enc.mean(1, keepdim=True).detach()  # B x 1 x E
+            x_enc = x_enc - mean_enc
+            std_enc = torch.sqrt(
+                torch.var(x_enc, dim=1, keepdim=True, unbiased=False) + 1e-5
+            ).detach()
+            x_enc = x_enc / std_enc
 
         # Koopman Forecasting
         residual, forecast = x_enc, None
@@ -399,7 +400,7 @@ class Koopa(nn.Module):
                 forecast += time_inv_output + time_var_output
 
         # Series Stationarization adopted from NSformer
-        res = forecast * std_enc + mean_enc
+        res = forecast if getattr(self, "rank_target_mode", False) else forecast * std_enc + mean_enc
 
         return res
 

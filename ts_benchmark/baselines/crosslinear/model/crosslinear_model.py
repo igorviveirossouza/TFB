@@ -79,12 +79,13 @@ class CrossLinearModel(nn.Module):
     def forecast(self, x_enc):
         x_enc = x_enc.permute(0, 2, 1)
         # normalization
-        x_obj = x_enc[:, [-1], :] if self.ms else x_enc
-        mean = torch.mean(x_obj, dim=-1, keepdim=True)
-        std = torch.std(x_obj, dim=-1, keepdim=True)
-        x_enc = (x_enc - torch.mean(x_enc, dim=-1, keepdim=True)) / (
-            torch.std(x_enc, dim=-1, keepdim=True) + self.EPS
-        )
+        if not getattr(self, "rank_target_mode", False):
+            x_obj = x_enc[:, [-1], :] if self.ms else x_enc
+            mean = torch.mean(x_obj, dim=-1, keepdim=True)
+            std = torch.std(x_obj, dim=-1, keepdim=True)
+            x_enc = (x_enc - torch.mean(x_enc, dim=-1, keepdim=True)) / (
+                torch.std(x_enc, dim=-1, keepdim=True) + self.EPS
+            )
         # embedding
         x_obj = x_enc[:, [-1], :] if self.ms else x_enc
         x_obj = self.alpha * x_obj + (1 - self.alpha) * self.correlation_embedding(
@@ -97,7 +98,8 @@ class CrossLinearModel(nn.Module):
         # head
         y_out = self.head(x_obj)
         # de-normalization
-        y_out = y_out * std + mean
+        if not getattr(self, "rank_target_mode", False):
+            y_out = y_out * std + mean
         y_out = y_out.permute(0, 2, 1)
         return y_out
 

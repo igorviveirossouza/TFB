@@ -65,6 +65,8 @@ class SegRNN(nn.Module):
 
         # normalization and permute     b,s,c -> b,c,s
         seq_last = x[:, -1:, :].detach()
+        if getattr(self, "rank_target_mode", False):
+            seq_last = torch.zeros_like(seq_last)
         x = (x - seq_last).permute(0, 2, 1)  # b,c,s
 
         # segment and embedding    b,c,s -> bc,n,w -> bc,n,d

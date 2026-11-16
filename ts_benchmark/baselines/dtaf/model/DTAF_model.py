@@ -149,7 +149,8 @@ class DTAF(nn.Module):
         B, L, D = x_enc.size()
 
         # Instance Norm
-        x_enc, means, stdev = self._get_mean_std(x_enc)
+        if not getattr(self, "rank_target_mode", False):
+            x_enc, means, stdev = self._get_mean_std(x_enc)
 
         # Patch & Embedding
         enc_out, _ = self.patch_embedding(x_enc.transpose(1, 2))
@@ -188,7 +189,8 @@ class DTAF(nn.Module):
         enc_out = enc_out.permute(0, 1, 3, 2)
         out = self.predictor(enc_out)
         out = out.permute(0, 2, 1)
-        out = out * (stdev[:, 0, :].unsqueeze(1).repeat(1, self.config.pred_len, 1))
-        out = out + (means[:, 0, :].unsqueeze(1).repeat(1, self.config.pred_len, 1))
+        if not getattr(self, "rank_target_mode", False):
+            out = out * (stdev[:, 0, :].unsqueeze(1).repeat(1, self.config.pred_len, 1))
+            out = out + (means[:, 0, :].unsqueeze(1).repeat(1, self.config.pred_len, 1))
 
         return out, stables
