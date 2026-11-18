@@ -97,7 +97,7 @@ def test_tsmixer_present_on_disk_resolves_without_changing_legacy_registry():
 
 def test_read_only_plan_and_shell(tmp_path):
     s = settings(tmp_path)
-    env = dict(__import__('os').environ, **s)
+    env = dict(__import__('os').environ, **s, SLURM_JOB_ID='123', SLURMD_NODENAME='test-compute')
     result = subprocess.run(['bash', 'scripts/run_rank_target_experiment.sh', '--trainplan'],
                             cwd=rank.ROOT, env=env, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr

@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Isolated rank-target experiments; legacy launchers and datasets stay intact.
 
-Plans require only the standard library. A prepared design freezes its inputs,
-configuration and code hashes under its own prediction root. Workers never read
-configuration from the submitting shell and refuse a changed checkout.
+The CLI runs only on Slurm compute nodes, including plans and preparation.
+A prepared design freezes its inputs, configuration and code hashes under its
+own prediction root. Workers never read configuration from the submitting shell
+and refuse a changed checkout.
 """
 from __future__ import annotations
 
@@ -463,6 +464,11 @@ def submit(s, branches):
 
 
 def main(argv=None):
+    if (not os.environ.get('SLURM_JOB_ID') or not os.environ.get('SLURMD_NODENAME')
+            or socket.gethostname().split('.')[0].lower() == 'phocus4'):
+        print('ERRO: processamento permitido somente em no de computacao Slurm. '
+              'Use bash scripts/run_rank_target_experiment.sh para despachar via srun.', file=sys.stderr)
+        raise SystemExit(2)
     parser = argparse.ArgumentParser(description=__doc__)
     action = parser.add_mutually_exclusive_group()
     action.add_argument('--plan', '--trainplan', action='store_true')

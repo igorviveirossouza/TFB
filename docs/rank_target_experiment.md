@@ -4,6 +4,33 @@ Este experimento usa `scripts/run_rank_target_experiment.sh`. Os launchers
 temporais, compostos e ordinais anteriores continuam com seus contratos de
 entrada, saída e normalização. Não reutilize o mesmo `PRED_ROOT` entre desenhos.
 
+## Execução exclusivamente nos nós de computação
+
+Na phocus4, o launcher executa apenas o despacho via `srun`, antes de ativar
+o ambiente Python. Planos, leitura de CSV, validação de modelos, preparação,
+hashes, treinamento e previsão executam nos nós de computação. Sem Slurm,
+o comando falha: não existe fallback de processamento local.
+
+`--train` aguarda um nó para preparar os dados e submeter os arrays com
+`sbatch`; depois retorna ao terminal, enquanto os treinos seguem nos arrays.
+`--trainplan`, `--dry-run`, `--print-config`, `--submission-status` e
+`--prepare` também aguardam um nó e mostram a saída no terminal. A sessão
+precisa permanecer aberta até o despacho/preparo terminar.
+
+O despacho usa `NS_PARTITION`, `NS_NODELIST`, `NS_TIME_LIMIT`,
+`NS_CPUS_PER_TASK` e `NS_MEMORY`, sem reservar GPU para planos ou preparação.
+Os arrays continuam usando `NS_GRES`, `NS_MAX_CONCURRENT_JOBS` e
+`NS_ARRAY_CHUNK_SIZE`. `--local` significa treinar a grade no processo do
+nó alocado pelo `srun`, respeitando `NS_GRES`; nunca na phocus4. Se já houver
+uma alocação `salloc`, o launcher abre um passo nessa alocação.
+
+Chamadas diretas à CLI Python fora de um nó Slurm são recusadas. Os launchers
+dos experimentos anteriores não são alterados por esta mudança.
+
+Desenhos já preparados verificam os hashes do código. Preserve o checkout
+anterior enquanto houver jobs pendentes ou em execução nele; use uma nova
+`EXPERIMENT_TAG` e novos destinos para executar este launcher atualizado.
+
 ## Dados e sentido da previsão
 
 A fonte continua sendo o painel balanceado de **log-retornos originais**. A
@@ -96,8 +123,9 @@ não devem alimentar diretamente um backtest que espere retornos previstos.
 
 ## Exemplo editável no terminal
 
-Execute dentro do repositório TFB. Este exemplo apenas imprime o plano; a
-última linha pode ser trocada por `--train` para submeter ao Slurm.
+Execute dentro do repositório TFB. Este exemplo imprime o plano em um nó
+alocado via `srun`; a última linha pode ser trocada por `--train` para preparar
+e submeter os arrays a partir desse nó.
 
 ```bash
 export EXPERIMENT_TAG="rank_targets/rank_ordinal_t90_v1"
@@ -170,7 +198,8 @@ bash scripts/run_rank_target_experiment.sh --trainplan
 ```
 
 Mudar `EXPERIMENT_TAG` não atualiza automaticamente variáveis de caminhos já
-exportadas no shell. O plano imprime os destinos efetivos e não submete jobs.
+exportadas no shell. O plano imprime os destinos efetivos em uma alocação
+Slurm, sem submeter arrays de treinamento.
 Use `--dry-run` para inspecionar os comandos Slurm e `--submission-status`
 para consultar os IDs registrados. `NS_ARRAY_CHUNK_SIZE` controla tarefas
 por array; `NS_MAX_CONCURRENT_JOBS` controla quantas podem executar juntas.
